@@ -49,7 +49,24 @@ grep self-test result + the cross-reference/markdown review.>
      - `documentation reviewed` is legal ONLY when the whole diff is documentation
        (`*.md` / comment-only / all-doc submodule bump).
      - `syntax check only` / `theoretical suggestion` must NOT ship.
-     The commit carries the matching `Assisted-by: Claude (<tier>)` trailer. -->
+     AI-authored commits carry one matching
+     `Assisted-by: <Harness> (<Provider Full Model Name>; <tier>)` trailer per materially
+     authoring harness/model pair. A 100% human-authored commit carries none. -->
+
+## AI authorship and model disclosure
+
+<!-- Set ONE: `AI-authored content: yes` or `AI-authored content: none`.
+     `none` means 100% human-authored content and MUST NOT add an AI trailer.
+     Review-only AI is still listed below with disclosure `PR-only`; it does not
+     retroactively make a human-authored commit AI-authored. Use the most specific
+     FULL model identity verified from the runtime; never shorten a known
+     variant to its family name or guess a hidden model slug. -->
+
+**AI-authored content:** <!-- yes | none -->
+
+| Role | Harness | Provider model | Confidence | Contribution scope | Disclosure |
+|---|---|---|---|---|---|
+| <!-- author or validator --> | <!-- e.g. Codex --> | <!-- e.g. OpenAI GPT-5.6 Sol --> | <!-- tier --> | <!-- authored/reviewed what --> | <!-- commit + PR | PR-only --> |
 
 ## CLAUDE.md rule compliance — state HOW each is satisfied (or `N/A — <reason>`)
 
@@ -76,4 +93,7 @@ grep self-test result + the cross-reference/markdown review.>
 
 ---
 
-*Assisted-by: Claude (&lt;tier&gt;)*
+<!-- AI-authored content only: repeat once per unique materially authoring pair.
+*Assisted-by: &lt;Harness&gt; (&lt;Provider Full Model Name&gt;; &lt;tier&gt;)*
+
+For `AI-authored content: none`, omit the footer entirely. -->

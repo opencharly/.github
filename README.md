@@ -10,8 +10,10 @@ copy inherits the files here — so a change lands **once**, not in every repo.
   the exact evidence the fresh `pr-validator` agent needs to verify CLAUDE.md
   compliance: the change-class R10 gate + pasted output, the `disposable: true`
   target, whether the changed code path ran live (which caps the attribution
-  tier), the concurrent-roster evidence for shared-state changes, and a full
-  R0–R10 + pillars "state HOW / N/A" checklist.
+  tier), the concurrent-roster evidence for shared-state changes, a model-aware
+  authorship/validation table, and a full R0–R10 + pillars "state HOW / N/A"
+  checklist. Review-only AI is PR disclosure; a 100% human-authored commit is
+  accepted without an AI trailer.
 
 Future org-wide defaults (issue templates, `CONTRIBUTING.md`, `SECURITY.md`,
 reusable CI workflows via `uses: opencharly/.github/.github/workflows/…@main`)
