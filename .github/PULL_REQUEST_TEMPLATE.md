@@ -50,11 +50,11 @@ grep self-test result + the cross-reference/markdown review.>
        (`*.md` / comment-only / all-doc submodule bump).
      - `syntax check only` / `theoretical suggestion` must NOT ship.
      An AI-authored commit carries the matching
-     `Assisted-by: <Harness> (<Provider Full Model Name>; <tier>)` trailer, for example
-     `Assisted-by: Codex (OpenAI GPT-5.6 Sol; documentation reviewed)`. A 100% human-authored
+     `Assisted-by: <Harness> <Provider Full Model Name> (<tier>)` trailer, for example
+     `Assisted-by: Codex OpenAI GPT-5.6 Sol (documentation reviewed)`. A 100% human-authored
      commit carries no `Assisted-by:` trailer. -->
 
-## CLAUDE.md rule compliance — state HOW each is satisfied (or `N/A — <reason>`)
+## Harness rulebook compliance — state HOW each is satisfied (or `N/A — <reason>`)
 
 <!-- One line of EVIDENCE per rule (what you did / where to look), not a bare tick.
      These mirror the pr-validator's checklist; an unanswered applicable rule FAILS. -->
@@ -79,5 +79,5 @@ grep self-test result + the cross-reference/markdown review.>
 
 ---
 
-*Assisted-by: &lt;Harness&gt; (&lt;Provider Full Model Name&gt;; &lt;tier&gt;)*
+*Assisted-by: &lt;Harness&gt; &lt;Provider Full Model Name&gt; (&lt;tier&gt;)*
 <!-- For a 100% human-authored PR, omit the Assisted-by line. -->
