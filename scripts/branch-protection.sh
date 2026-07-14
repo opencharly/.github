@@ -51,7 +51,7 @@ if [[ "$mode" == apply ]]; then
   for repo in "${repos[@]}"; do
     IFS=$'\t' read -r _ _ context <<<"${current[$repo]}"
     if [[ "$context" == "$OLD_CONTEXT" ]]; then
-      gh api --method PUT \
+      gh api --method PATCH \
         "repos/$ORG/$repo/branches/main/protection/required_status_checks" \
         -F strict=true -f "contexts[]=$NEW_CONTEXT" >/dev/null
       echo "$repo: $OLD_CONTEXT -> $NEW_CONTEXT"
