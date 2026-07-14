@@ -1,6 +1,6 @@
 <!--
 OpenCharly PR template. `main` advances ONLY through this PR + a green
-charly/claude-validation status posted by the fresh pr-validator agent, which
+charly/pr-validator status posted by the fresh pr-validator agent, which
 merges it. FILL EVERY SECTION with EVIDENCE, not promises — the pr-validator
 FAILS a body that leaves any applicable section blank, answers a rule with a
 bare checkbox instead of HOW it was satisfied, or pastes no R10 output. Mark a
