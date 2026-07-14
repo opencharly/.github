@@ -12,6 +12,10 @@ copy inherits the files here — so a change lands **once**, not in every repo.
   target, whether the changed code path ran live (which caps the attribution
   tier), the concurrent-roster evidence for shared-state changes, and a full
   R0–R10 + pillars "state HOW / N/A" checklist.
+- **`scripts/branch-protection.sh`** — the single organization-wide owner of the
+  required PR-validator status. It discovers every active, non-fork repository
+  through GitHub, replaces the required context in one batch, and verifies the
+  resulting protection without maintaining per-repository copies or lists.
 
 Future org-wide defaults (issue templates, `CONTRIBUTING.md`, `SECURITY.md`,
 reusable CI workflows via `uses: opencharly/.github/.github/workflows/…@main`)
@@ -19,7 +23,7 @@ belong here too — one source, inherited everywhere.
 
 ## Authority vs. convenience
 
-The **authority** for what a PR must contain is CLAUDE.md + the
+The **authority** for what a PR must contain is the active harness root rulebook + the
 `/charly-internals:git-workflow` and `pr-validator` skills (the 0–18 checklist).
 This template is the GitHub-UI mirror of that — it does not restate the rules,
 it prompts the author to supply the evidence for them.
