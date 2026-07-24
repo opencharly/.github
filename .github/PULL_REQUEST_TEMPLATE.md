@@ -50,8 +50,8 @@ grep self-test result + the cross-reference/markdown review.>
        (`*.md` / comment-only / all-doc submodule bump).
      - `syntax check only` / `theoretical suggestion` must NOT ship.
      An AI-authored commit carries the matching
-     `Assisted-by: <Harness> <Provider Full Model Name> (<tier>)` trailer, for example
-     `Assisted-by: Codex OpenAI GPT-5.6 Sol (documentation reviewed)`. A 100% human-authored
+     `Assisted-by: <Harness> (<Provider Full Model Name>; <confidence>)` trailer, replacing
+     each placeholder with the authoring runtime's exact identity. A 100% human-authored
      commit carries no `Assisted-by:` trailer. -->
 
 ## Harness rulebook compliance — state HOW each is satisfied (or `N/A — <reason>`)
@@ -79,5 +79,5 @@ grep self-test result + the cross-reference/markdown review.>
 
 ---
 
-*Assisted-by: &lt;Harness&gt; &lt;Provider Full Model Name&gt; (&lt;tier&gt;)*
+*Assisted-by: &lt;Harness&gt; (&lt;Provider Full Model Name&gt;; &lt;confidence&gt;)*
 <!-- For a 100% human-authored PR, omit the Assisted-by line. -->
