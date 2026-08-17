@@ -81,12 +81,12 @@ FAILS** — applicable or not, an empty block is never a valid answer.
 - **R2 no out-of-scope:** <!-- every issue surfaced during this cutover fixed here (blocking) or spun as its own immediate-next cutover — none parked as "pre-existing/follow-up" -->
 - **R3 no duplication:** <!-- any repeated pattern unified into one shared abstraction; no `<name>-host`/`<name>-pod` siblings -->
 - **R4 no workaround:** <!-- no sleep/retry/magic-number/env-shim; a race fixed with a sync primitive; no ad-hoc podman/docker/virsh/systemctl against charly resources -->
-- **R5 hard cutover + grep:** <!-- paste/confirm `git grep '<removed-id>'` (and every false claim swept) returns only CHANGELOG context; NO transitional/dual-mode/legacy path in the FINAL code -->
+- **R5 hard cutover + grep:** <!-- paste/confirm `git grep '<removed-id>'` (and every false claim swept) returns only CHANGELOG context; NO transitional/dual-mode/legacy path in the FINAL code  — or `N/A — purely additive, no identifier removed or renamed` (the false-claim sweep half still applies and should say so) -->
 - **R6 git safety:** <!-- any destructive git action was preceded by a status/stash check — or N/A -->
 - **R7 runtime gate:** <!-- a runtime-affecting change ran the end-to-end bed gate, not just `go test` — or N/A -->
 - **R8 artifact invariants:** <!-- a generation change asserted the emitted Containerfile sections + `ai.opencharly.*` labels post-build — or N/A -->
 - **R9 binary == source + deps:** <!-- deployed binary rebuilt + `charly version` matches; new runtime OS deps in the charly candy's `packaging:` section (`candy/charly/charly.yml`) — or N/A -->
-- **R10 disposable + coverage:** <!-- proven on `disposable: true` only, fresh rebuild, zero warnings; ships the check/test coverage that would FAIL without this change -->
+- **R10 disposable + coverage:** <!-- proven on `disposable: true` only, fresh rebuild, zero warnings; ships the check/test coverage that would FAIL without this change  For a DOCS-ONLY change this branches, per CLAUDE.md R10: the non-runtime standards and NO bed — say so, and do not invent a runtime-shaped answer to fill a runtime-shaped demand. -->
 - **RDD / ADE / SDD:** <!-- RDD: high-risk assumptions (esp. composition-at-latest-versions) bed-proven, not doc-read. ADE: every new/changed candy has `description:` + `plan:` with ≥1 deterministic `check:` (`charly box validate` passes). SDD: a schema/`.cue` edit regenerated its `*_gen.go` and `task cue:gen` is a no-op — or N/A -->
 - **Hard cutover:** <!-- ONE atomic commit per repo; no "Phase 2/TODO/deferred" left in scope; an approved plan executed as written -->
 - **Kernel/plugin boundary law:** <!-- a core/`sdk` change is only a generic Envelope/Mechanism/Bootstrap-root/kind-Data — no concrete-kind schema/switch/per-kind-map leaked into the kernel; a new capability is a plugin — or N/A -->
@@ -129,6 +129,9 @@ without opening five skills first. These DEFINE terms; they do not relax any rul
   projection     A GENERATED artifact — `plugins/**/SKILL.md` and
                  `docs/src/content/docs/{reference,recipes}/**` — produced from a candy
                  source. Never hand-edit one; fix the candy and regenerate. A projection
-                 merges BEFORE the source that pins it. NOT projections, and hand-authored:
+                 merges BEFORE the source that pins it. Also generated, but from the ROOT
+                 documents rather than a candy: `docs/src/content/docs/{index,vision,
+                 grievances,liberation}.md` — projected from `README.md` / `VISION.md` /
+                 `GRIEVANCES.md`; fix the root document. NOT projections, and hand-authored:
                  `docs/src/content/docs/{start,concepts,guides}/**` — edit those directly.
 -->
