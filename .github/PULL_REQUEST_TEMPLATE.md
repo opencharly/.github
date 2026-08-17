@@ -37,8 +37,9 @@ CHANGELOG/<CalVer>.md; the pr-validator finalizes the merge-time version.
 - **Did the CHANGED code path execute live?** <!-- yes → the changed runner/branch ran, output below. If ONLY the success path ran (the new error/edge branch did not execute), say so — it caps the tier at `analysed on a live system`. A `--dry-run`, a bare `go test`, a rebuild WITHOUT running the changed piece, or "will test later" is NOT the gate. `N/A (docs-only)` with the reason if the diff changes no code path. -->
 - **Concurrency (shared-state changes only):** <!-- if this touches the loader/discover walk, deploy ledger, podman store, resource arbiter, VM/pod lifecycle, or a build lock: paste the CONCURRENT roster run (all beds at once, /verify-beds). "It passes on an idle/serial run" is NOT proof and is a FAIL. Every failure the roster surfaced is answered with its ROOT mechanism + fix, never "flake/environmental/load". Else `N/A`. -->
 
-**Evidence — paste into the block its label names. Delete a block only with `N/A — <reason>`;
-an applicable block left empty FAILS.**
+**Evidence — put each item in the block whose label names it.** A block that does not apply to this
+change class: replace its contents with `N/A — <reason>`, and keep the block. **Any block left empty
+FAILS** — applicable or not, an empty block is never a valid answer.
 
 *1. Fresh-rebuild gate output* (`charly version` + the gate run, at zero warnings):
 ```
@@ -91,7 +92,7 @@ an applicable block left empty FAILS.**
 - **Kernel/plugin boundary law:** <!-- a core/`sdk` change is only a generic Envelope/Mechanism/Bootstrap-root/kind-Data — no concrete-kind schema/switch/per-kind-map leaked into the kernel; a new capability is a plugin — or N/A -->
 - **Disposable-only autonomy:** <!-- any autonomous destroy/rebuild was on a `disposable: true` target — or N/A -->
 - **Clean architecture + Go gates:** <!-- cleanest approach, deprecated code fully removed; for Go: `gofmt -l .` empty, `golangci-lint run ./...` = 0 issues, `go vet` clean, `go test ./...` green — or N/A -->
-- **CHANGELOG:** <!-- `CHANGELOG/<CalVer>.md` staged (placeholder CalVer — the pr-validator finalizes it) -->
+- **CHANGELOG:** <!-- `CHANGELOG/<CalVer>.md` staged (placeholder CalVer — the pr-validator finalizes it)  — or `N/A — <reason>` if this repo keeps no `CHANGELOG/` (verify with `GET /contents/CHANGELOG`; do not assume) -->
 
 ---
 
@@ -125,7 +126,9 @@ without opening five skills first. These DEFINE terms; they do not relax any rul
                  and a `plan:` with at least one deterministic `check:` step.
   SDD            Schema Driven Design — the CUE schema comes first; schema-shaped Go is
                  GENERATED (`task cue:gen`), never hand-written. Drift is an incident.
-  projection     A GENERATED artifact (`plugins/**/SKILL.md`, `docs/src/content/docs/**`)
-                 produced from a candy source. Never hand-edit one; fix the candy and
-                 regenerate. A projection merges BEFORE the source that pins it.
+  projection     A GENERATED artifact — `plugins/**/SKILL.md` and
+                 `docs/src/content/docs/{reference,recipes}/**` — produced from a candy
+                 source. Never hand-edit one; fix the candy and regenerate. A projection
+                 merges BEFORE the source that pins it. NOT projections, and hand-authored:
+                 `docs/src/content/docs/{start,concepts,guides}/**` — edit those directly.
 -->
