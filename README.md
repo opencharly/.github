@@ -7,48 +7,63 @@ copy inherits the files here — so a change lands **once**, not in every repo.
 ## What lives here
 
 - **`.github/PULL_REQUEST_TEMPLATE.md`** — the OpenCharly PR template. It elicits
-  the exact evidence the fresh `pr-validator` agent needs to verify CLAUDE.md
-  compliance: the change-class R10 gate + pasted output, the `disposable: true`
-  target, whether the changed code path ran live (which caps the attribution
-  tier), the concurrent-roster evidence for shared-state changes, and a full
-  R0–R10 + pillars "state HOW / N/A" checklist.
+  the exact evidence the fresh `pr-validator` validator needs: the change-class
+  R10 gate + pasted output, whether the changed code path ran live (which caps
+  the attribution tier), and a full R0–R10 + pillars "state HOW / N/A" checklist.
 - **`scripts/branch-protection.sh`** — the single organization-wide owner of the
-  required PR-validator status. It discovers every active, non-fork repository
-  through GitHub, replaces the required context in one batch, and verifies the
+  required `charly/pr-validator` check. It discovers every active, non-fork
+  repository, replaces the required context in one batch, and verifies the
   resulting protection without maintaining per-repository copies or lists.
 - **`.github/workflows/pr-validator.yml`** — the org-wide `charly/pr-validator` gate.
-  Supersedes the prior agent-posted `charly/pr-validator` commit status. It runs the pi
-  coding agent as a fresh, independent PR validator and posts a PR comment with the result. It
-  is a **reusable workflow** (`on: workflow_call`) in addition to self-gating this `.github`
-  repo (`on: pull_request`): any org repo inherits the SAME gate with an one-file dispatcher
-  (`.github/workflows/pr-validator.yml` → `uses: opencharly/.github/.github/workflows/pr-validator.yml@main`,
-  `secrets: inherit`). This is how it runs on sibling repos — the cut-over installs that
-  dispatcher into `opencharly/plugins` (#213) and `opencharly/charly` (#349), so there is
-  never a dual writer to the branch-protection-required `charly/pr-validator` context.
-  Landing order: **this reusable gate PR first** (so `@main` carries it), then the two
-  dispatcher cut-over PRs (plugins #213 → charly #349). Always posts
-  a PR comment with the validation result, and gates the check (named `charly/pr-validator`,
-  satisfying branch protection) on the returned `Verdict: PASS|BLOCK`. Fully generic —
-  no credential, model choice, or provider endpoint is hardcoded; the LLM provider is
-  configured at runtime from the GitHub environment (see below).
-  The merge/tag disposer (`auto-merge.yml`) lands in the immediately-following PR and is
-  installed + validated **by this very gate** (dogfooding), so the gate first proves
-  itself on the gate-only install before it is given autonomous merge authority.
+  A **reusable workflow** (`on: workflow_call`) that also self-gates this `.github`
+  repo (`on: pull_request`). It runs the pi coding agent as a fresh, independent PR
+  validator, always posts a single PR comment, and sets the required
+  `charly/pr-validator` check from a deterministic `Verdict: PASS|BLOCK`
+  (PASS → exit 0, BLOCK → exit 1, no/mixed verdict → exit 2).
+- **`org-wide-pr-validator-dispatcher.yml`** — the one-file installer any org repo
+  drops in as `.github/workflows/pr-validator.yml` to inherit the same gate via
+  `uses: opencharly/.github/.github/workflows/pr-validator.yml@main` (see below).
 
 Future org-wide defaults (issue templates, `CONTRIBUTING.md`, `SECURITY.md`) belong
-here too — one source, inherited everywhere. The reusable `charly/pr-validator` gate
-(`uses: opencharly/.github/.github/workflows/pr-validator.yml@main`) is the first org-wide
-**reusable workflow** shipped this way; the organizer template is
-`org-wide-pr-validator-dispatcher.yml` at the repo root.
+here too — one source, inherited everywhere.
 
-## The `charly/pr-validator` workflow — required org-level configuration
+## How the gate is installed in an org repo
 
-`.github/workflows/pr-validator.yml` runs on every non-fork pull request in the
-org. Its job is named `charly/pr-validator`, so its check run satisfies the
-branch-protection required context of that name. It is fully generic: nothing is
-hardcoded. Set these as **org-level** variables and secrets (Settings → Secrets
-and variables → Actions → New repository secret / New variable, at the org
-level, with **visibility: all** so every repo inherits them):
+The gate is a **single source** in this repo; sibling repos never copy the
+validator logic. A repo opts in by installing the one-file dispatcher:
+`.github/workflows/pr-validator.yml` containing
+
+```yaml
+name: charly/pr-validator
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+jobs:
+  pr-validator:
+    name: charly/pr-validator
+    if: github.event.pull_request.head.repo.fork == false
+    uses: opencharly/.github/.github/workflows/pr-validator.yml@main
+    secrets: inherit
+```
+
+(`org-wide-pr-validator-dispatcher.yml` is the exact template.) The repo's
+branch protection then requires the `charly/pr-validator` check context. The
+workflow's job is named `charly/pr-validator`, so the check run satisfies it —
+the workflow is the canonical single writer of that context, and branch
+protection enforces it. Companion repos (`plugins`, `charly`) install the
+dispatcher in their cut-over PRs.
+
+## Required org-level configuration
+
+Nothing is hardcoded and no credential is committed. The workflow reads
+provider/model/endpoint/key from the GitHub environment and passes them to the
+pi action's native `provider` / `model` / `base_url` / `token` inputs. Set these
+as **org-level** variables/secret (Settings → Secrets and variables → Actions →
+New repository secret / New variable, org level, **visibility: all**):
 
 | Name | Kind | Default | Purpose |
 |---|---|---|---|
@@ -57,79 +72,34 @@ level, with **visibility: all** so every repo inherits them):
 | `AI_REVIEW_MODEL` | variable | `~deepseek/deepseek-v4-flash-latest` | Exact model ID in the provider's catalog |
 | `AI_REVIEW_API_KEY` | secret | — | Provider API key (never committed) |
 
-The workflow passes these straight to the pi coding agent action
-(`shaftoe/pi-coding-agent-action`) as its native `provider` / `model` / `base_url` /
-`token` inputs — pi resolves the model against its built-in provider catalog, sets the
-API key via `setRuntimeApiKey()`, and overrides the endpoint via `registerProvider()`.
-No `models.json` is written, so nothing is hardcoded. `provider` must be a built-in pi
-provider and `model` its exact catalog ID. The API key is read only from the
-`AI_REVIEW_API_KEY` secret — it is never stored in this repository. The action is pinned
+pi resolves the model in its built-in provider catalog, sets the key via
+`setRuntimeApiKey()`, and overrides the endpoint via `registerProvider()`; no
+`models.json` is written. The action (`shaftoe/pi-coding-agent-action`) is pinned
 to an exact release; bump it deliberately.
-
-Glossary (for a cold reader):
-- **pi** — the coding agent that the action wraps; it exposes providers/models/API-keys
-  to cloud CLI tools (docs: `docs/models.md`).
-- **provider / model / base_url / token** — the action's inputs: which LLM backend
-  (`provider`), that backend's exact model ID (`model`), its API endpoint override
-  (`base_url`), and its credential (`token`, from the `AI_REVIEW_API_KEY` secret).
-- **`~` model-prefix** — pi's convention: `~<provider>/<id>` selects provider + model in
-  one string; the `provider` input is then the fallback the model ID implies.
-- **`setRuntimeApiKey()` / `registerProvider()`** — pi runtime functions the action
-  calls to inject the API key and endpoint override for the chosen provider.
-- **CalVer `v<YYYY.DDD.HHMM>`** — the merge-time release tag (year, day-of-year, HH:MM)
-  the auto-merge disposer mints; not the schema `version:`.
-- **`charly/pr-validator`** — the branch-protection-required check context; the gate's
-  check run satisfies it (previously an agent-posted commit status of the same name).
-- **`--admin`** — the flag that bypasses branch protection; the pipeline never uses it.
-- **dogfooding** — using the gate itself to install and validate its own successor PR (the
-  auto-merge disposer), so the mechanism proves itself on the gate-only install before it is
-  given autonomous merge authority.
-
 
 ## Scope & evidence baseline (honest capability statement)
 
-This gate is a **static diff + thread + CI-status review**. The pi validator runs with
-exactly three read-only tools — `get_pr_diff`, `get_issue_or_pr_thread`, `get_ci_status` — and **no shell** (no filesystem access, no execution, no
-greps/beds/generators/lint re-runs in the runner). For every claim it verifies it either
-(a) derives it from the diff, thread, CI state, or prior run logs, or (b) **cross-checks
-the author's pasted output for internal consistency** (plausible content, correct file
-names/counts, class-gate fit) and states an explicit tool-limited disposition ("could not
-re-run from this environment") where independent re-execution would be required. It never
-fabricates a run and never lets a missing re-run pass on the author's word alone.
+This gate is a **static diff + thread + CI-status review**. The pi validator runs
+with exactly four read-only tools — `get_pr_diff`, `get_issue_or_pr_thread`,
+`get_ci_status` (and, when present, run logs) — and **no shell**. For every claim
+it verifies it either (a) derives it from the diff/thread/CI state, or (b)
+**cross-checks the author's pasted evidence for internal consistency** and states
+an explicit tool-limited disposition ("could not re-run from this environment")
+where independent re-execution would be required. It never fabricates a run and
+never lets a missing re-run pass on the author's word alone.
 
-Consequence for evidence trust on **runtime / Go / schema** classes: the gate takes the
-author's pasted bed/regen/lint output and validates it statically — it cannot independently
-re-run it. Deep independent re-execution of runtime-class evidence remains the job of the
-full shell-enabled fresh-evaluator agent in the `charly` repo (its `pr-validator.md`),
-which this gate complements as the org-wide first line. Authors must therefore paste
-complete, self-consistent, fraud-free evidence; the gate's static cross-check is not a
-substitute for a live re-run. This is the org's expected baseline for runtime-class PRs
-reviewed by this gate — no more is overclaimed.
+Consequence for **runtime / Go / schema** classes: the gate validates pasted
+bed/regen/lint output statically — it cannot independently re-run it. Deep
+independent re-execution of runtime-class evidence remains the full shell-enabled
+fresh-evaluator agent's job in the `charly` repo; this gate is the org-wide first
+line. Authors must paste complete, self-consistent, fraud-free evidence. No more
+is overclaimed.
 
-## The validation → disposal pipeline
+## Self-install note
 
-The gate (this PR) is the validator; the auto-merge disposer lands as the separate next
-PR and is itself installed and validated by this gate. Landing order:
-
-1. **This PR installs `pr-validator.yml`** — runs on every non-fork pull request, posts
-   the `charly/pr-validator` check run (the branch-protection required context) and a
-   single verdict comment, then gates on the returned `Verdict: PASS|BLOCK`.
-2. **The follow-up `auto-merge.yml` PR** is submitted and validated by the now-live gate.
-   On gate **success** it re-verifies the green check on the exact head being merged,
-   mints a free merge-time CalVer, finalizes the placeholder `CHANGELOG/<CalVer>.md` on
-   the PR branch, squash-merges the validated head (never `--admin`), and creates the
-   `v<VER>` tag on the merged commit — idempotent and loop-free.
-
-Bootstrapping: because a gate cannot merge the PR that installs it (self-modifying
-install), this gate-only PR is merged by the operator once it is green; every subsequent
-PR — including the disposer — is handled entirely by the gate + disposer.
-
-## Authority vs. convenience
-
-The **authority** for what a PR must contain is the active harness root rulebook + the
-`/charly-internals:git-workflow` and `pr-validator` skills (the 0–18 checklist).
-This template is the GitHub-UI mirror of that — it does not restate the rules,
-it prompts the author to supply the evidence for them.
-
-Per-repo `.github/pull_request_template.md` copies are removed so every repo
-falls through to this single source (see each repo's `CHANGELOG/`).
+On the PR that first installs this gate, the gate's end-to-end green check is not
+observable before the gate itself merges (a self-install). The validator guidance
+accordingly never treats that as a blocking finding: it verifies the mechanism
+statically, accepts an explicit operator sign-off, and passes unless a genuinely
+fixable, non-self-blocking defect remains. This is the only instance where the
+gate's own check is not independently green.

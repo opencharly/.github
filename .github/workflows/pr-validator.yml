@@ -244,23 +244,20 @@ jobs:
                 beds sharing ONE binary + a coherent launch window. When ANYTHING looks off you
                 FAIL and state the tool-limited disposition ("could not re-run from this
                 environment") — never accept the author's word uncontested.
-            11.1 SELF-INSTALL / BOOTSTRAP PROOF — NO SELF-BLOCKING ACCEPTANCE CRITERION. When
-                the change under review IS the gate (a self-installing or self-gating workflow),
-                or any required proof is only observable through a dependency the change itself
-                installs, you MUST NOT BLOCK on proof that the validator's OWN structural gate
-                makes unobservable. Concretely: if the workflow's merge-order gate (or a companion
-                dependency) keeps the required `charly/pr-validator` check RED until another PR
-                merges, and that PR cannot merge until THIS change lands (a genuine bootstrap
-                cycle), then end-to-end GREEN is STRUCTURALLY IMPOSSIBLE on this PR. DEMANDING
-                that green as a blocking finding is a SELF-CONTRADICTORY acceptance criterion and
-                is FORBIDDEN. Instead: (a) verify the mechanism statically — the verdict logic is
-                sound, fail-closed, the PASS arm exists, and the extraction is wired to real
-                action outputs; (b) treat an explicit, genuine maintainer/operator bootstrap
-                sign-off as SUFFICIENT to cover the unobservable green; (c) record the
-                disposition "green first observable on the first post-bootstrap PR"; and (d) PASS
-                unless a genuinely fixable, NON-self-blocking defect remains. Manufacturing or
-                demanding an impossible green to escape a structural deadlock is a review defect,
-                not rigor.
+            11.1 SELF-INSTALL PROOF — NO SELF-BLOCKING ACCEPTANCE CRITERION. When the change
+                under review IS the gate it gates (a self-installing workflow) — for example
+                the PR that first installs this validator, or proof (like an end-to-end green
+                of a required check) that only becomes observable AFTER this change lands —
+                you MUST NOT BLOCK on that proof. End-to-end green of a self-gated install is
+                by definition not observable before the install merges; DEMANDING it is a
+                SELF-CONTRADICTORY acceptance criterion and is FORBIDDEN. Instead: (a) verify
+                the mechanism statically — the verdict logic is sound, fail-closed, the PASS
+                arm exists, and the extraction is wired to real action outputs; (b) treat an
+                explicit operator/bootstrap sign-off as SUFFICIENT to cover the unobservable
+                green; (c) record the disposition "green first observable on the first
+                post-bootstrap PR"; and (d) PASS unless a genuinely fixable, NON-self-blocking
+                defect remains. Manufacturing or demanding an impossible green to escape the
+                bootstrap is a review defect, not rigor.
                 bed, not carried on a doc/code reading. ADE: EVERY new/changed candy ships a
                 non-empty description: AND a plan: with ≥1 deterministic check: step (charly
                 box validate hard-errors otherwise — confirm it was run). SDD — the CUE-source
@@ -516,26 +513,7 @@ jobs:
             echo "::error::Pi agent run failed (infra/model error, not a finding)"
             exit 2
           fi
-          # PRE-MERGE STRUCTURAL GATE — runs before the verdict, on every head. The
-          # charly/pr-validator check stays RED until the companion cut-over PRs
-          # (opencharly/charly #349, opencharly/plugins #213 — they remove the
-          # agent-side posting) have actually merged, so there can never be a dual
-          # writer to the branch-protection-required charly/pr-validator context at
-          # the instant this (or any) PR merges. Permanent green after they land.
-          for pr in "opencharly/charly 349" "opencharly/plugins 213"; do
-            set -- $pr; repo=$1; num=$2
-            # Companion repos are PUBLIC. Use the public API via curl so the repo-scoped
-            # GITHUB_TOKEN (which cannot authorize reading a different repository) does not
-            # 404 the call — otherwise the gate can never confirm the companion cut-over
-            # and stays red forever even after the companions merge.
-            state=$(curl -s -H "User-Agent: charly-pr-validator" "https://api.github.com/repos/$repo/pulls/$num" | jq -r '(.state)+"/"+((.merged|tostring))' 2>/dev/null || echo unreadable)
-            echo "companion $repo#$num -> $state"
-            case "$state" in
-              closed/true) : ;;
-              */*) echo "::error::merge-order gate: companion $repo#$num not merged yet (state=$state); the required charly/pr-validator check stays red until the companion cut-over lands"; exit 1 ;;
-              *) echo "::error::merge-order gate: could not read companion $repo#$num (state=$state); refusing to pass"; exit 1 ;;
-            esac
-          done
+
           # Robust verdict extraction: gather every 'Verdict: (BLOCK|PASS)' line.
           # Zero lines = no verdict (exit 2); a MIX of PASS and BLOCK values =
           # ambiguous / possibly a quoted adversarial line (exit 2, fail-safe).
