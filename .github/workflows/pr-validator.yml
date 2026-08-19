@@ -42,26 +42,6 @@ jobs:
         with:
           node-version: 24
 
-      - name: Verify companion cut-over merged (merge-order gate)
-        # Enforces PR #11's bootstrap landing order: this repo's gate may only go
-        # green for the installing PR after the companion cut-over (which removes
-        # the agent-side posting) has actually landed, so there is never a dual
-        # writer to the branch-protection-required charly/pr-validator context.
-        # After the companions merge this step is permanently green.
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          for pr in "opencharly/charly 349" "opencharly/plugins 213"; do
-            set -- $pr; repo=$1; num=$2
-            state=$(gh api "repos/$repo/pulls/$num" --jq '.state + "/" + (.merged|tostring)' 2>/dev/null || echo unknown)
-            echo "companion $repo#$num -> $state"
-            case "$state" in
-              closed/true) : ;;
-              *) echo "::error::merge-order gate: companion $repo#$num not merged yet; this PR must land after the companion cut-over"; exit 1 ;;
-            esac
-          done
-          echo "all companions merged; merge-order gate green"
-
       - name: Run Pi review
         id: pi
         uses: shaftoe/pi-coding-agent-action@v2.27.0  # pin exact release
@@ -512,7 +492,26 @@ jobs:
           [ "$n" -eq 0 ] && { echo "::error::No verdict in response"; exit 2; }
           distinct=$(printf '%s\n' "$found" | sed -E 's/^Verdict: (BLOCK|PASS).*/\1/' | sort -u)
           case "$distinct" in
-            PASS)  exit 0 ;;
             BLOCK) echo "::error::AI review blocked this PR — see comment"; exit 1 ;;
             *) echo "::error::Ambiguous verdicts ($n lines, values: $distinct)"; exit 2 ;;
           esac
+          # PASS path only — structural merge-order gate. Enforce the bootstrap
+          # landing order: the check stays RED until the companion cut-over PRs
+          # (opencharly/charly #349, opencharly/plugins #213, which remove the
+          # agent-side posting) have actually merged, so there is never a dual
+          # writer to the branch-protection-required charly/pr-validator context.
+          # Permanent green after the companions land.
+          for pr in "opencharly/charly 349" "opencharly/plugins 213"; do
+            set -- $pr; repo=$1; num=$2
+            state=$(gh api "repos/$repo/pulls/$num" --jq '.state + "/" + (.merged|tostring)' 2>/dev/null || echo unknown)
+            echo "companion $repo#$num -> $state"
+            case "$state" in
+              closed/true) : ;;
+              *)
+                echo "::error::merge-order gate: companion $repo#$num not merged yet; this PR must land after the companion cut-over"
+                exit 1
+                ;;
+            esac
+          done
+          echo "all companions merged; merge-order gate green; PASS"
+          exit 0
