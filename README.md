@@ -61,8 +61,7 @@ dispatcher in their cut-over PRs.
 
 Nothing is hardcoded and no credential is committed. The workflow reads
 provider/model/endpoint/key from the GitHub environment and passes them to the
-pi action's native `provider` / `model` / `base_url` / `token` inputs. Set these
-as **org-level** variables/secret (Settings → Secrets and variables → Actions →
+pi action's native inputs (`provider` / `model` / `base_url` / `api_key`). Set these as **org-level** variables/secret (Settings → Secrets and variables → Actions → New repository secret / New variable, org level, **visibility: all**): (Settings → Secrets and variables → Actions →
 New repository secret / New variable, org level, **visibility: all**):
 
 | Name | Kind | Default | Purpose |
@@ -72,17 +71,19 @@ New repository secret / New variable, org level, **visibility: all**):
 | `AI_REVIEW_MODEL` | variable | `~deepseek/deepseek-v4-flash-latest` | Exact model ID in the provider's catalog |
 | `AI_REVIEW_API_KEY` | secret | — | Provider API key (never committed) |
 
-pi resolves the model in its built-in provider catalog, sets the key via
-`setRuntimeApiKey()`, and overrides the endpoint via `registerProvider()`; no
-`models.json` is written. The action (`shaftoe/pi-coding-agent-action`) is pinned
-to an exact release; bump it deliberately.
+The model id is passed **verbatim** to the provider's chat-completions endpoint
+(`~deepseek/deepseek-v4-flash-latest` is OpenRouter's own latest-alias, listed in its
+public `/models` catalog); `base_url` selects the endpoint; no `models.json` is written and
+no model catalog is embedded. The action (`opencharly/pi-review-action`) is pinned to an
+exact release tag (`@v1.0.0`); bump it deliberately.
 
 ## Scope & evidence baseline (honest capability statement)
 
 This gate is a **static diff + thread + CI-status review**. The pi validator runs
-with exactly four read-only tools — `get_pr_diff`, `get_issue_or_pr_thread`,
-`get_ci_status` (and, when present, run logs) — and **no shell**. For every claim
-it verifies it either (a) derives it from the diff/thread/CI state, or (b)
+with exactly five read-only tools — `get_pr_diff`, `get_pr_commits`,
+`get_pr_thread` (the CURRENT live body is authoritative + prior comments),
+`get_pr_meta`, and `get_ci_status` — and **no shell**. For every claim
+it verifies it either (a) derives it from the diff/commits/thread/CI state, or (b)
 **cross-checks the author's pasted evidence for internal consistency** and states
 an explicit tool-limited disposition ("could not re-run from this environment")
 where independent re-execution would be required. It never fabricates a run and
