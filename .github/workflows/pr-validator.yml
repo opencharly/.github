@@ -449,25 +449,10 @@ jobs:
             - The FINAL line of your response must be exactly "Verdict: BLOCK" or
               "Verdict: PASS" on its own line, and that string must appear nowhere else.
 
-      - name: Post review comment (always — every PR gets a validation-result comment)
-        if: always()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REVIEW: ${{ steps.pi.outputs.response }}
-        run: |
-          if [ -z "$REVIEW" ]; then
-            {
-              echo "## WARNING: charly/pr-validator could not produce a verdict"
-              echo ""
-              echo "The pi validator run did not complete (infra/model error). No verdict was"
-              echo "produced — treat this PR as unvalidated. See the workflow run logs."
-            } > /tmp/review.md
-          else
-            printf '%s\n' "$REVIEW" > /tmp/review.md
-          fi
-          gh pr comment ${{ github.event.number }} --body-file /tmp/review.md
-          printf '%s\n' "$REVIEW" >> "$GITHUB_STEP_SUMMARY"
-
+      # No separate comment step — the pi-coding-agent-action natively posts the agent's
+      # response (with its "View action run" footer) as a PR comment, on success AND on
+      # failure. A second gh pr comment here only duplicates it. Failures are already
+      # visible in the run logs.
       - name: Gate verdict (always run — sets the charly/pr-validator check state)
         if: always()
         env:
