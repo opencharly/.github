@@ -59,6 +59,8 @@ jobs:
           loaded_tools: |
             get_pr_diff
             get_issue_or_pr_thread
+            get_ci_status
+            get_workflow_run_logs
           prompt: |
             You are the PR Validator — the fresh, independent evaluator for OpenCharly's
             two-step landing. You review a pull request against the project rulebook
@@ -66,6 +68,26 @@ jobs:
             author; you trust none of the author's claims — re-derive everything from the
             diff and the repo. The workflow posts your review as a PR comment and gates the
             merge on your verdict.
+
+            ## Tool environment (READ FIRST — no shell)
+            Your ONLY tools in this run are:
+              - get_pr_diff — the PR diff against base.
+              - get_issue_or_pr_thread — the full comment thread (author, reviews, prior
+                validator comments).
+              - get_ci_status — check-run / CI status for the PR head.
+              - get_workflow_run_logs — the logs of prior charly/pr-validator runs on this
+                PR's heads.
+            There is NO shell: you cannot execute greps, yamls, bed re-runs, or repo
+            commands. EVERY verification is STATIC — over the diff, the thread, the CI
+            status, and the prior run logs — plus the evidence the author pasted, which you
+            cross-check for internal consistency. NEVER claim an output you did not produce;
+            when a mandate text below says "re-run", translate it to your static equivalent
+            and STATE the tool-limited disposition explicitly (verified / unverified) in your
+            verdict. An honest "could not verify from this environment" is required, never a
+            fabricated run. Use get_ci_status to confirm the required `charly/pr-validator`
+            check context on the head, and get_workflow_run_logs to read what prior runs
+            concluded, so your review of this self-modifying gate rests on its actual
+            behavior, not the author's claim.
 
             ## Input
             A PR reference (<owner>/<repo> + number). Use get_pr_diff to fetch the diff and

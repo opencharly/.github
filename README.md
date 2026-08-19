@@ -17,7 +17,11 @@ copy inherits the files here — so a change lands **once**, not in every repo.
   through GitHub, replaces the required context in one batch, and verifies the
   resulting protection without maintaining per-repository copies or lists.
 - **`.github/workflows/pr-validator.yml`** — the org-wide `charly/pr-validator` gate.
-  Replaces the prior agent-posted `charly/pr-validator` commit status. Runs the pi
+  Supersedes the prior agent-posted `charly/pr-validator` commit status. The upstream
+  cut-over that removes the agent-side posting is OPEN (`opencharly/charly` #349 candy
+  source, `opencharly/plugins` #213 projections) and lands before this PR (landing
+  order: plugins → charly → this), so there is never a dual writer to the
+  branch-protection-required `charly/pr-validator` context. Runs the pi
   coding agent as a fresh, independent PR validator on every pull request, always posts
   a PR comment with the validation result, and gates the check (named `charly/pr-validator`,
   satisfying branch protection) on the returned `Verdict: PASS|BLOCK`. Fully generic —
