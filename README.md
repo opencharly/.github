@@ -17,12 +17,16 @@ copy inherits the files here — so a change lands **once**, not in every repo.
   through GitHub, replaces the required context in one batch, and verifies the
   resulting protection without maintaining per-repository copies or lists.
 - **`.github/workflows/pr-validator.yml`** — the org-wide `charly/pr-validator` gate.
-  Supersedes the prior agent-posted `charly/pr-validator` commit status. The upstream
-  cut-over that removes the agent-side posting is OPEN (`opencharly/charly` #349 candy
-  source, `opencharly/plugins` #213 projections) and lands before this PR (landing
-  order: plugins → charly → this), so there is never a dual writer to the
-  branch-protection-required `charly/pr-validator` context. Runs the pi
-  coding agent as a fresh, independent PR validator on every pull request, always posts
+  Supersedes the prior agent-posted `charly/pr-validator` commit status. It runs the pi
+  coding agent as a fresh, independent PR validator and posts a PR comment with the result. It
+  is a **reusable workflow** (`on: workflow_call`) in addition to self-gating this `.github`
+  repo (`on: pull_request`): any org repo inherits the SAME gate with an one-file dispatcher
+  (`.github/workflows/pr-validator.yml` → `uses: opencharly/.github/.github/workflows/pr-validator.yml@main`,
+  `secrets: inherit`). This is how it runs on sibling repos — the cut-over installs that
+  dispatcher into `opencharly/plugins` (#213) and `opencharly/charly` (#349), so there is
+  never a dual writer to the branch-protection-required `charly/pr-validator` context.
+  Landing order: **this reusable gate PR first** (so `@main` carries it), then the two
+  dispatcher cut-over PRs (plugins #213 → charly #349). Always posts
   a PR comment with the validation result, and gates the check (named `charly/pr-validator`,
   satisfying branch protection) on the returned `Verdict: PASS|BLOCK`. Fully generic —
   no credential, model choice, or provider endpoint is hardcoded; the LLM provider is
@@ -31,9 +35,11 @@ copy inherits the files here — so a change lands **once**, not in every repo.
   installed + validated **by this very gate** (dogfooding), so the gate first proves
   itself on the gate-only install before it is given autonomous merge authority.
 
-Future org-wide defaults (issue templates, `CONTRIBUTING.md`, `SECURITY.md`,
-reusable CI workflows via `uses: opencharly/.github/.github/workflows/…@main`)
-belong here too — one source, inherited everywhere.
+Future org-wide defaults (issue templates, `CONTRIBUTING.md`, `SECURITY.md`) belong
+here too — one source, inherited everywhere. The reusable `charly/pr-validator` gate
+(`uses: opencharly/.github/.github/workflows/pr-validator.yml@main`) is the first org-wide
+**reusable workflow** shipped this way; the organizer template is
+`org-wide-pr-validator-dispatcher.yml` at the repo root.
 
 ## The `charly/pr-validator` workflow — required org-level configuration
 

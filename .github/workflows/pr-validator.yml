@@ -17,9 +17,36 @@
 # Set these as org-level variables/secrets (visibility: all) so every repo inherits them.
 name: charly/pr-validator
 
+# BOTH triggers, deliberately:
+#   - `pull_request` — self-gates this (.github) repo's own PRs.
+#   - `workflow_call` — reusable entrypoint so ANY org repo can inherit the SAME
+#     gate with a thin dispatcher: `uses: opencharly/.github/.github/workflows/pr-validator.yml@main`
+#     (caller passes `secrets: inherit`; org vars `AI_REVIEW_*` are org-scoped, so every
+#     inheriting repo gets them without re-declaring). This is the org-wide propagation
+#     mechanism: one source, inherited everywhere.
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+  workflow_call:
+    # No required inputs: provider/model/base_url come from org vars and the key from the
+    # org secret AI_REVIEW_API_KEY (visibility: all). A caller that overrides them may pass
+    # them as inputs (secrets: inherit, or explicit secrets below); defaults keep it generic.
+    inputs:
+      ai_review_provider:
+        required: false
+        type: string
+      ai_review_model:
+        required: false
+        type: string
+      ai_review_base_url:
+        required: false
+        type: string
+    # No `secrets:` declared: the caller uses `secrets: inherit` (passes its GITHUB_TOKEN;
+    # the GITHUB_TOKEN is the caller's), and the org secret AI_REVIEW_API_KEY (visibility:
+    # all) is directly available to org reusable workflows — every inheriting repo gets it.
+    # `github.event` in the called context is the CALLER's PR event, so all the
+    # get_pr_diff / get_issue_or_pr_thread / get_ci_status calls below operate on the
+    # inheriting repo's pull request automatically.
 
 permissions:
   contents: read
@@ -51,10 +78,11 @@ jobs:
           # built-in provider and `~deepseek/deepseek-v4-flash-latest` is its exact model
           # id (verified against OpenRouter's public /models catalog). `token` sets the
           # provider API key and `base_url` overrides the provider endpoint at runtime —
-          # no models.json is written, so nothing is hardcoded.
-          provider: ${{ vars.AI_REVIEW_PROVIDER }}
-          model: ${{ vars.AI_REVIEW_MODEL }}
-          base_url: ${{ vars.AI_REVIEW_BASE_URL }}
+          # no models.json is written, so nothing is hardcoded. Reusable path: use the
+          # caller-passed inputs when supplied, else fall back to org vars/secret.
+          provider: ${{ inputs.ai_review_provider || vars.AI_REVIEW_PROVIDER }}
+          model: ${{ inputs.ai_review_model || vars.AI_REVIEW_MODEL }}
+          base_url: ${{ inputs.ai_review_base_url || vars.AI_REVIEW_BASE_URL }}
           token: ${{ secrets.AI_REVIEW_API_KEY }}
           loaded_tools: |
             get_pr_diff
