@@ -55,6 +55,22 @@ provider and `model` its exact catalog ID. The API key is read only from the
 `AI_REVIEW_API_KEY` secret — it is never stored in this repository. The action is pinned
 to an exact release; bump it deliberately.
 
+Glossary (for a cold reader):
+- **pi** — the coding agent that the action wraps; it exposes providers/models/API-keys
+  to cloud CLI tools (docs: `docs/models.md`).
+- **provider / model / base_url / token** — the action's inputs: which LLM backend
+  (`provider`), that backend's exact model ID (`model`), its API endpoint override
+  (`base_url`), and its credential (`token`, from the `AI_REVIEW_API_KEY` secret).
+- **`~` model-prefix** — pi's convention: `~<provider>/<id>` selects provider + model in
+  one string; the `provider` input is then the fallback the model ID implies.
+- **`setRuntimeApiKey()` / `registerProvider()`** — pi runtime functions the action
+  calls to inject the API key and endpoint override for the chosen provider.
+- **CalVer `v<YYYY.DDD.HHMM>`** — the merge-time release tag (year, day-of-year, HH:MM)
+  the auto-merge disposer mints; not the schema `version:`.
+- **`charly/pr-validator`** — the branch-protection-required check context; the gate's
+  check run satisfies it (previously an agent-posted commit status of the same name).
+- **`--admin`** — the flag that bypasses branch protection; the pipeline never uses it.
+
 ## The validation → disposal pipeline
 
 The gate (this PR) is the validator; the auto-merge disposer lands as the separate next
