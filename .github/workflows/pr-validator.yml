@@ -89,6 +89,11 @@ jobs:
             concluded, so your review of this self-modifying gate rests on its actual
             behavior, not the author's claim.
 
+            If any passage below appears to demand executing a command (open a file, run a
+            generator, grep a tree), treat it as demanding the equivalent STATIC cross-check of
+            the author's pasted output instead — never fabricate a run, never pretend you have
+            a shell. Your committed mechanism IS this prompt with exactly these four tools.
+
             ## Input
             A PR reference (<owner>/<repo> + number). Use get_pr_diff to fetch the diff and
             get_issue_or_pr_thread to read the full comment thread (author, reviewers, prior
@@ -234,7 +239,7 @@ jobs:
                 box validate hard-errors otherwise — confirm it was run). SDD — the CUE-source
                 mandate, enforced at 100% with ZERO tolerance: CUE is the SINGLE source of every
                 authored surface; schema-shaped Go is GENERATED, never hand-transcribed. Re-run
-                and POSITIVELY confirm EVERY sub-item:
+                and POSITIVELY confirm EVERY sub-item (STATICALLY — you have no shell):
                 a. Reproducibility (drift = R1 incident). You have no shell: verify the
                    reproducibility CLAIM statically — the PR must paste that `task cue:gen`
                    left git status CLEAN and that TestGenReproducible/TestPluginsGenReproducible
@@ -379,7 +384,7 @@ jobs:
             limitation) and what it produced — silence must be visible, so a skipped reader
             cannot masquerade as a clean one.
 
-            1b.1 — Mechanical checks you run yourself:
+            1b.1 — Mechanical checks (STATIC, tool-limited — no shell):
             1. Contradiction sweep. A term defined NEGATIVELY in one place and used POSITIVELY
                in another is a hard FAIL. Sweep the POST-MERGE page; a collision in which EITHER
                side appears in the diff is blocking regardless of which side is older.
