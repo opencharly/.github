@@ -16,22 +16,25 @@ copy inherits the files here — so a change lands **once**, not in every repo.
   required PR-validator status. It discovers every active, non-fork repository
   through GitHub, replaces the required context in one batch, and verifies the
   resulting protection without maintaining per-repository copies or lists.
-- **`.github/workflows/ai-review.yml`** — the org-wide AI PR review + validation
-  gate. Runs the pi coding agent as a fresh, independent PR validator on every
-  pull request, posts the review as a PR comment, and gates the merge on the
-  returned `Verdict: PASS|BLOCK`. Fully generic — the LLM provider is
-  configured at runtime from the GitHub environment (see below).
+- **`.github/workflows/pr-validator.yml`** — the org-wide `charly/pr-validator` gate.
+  Replaces the prior agent-posted `charly/pr-validator` commit status. Runs the pi
+  coding agent as a fresh, independent PR validator on every pull request, always posts
+  a PR comment with the validation result, and gates the check (named `charly/pr-validator`,
+  satisfying branch protection) on the returned `Verdict: PASS|BLOCK`. Fully generic —
+  the LLM provider is configured at runtime from the GitHub environment (see below).
 
 Future org-wide defaults (issue templates, `CONTRIBUTING.md`, `SECURITY.md`,
 reusable CI workflows via `uses: opencharly/.github/.github/workflows/…@main`)
 belong here too — one source, inherited everywhere.
 
-## The `ai-review` workflow — required org-level configuration
+## The `charly/pr-validator` workflow — required org-level configuration
 
-`.github/workflows/ai-review.yml` runs on every non-fork pull request in the
-org. It is fully generic: nothing is hardcoded. Set these as **org-level**
-variables and secrets (Settings → Secrets and variables → Actions → New
-repository secret / New variable, at the org level) so every repo inherits them:
+`.github/workflows/pr-validator.yml` runs on every non-fork pull request in the
+org. Its job is named `charly/pr-validator`, so its check run satisfies the
+branch-protection required context of that name. It is fully generic: nothing is
+hardcoded. Set these as **org-level** variables and secrets (Settings → Secrets
+and variables → Actions → New repository secret / New variable, at the org
+level, with **visibility: all** so every repo inherits them):
 
 | Name | Kind | Default | Purpose |
 |---|---|---|---|

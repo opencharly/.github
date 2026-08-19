@@ -1,10 +1,12 @@
-# Org-wide AI PR review + validation gate.
+# Org-wide charly/pr-validator — AI PR review + validation gate.
 #
-# Runs the pi coding agent as a fresh, independent PR validator on every
-# pull request in the opencharly org. The agent reviews the diff against the
-# project rulebook (AGENTS.md / CLAUDE.md) and the skills, returns a review
-# plus a `Verdict: PASS|BLOCK` line, and this workflow posts the review as a
-# PR comment and gates the merge on the verdict.
+# Replaces the prior agent-posted `charly/pr-validator` commit status. This
+# workflow's job is named `charly/pr-validator`, so its check run satisfies the
+# branch-protection required context of the same name (the org-wide
+# branch-protection.sh required context). It runs the pi coding agent as a
+# fresh, independent PR validator on every pull request in the opencharly org,
+# always posts a PR comment with the validation result, and gates the check on
+# the returned `Verdict: PASS|BLOCK`.
 #
 # Fully generic — nothing is hardcoded. The LLM provider is configured at
 # runtime from the GitHub environment:
@@ -13,8 +15,8 @@
 #   vars.AI_REVIEW_BASE_URL   (default https://openrouter.ai/api/v1)
 #   vars.AI_REVIEW_MODEL      (default openrouter/deepseek-v4-flash-latest)
 #   secrets.AI_REVIEW_API_KEY (the provider API key — org-level secret)
-# Set these as org-level variables/secrets so every repo inherits them.
-name: ai-review
+# Set these as org-level variables/secrets (visibility: all) so every repo inherits them.
+name: charly/pr-validator
 
 on:
   pull_request:
@@ -26,7 +28,8 @@ permissions:
   issues: write
 
 jobs:
-  review:
+  pr-validator:
+    name: charly/pr-validator
     # Skip forks: secrets are unavailable / comment posting would fail
     if: github.event.pull_request.head.repo.fork == false
     runs-on: ubuntu-latest
@@ -126,18 +129,28 @@ jobs:
             skipped without deciding it inapplicable is an incomplete review.
 
             ### A. Description + change-class gate + attribution
-            1. Description completeness — the filled template is MANDATORY. The body follows
-               the org PR template and SUPPLIES the evidence it prompts for: a real Summary
-               accounting for every file/behavior; a How R10-tested block naming the exact
-               change-class gate, the disposable:true target, the fresh-rebuild/R9
+            1. STRICT PR-TEMPLATE COMPLIANCE — a hard gate, checked first. The body MUST be
+               a real, fully-completed PR template, not a template-only / partial /
+               placeholder body. Fetch the org's PR template (PULL_REQUEST_TEMPLATE.md in
+               the repo) and verify the body supplies EVERY section it prompts for: a real
+               Summary accounting for every file/behavior; a How R10-tested block naming the
+               exact change-class gate, the disposable:true target, the fresh-rebuild/R9
                confirmation, whether the CHANGED code path executed live (caps the tier),
                concurrent-roster evidence for shared-state changes, AND pasted output (not a
                promise); an Attribution tier justified by that evidence; and the
                rule-compliance section with EVERY applicable rule answered with a one-line HOW
-               (or N/A — <reason>). A bare checkbox with no HOW is NOT an answer. An
-               empty/template-only/partially-filled body FAILS. The body's own AI-attribution
-               footer (*Assisted-by: <Harness> <Provider Full Model Name> (<confidence>)*) is a
-               SEPARATE check — verify its presence and form.
+               (or N/A — <reason>). A bare checkbox with no HOW is NOT an answer. Any of the
+               following FAILS (the PR stays BLOCK until the body fully complies): an empty,
+               template-only, or partially-filled body; a dropped/reordered template section;
+               an applicable section answered with a placeholder or a promise such as "will
+               test"; or a body lacking the required evidence-block structure. The AI
+               attribution footer (*Assisted-by: <Harness> <Provider Full Model Name>
+               (<confidence>)*) is a SEPARATE deterministic check. Every PR/commit MUST
+               carry an `Assisted-by:` footer with one of exactly two valid forms: a real
+               AI attribution for AI-authored work, or `Assisted-by: Nobody` for 100%
+               human-authored work. `Nobody` is the explicit, unambiguous marker for human
+               contributions — accept it without inferring authorship; do NOT force an AI
+               attribution onto human work. Reject any other absence/variant.
             2. Change class → gate (R10/R7). Classify the diff and confirm the evidence matches
                that gate: a runtime-class change needs a pasted FRESH-rebuild bed run
                (charly check run <bed> on the bed whose kind matches the touched path; a
@@ -153,7 +166,10 @@ jobs:
                pasted proof, never inflated — you set the ceiling. fully tested and validated
                requires the NEW/CHANGED code paths to have EXECUTED against the fresh rebuild;
                documentation reviewed is legal ONLY when the whole diff is documentation;
-               syntax check only / theoretical suggestion must NOT ship.
+               syntax check only / theoretical suggestion must NOT ship. `Assisted-by: Nobody`
+               is the valid, deterministic footer for 100% human-authored work — accept it
+               without a tier check (there is no AI tier to justify) and do NOT require or
+               force an AI attribution trailer onto it.
 
             ### B. Ground-truth rules R0-R10
             4. R0 skills. The change honors every skill its area's Skill-Dispatcher rows load —
@@ -449,16 +465,27 @@ jobs:
             - The FINAL line of your response must be exactly "Verdict: BLOCK" or
               "Verdict: PASS" on its own line, and that string must appear nowhere else.
 
-      - name: Post review comment
+      - name: Post review comment (always — every PR gets a validation-result comment)
+        if: always()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REVIEW: ${{ steps.pi.outputs.response }}
         run: |
-          printf '%s\n' "$REVIEW" > /tmp/review.md
+          if [ -z "$REVIEW" ]; then
+            {
+              echo "## WARNING: charly/pr-validator could not produce a verdict"
+              echo ""
+              echo "The pi validator run did not complete (infra/model error). No verdict was"
+              echo "produced — treat this PR as unvalidated. See the workflow run logs."
+            } > /tmp/review.md
+          else
+            printf '%s\n' "$REVIEW" > /tmp/review.md
+          fi
           gh pr comment ${{ github.event.number }} --body-file /tmp/review.md
           printf '%s\n' "$REVIEW" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Gate on verdict
+      - name: Gate verdict (always run — sets the charly/pr-validator check state)
+        if: always()
         env:
           REVIEW: ${{ steps.pi.outputs.response }}
         run: |
