@@ -69,6 +69,16 @@ jobs:
             diff and the repo. The workflow posts your review as a PR comment and gates the
             merge on your verdict.
 
+            ## CURRENT HEAD (an immutable fact of this run)
+            The head you are validating is the commit SHA of THIS run:
+            `${{ github.event.pull_request.head.sha }}`. get_pr_diff returns the PR's CURRENT
+            head vs base — that is the diff you review. Every other SHA you encounter in prior
+            comments, prior run logs, or CI status belongs to an EARLIER head of this PR and
+            is historical evidence only: it tells you how the PR evolved and what prior
+            validators found, but you review ONLY the current head above. If a prior log or
+            comment cites a different SHA without your confirming this run's SHA matches it,
+            do not adopt it as the head under review.
+
             ## Tool environment (READ FIRST)
             Your tools in this run:
               - get_pr_diff — the PR diff against base.
@@ -483,7 +493,7 @@ jobs:
             case "$state" in
               closed/true) : ;;
               *)
-                echo "::error::merge-order gate: companion $repo#$num not merged yet; the required charly/pr-validator check stays red until the companion cut-over lands"
+                echo "::error::merge-order gate: companion $repo#$num not merged (state=$state — open or unreadable); the required charly/pr-validator check stays red until the companion cut-over lands"
                 exit 1
                 ;;
             esac

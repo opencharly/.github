@@ -25,7 +25,8 @@ copy inherits the files here — so a change lands **once**, not in every repo.
   coding agent as a fresh, independent PR validator on every pull request, always posts
   a PR comment with the validation result, and gates the check (named `charly/pr-validator`,
   satisfying branch protection) on the returned `Verdict: PASS|BLOCK`. Fully generic —
-  the LLM provider is configured at runtime from the GitHub environment (see below).
+  no credential, model choice, or provider endpoint is hardcoded; the LLM provider is
+  configured at runtime from the GitHub environment (see below).
   The merge/tag disposer (`auto-merge.yml`) lands in the immediately-following PR and is
   installed + validated **by this very gate** (dogfooding), so the gate first proves
   itself on the gate-only install before it is given autonomous merge authority.
