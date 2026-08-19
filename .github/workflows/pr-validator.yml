@@ -1,0 +1,101 @@
+# Org-wide charly/pr-validator — AI PR review + validation gate.
+#
+# Replaces the prior agent-posted `charly/pr-validator` commit status. This
+# workflow's job is named `charly/pr-validator`, so its check run satisfies the
+# branch-protection required context of the same name (the org-wide
+# branch-protection.sh required context). It runs the pi coding agent as a
+# fresh, independent PR validator on every pull request in the opencharly org,
+# always posts a PR comment with the validation result, and gates the check on
+# the returned `Verdict: PASS|BLOCK`.
+#
+# Fully generic — nothing is hardcoded. The LLM provider is configured at
+# runtime from the GitHub environment:
+#   vars.AI_REVIEW_PROVIDER   (default openrouter)
+#   vars.AI_REVIEW_BASE_URL   (default https://openrouter.ai/api/v1)
+#   vars.AI_REVIEW_MODEL      (default ~deepseek/deepseek-v4-flash-latest)
+#   secrets.AI_REVIEW_API_KEY (the provider API key — org-level secret)
+# Set these as org-level variables/secrets (visibility: all) so every repo inherits them.
+name: charly/pr-validator
+
+# BOTH triggers, deliberately:
+#   - `pull_request` — self-gates this (.github) repo's own PRs.
+#   - `workflow_call` — reusable entrypoint so ANY org repo can inherit the SAME
+#     gate with a thin dispatcher: `uses: opencharly/.github/.github/workflows/pr-validator.yml@main`
+#     (caller passes `secrets: inherit`; org vars `AI_REVIEW_*` are org-scoped, so every
+#     inheriting repo gets them without re-declaring). This is the org-wide propagation
+#     mechanism: one source, inherited everywhere.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_call:
+    # No required inputs: provider/model/base_url come from org vars and the key from the
+    # org secret AI_REVIEW_API_KEY (visibility: all). A caller that overrides them may pass
+    # them as inputs (secrets: inherit, or explicit secrets below); defaults keep it generic.
+    inputs:
+      ai_review_provider:
+        required: false
+        type: string
+      ai_review_model:
+        required: false
+        type: string
+      ai_review_base_url:
+        required: false
+        type: string
+    # No `secrets:` declared: the caller uses `secrets: inherit` (passes its GITHUB_TOKEN;
+    # the GITHUB_TOKEN is the caller's), and the org secret AI_REVIEW_API_KEY (visibility:
+    # all) is directly available to org reusable workflows — every inheriting repo gets it.
+    # `github.event` in the called context is the CALLER's PR event, so all the
+    # get_pr_diff / get_issue_or_pr_thread / get_ci_status calls below operate on the
+    # inheriting repo's pull request automatically.
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  pr-validator:
+    name: charly/pr-validator
+    # Skip forks: secrets are unavailable / comment posting would fail
+    if: github.event.pull_request.head.repo.fork == false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run Pi review (opencharly/pi-review-action)
+        id: review
+        uses: opencharly/pi-review-action@v1.0.2  # pin exact release tag
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          # The validator prompt, tool set, and staleness handling live INSIDE the action
+          # (prompt.txt) — single source, nothing duplicated here. `api_key` is the org
+          # secret; the model id is passed verbatim (`~deepseek/deepseek-v4-flash-latest`
+          # is OpenRouter's own latest-alias id, per its public /models catalog).
+          provider: ${{ inputs.ai_review_provider || vars.AI_REVIEW_PROVIDER }}
+          model: ${{ inputs.ai_review_model || vars.AI_REVIEW_MODEL }}
+          base_url: ${{ inputs.ai_review_base_url || vars.AI_REVIEW_BASE_URL }}
+          api_key: ${{ secrets.AI_REVIEW_API_KEY }}
+          max_turns: 20
+      - name: Gate verdict (always run — sets the charly/pr-validator check state)
+        if: always()
+        env:
+          REVIEW: ${{ steps.review.outputs.response }}
+        run: |
+          if [ "${{ steps.review.outputs.success }}" != "true" ]; then
+            echo "::error::Pi agent run failed (infra/model error, not a finding)"
+            exit 2
+          fi
+
+          # Robust verdict extraction: gather every 'Verdict: (BLOCK|PASS)' line.
+          # Zero lines = no verdict (exit 2); a MIX of PASS and BLOCK values =
+          # ambiguous / possibly a quoted adversarial line (exit 2, fail-safe).
+          # Multiple lines sharing ONE value are tolerated (the validator writes a
+          # verdict line both in its checklist and as its final line).
+          found=$(printf '%s\n' "$REVIEW" | grep -E '^Verdict: (BLOCK|PASS)[[:space:]]*$')
+          n=$(printf '%s\n' "$found" | grep -cE '^Verdict:')
+          [ "$n" -eq 0 ] && { echo "::error::No verdict in response"; exit 2; }
+          distinct=$(printf '%s\n' "$found" | sed -E 's/^Verdict: (BLOCK|PASS).*/\1/' | sort -u)
+          case "$distinct" in
+            BLOCK) echo "::error::AI review blocked this PR — see comment"; exit 1 ;;
+            PASS) echo "AI review passed"; exit 0 ;;
+            *) echo "::error::Ambiguous verdicts ($n lines, values: $distinct)"; exit 2 ;;
+          esac
+          # (exit 0 only reachable via the PASS branch above)
