@@ -83,8 +83,7 @@ Glossary (for a cold reader):
 ## Scope & evidence baseline (honest capability statement)
 
 This gate is a **static diff + thread + CI-status review**. The pi validator runs with
-exactly four read-only tools — `get_pr_diff`, `get_issue_or_pr_thread`, `get_ci_status`,
-`get_workflow_run_logs` — and **no shell** (no filesystem access, no execution, no
+exactly three read-only tools — `get_pr_diff`, `get_issue_or_pr_thread`, `get_ci_status` — and **no shell** (no filesystem access, no execution, no
 greps/beds/generators/lint re-runs in the runner). For every claim it verifies it either
 (a) derives it from the diff, thread, CI state, or prior run logs, or (b) **cross-checks
 the author's pasted output for internal consistency** (plausible content, correct file
