@@ -74,6 +74,9 @@ Glossary (for a cold reader):
 - **`charly/pr-validator`** — the branch-protection-required check context; the gate's
   check run satisfies it (previously an agent-posted commit status of the same name).
 - **`--admin`** — the flag that bypasses branch protection; the pipeline never uses it.
+- **dogfooding** — using the gate itself to install and validate its own successor PR (the
+  auto-merge disposer), so the mechanism proves itself on the gate-only install before it is
+  given autonomous merge authority.
 
 ## The validation → disposal pipeline
 
