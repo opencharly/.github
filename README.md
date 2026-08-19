@@ -75,7 +75,7 @@ The model id is passed **verbatim** to the provider's chat-completions endpoint
 (`~deepseek/deepseek-v4-flash-latest` is OpenRouter's own latest-alias, listed in its
 public `/models` catalog); `base_url` selects the endpoint; no `models.json` is written and
 no model catalog is embedded. The action (`opencharly/pi-review-action`) is pinned to an
-exact release tag (`@v1.0.0`); bump it deliberately.
+exact release tag (`@v1.0.1`); bump it deliberately.
 
 ## Scope & evidence baseline (honest capability statement)
 
