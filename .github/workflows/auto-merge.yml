@@ -2,14 +2,27 @@
 #
 # Trigger: fired when the `charly/pr-validator` workflow_run completes successfully
 # (a PASS verdict → the gate's grep exits 0). This workflow then re-confirms the
-# required check run on the exact head SHA, brings the branch up to date, SQUASH-merges
-# (linear main, one commit), and applies the merge-time CalVer tag.
+# required check run on the EXACT final head it is about to merge (never a
+# different head), updates the branch only as a step toward that final head,
+# SQUASH-merges (linear main, one commit), and applies the merge-time CalVer tag.
 #
-# Security posture (first cut; hardened next step):
-#   - Uses secrets.AUTO_MERGE_PAT when present (required to merge a branch whose
-#     protection sets enforce_admins); otherwise falls back to the scoped GITHUB_TOKEN.
-#   - The workflow never uses `--admin`, never force-pushes, and only tags after the
-#     merged object's Assisted-by trailer is verified.
+# Order (mirrors the canonical Phase-3 procedure): sync/update-branch →
+# mint repoware CalVer → finalize the placeholder CHANGELOG to that CalVer on the
+# PR branch (this moves the head) → RE-VERIFY the `charly/pr-validator` check on the
+# EXACT final head → queue-lock → squash-merge → verify trailer → tag → unlock.
+#
+# Security posture (hardening IN this PR; least-privilege PAT scoping is the
+# tracked operator follow-up):
+#   - The gate is re-verified on the FINAL head SHA immediately before the merge.
+#     If the finalize push (or an update-branch) does not end with
+#     `charly/pr-validator` = success on that exact SHA, the merge aborts (exit 1).
+#   - Token: `AUTO_MERGE_PAT` (operator-supplied, least-privilege) when present,
+#     else the scoped `GITHUB_TOKEN` — never `--admin`, never force-push.
+#   - A `_lock/auto-merge/<PR>` ref serializes concurrent runs; the lock is
+#     released in a cleanup step that always runs.
+#   - CalVer is repo-aware: `sdk` (go.mod present) uses its Go-module
+#     `v0.<YYYYDDD>.<HHMM-no-leading-zeros>` form; every other repo uses
+#     `v<YYYY.DDD.HHMM>`.
 name: auto-merge
 
 on:
@@ -27,102 +40,146 @@ jobs:
     if: github.event.workflow_run.conclusion == 'success'
     outputs:
       merged-sha: ${{ steps.merge.outputs.merged_sha }}
-      ver: ${{ steps.tag.outputs.ver }}
+      ver: ${{ steps.merge.outputs.ver }}
     steps:
-      - name: Resolve the PR and re-confirm the gate check on that head SHA
+      - name: Resolve the PR for the trigger head SHA
         id: resolve
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN || secrets.AUTO_MERGE_PAT }}
+          GH_TOKEN: ${{ secrets.AUTO_MERGE_PAT || secrets.GITHUB_TOKEN }}
         run: |
           SHA="${{ github.event.workflow_run.head_sha }}"
-          # Match the open PR whose head is this exact SHA (the commit the validator ran on).
           PR=$(gh api "repos/${{ github.repository }}/pulls" --paginate --jq \
             --arg sha "$SHA" \
             '[.[] | select((.head.sha == $sha) and (.state == "open"))] | first | .number' 2>/dev/null)
           echo "PR=$(printf '%s' "$PR")" >> "$GITHUB_OUTPUT"
-          echo "SHA=$SHA" >> "$GITHUB_OUTPUT"
+          echo "TRIGGER_SHA=$SHA" >> "$GITHUB_OUTPUT"
+          BRANCH=$(gh pr view "$PR" --repo "${{ github.repository }}" --json headRefName --jq .headRefName 2>/dev/null || true)
+          echo "BRANCH=$BRANCH" >> "$GITHUB_OUTPUT"
 
-      - name: Verify the charly/pr-validator check is green on the head
-        id: gate
+      - name: Sync, mint repo-aware CalVer, finalize CHANGELOG on the branch
+        id: sync
+        if: steps.resolve.outputs.PR != ''
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN || secrets.AUTO_MERGE_PAT }}
+          GH_TOKEN: ${{ secrets.AUTO_MERGE_PAT || secrets.GITHUB_TOKEN }}
         run: |
           PR="${{ steps.resolve.outputs.PR }}"
-          SHA="${{ steps.resolve.outputs.SHA }}"
-          if [ -z "$PR" ] || [ -z "$SHA" ]; then
-            echo "::error::No open PR matched head SHA $SHA (validator may have run on a branch push)"; exit 2
-          fi
-          # Exactly the required context must be success on this head.
-          STATE=$(gh api "repos/${{ github.repository }}/commits/$SHA/check-runs" \
-            --jq '[.check_runs[] | select(.name == "charly/pr-validator")] | first | .conclusion')
-          echo "gate conclusion: ${STATE:-<none>}"
-          [ "$STATE" = "success" ] || { echo "::error::charly/pr-validator check is not success on $SHA"; exit 1; }
-          echo "PR=$PR" >> "$GITHUB_OUTPUT"
-
-      - name: Update branch if BEHIND, then squash-merge
-        id: merge
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN || secrets.AUTO_MERGE_PAT }}
-        run: |
-          PR="${{ steps.gate.outputs.PR }}"
           REPO="${{ github.repository }}"
-          # Bring an out-of-date branch current (merge, never rebase-force).
+          BRANCH="${{ steps.resolve.outputs.BRANCH }}"
+          GITPY="https://x-access-token:$GH_TOKEN@github.com/$REPO.git"
           for i in $(seq 1 8); do
             MS=$(gh pr view "$PR" --repo "$REPO" --json mergeStateStatus --jq .mergeStateStatus)
-            if [ "$MS" = "BEHIND" ]; then
-              gh pr update-branch "$PR" --repo "$REPO" >/dev/null || true
-            else
-              break
-            fi
+            if [ "$MS" = "BEHIND" ]; then gh pr update-branch "$PR" --repo "$REPO" >/dev/null || true; else break; fi
             sleep 15
           done
-          PRB=$(gh pr view "$PR" --repo "$REPO" --json headRefName --jq .headRefName)
-          GITPY="https://x-access-token:$GH_TOKEN@github.com/$REPO.git"
-          # Mint a free merge-time CalVer (advance past a same-minute prior merge).
-          VER=$(date -u +%Y.%j.%H%M)
-          while gh api "repos/$REPO/git/ref/tags/v$VER" >/dev/null 2>&1; do
-            sleep 30; VER=$(date -u +%Y.%j.%H%M)
-          done
-          echo "CalVer: $VER"
-          # Finalize the placeholder CHANGELOG entry to $VER on the PR branch, then push it.
-          rm -rf /tmp/prfin && git init -q /tmp/prfin
-          git -C /tmp/prfin fetch -q "$GITPY" "$PRB"
-          git -C /tmp/prfin checkout -q FETCH_HEAD
-          PLACE=$(ls /tmp/prfin/CHANGELOG/*.md 2>/dev/null | grep -v README | head -1)
-          if [ -n "$PLACE" ]; then
-            base=$(basename "$PLACE")
-            [ "$base" = "$VER.md" ] || {
-              git -C /tmp/prfin mv "$PLACE" "/tmp/prfin/CHANGELOG/$VER.md"
-              # Rewrite only the leading CalVer token in the H1 (keeps the ' — title' tail).
-              sed -i "1s/^# [0-9.]*/# $VER/" "/tmp/prfin/CHANGELOG/$VER.md"
-              git -C /tmp/prfin add -A
-              git -C /tmp/prfin commit -q -m "chore(changelog): finalize $VER (merge-time CalVer)"
-              git -C /tmp/prfin push -q "$GITPY" "HEAD:$PRB"
-            }
+          # Repo-aware merge-time CalVer, advanced past any same-minute prior tag.
+          if gh api "repos/$REPO/contents/go.mod" >/dev/null 2>&1 || [ "$REPO" = "opencharly/sdk" ]; then
+            HHMM=$(date -u +%H%M); MIN=$(printf '%s' "$HHMM" | sed 's/^0*//'); MIN=${MIN:-0}
+            TAG="v0.$(date -u +%Y%j).$MIN"
+          else
+            VER=$(date -u +%Y.%j.%H%M); TAG="v$VER"
+            while gh api "repos/$REPO/git/ref/tags/$TAG" >/dev/null 2>&1; do
+              sleep 30; VER=$(date -u +%Y.%j.%H%M); TAG="v$VER"
+            done
           fi
-          sleep 8
+          VER_BASE="${TAG#v}"
+          echo "CalVer tag: $TAG"
+          # Finalize the placeholder CHANGELOG entry (rename + H1) ON the branch, then push.
+          rm -rf /tmp/prfin && git init -q /tmp/prfin
+          git -C /tmp/prfin fetch -q "$GITPY" "refs/pull/$PR/head"
+          git -C /tmp/prfin checkout -q FETCH_HEAD
+          PLACE=$(ls /tmp/prfin/CHANGELOG/*.md 2>/dev/null | grep -v README | head -1 || true)
+          if [ -n "$PLACE" ] && [ "$(basename "$PLACE")" != "$VER_BASE.md" ]; then
+            git -C /tmp/prfin mv "$PLACE" "/tmp/prfin/CHANGELOG/$VER_BASE.md"
+            sed -i "1s/^# [0-9.]*/# $VER_BASE/" "/tmp/prfin/CHANGELOG/$VER_BASE.md"
+            git -C /tmp/prfin add -A
+            git -C /tmp/prfin -c user.email="auto-merge@users.noreply.github.com" -c user.name="auto-merge" \
+              commit -q -m "chore(changelog): finalize $VER_BASE (merge-time CalVer)"
+            git -C /tmp/prfin push -q "$GITPY" "HEAD:refs/heads/$BRANCH"
+          fi
+          # The FINAL head to merge — after update-branch AND the finalize push.
+          FINAL_SHA=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha)
+          echo "FINAL_SHA=$FINAL_SHA" >> "$GITHUB_OUTPUT"
+          echo "TAG=$TAG" >> "$GITHUB_OUTPUT"
+          echo "VER_BASE=$VER_BASE" >> "$GITHUB_OUTPUT"
+          echo "final head: $FINAL_SHA"
+
+      - name: Verify the gate on the EXACT final head (never merge an unvalidated head)
+        id: gate
+        if: steps.sync.outputs.FINAL_SHA != ''
+        env:
+          GH_TOKEN: ${{ secrets.AUTO_MERGE_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          PR="${{ steps.resolve.outputs.PR }}"
+          REPO="${{ github.repository }}"
+          FINAL_SHA="${{ steps.sync.outputs.FINAL_SHA }}"
+          # Any branch-update/finalize push triggered a NEW validator run on this SHA.
+          # Wait (bounded, 40 min) for that run's check to complete on this exact head.
+          ok=""
+          for i in $(seq 1 80); do
+            concl=$(gh api "repos/$REPO/commits/$FINAL_SHA/check-runs" --jq \
+              '[.check_runs[] | select(.name == "charly/pr-validator")] | first | .conclusion' 2>/dev/null || true)
+            echo "[$i] check on final head $FINAL_SHA: ${concl:-<pending>}"
+            case "$concl" in
+              success) ok=1; break ;;
+              failure|action_required|timed_out|cancelled|neutral) break ;;
+            esac
+            sleep 30
+          done
+          if [ "$ok" != "1" ]; then
+            echo "::error::charly/pr-validator is not success on the final head $FINAL_SHA — aborting, NOT merging"
+            exit 1
+          fi
+          echo "gate verified success on $FINAL_SHA"
+
+      - name: Take the queue lock and squash-merge
+        id: merge
+        if: steps.gate.result == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.AUTO_MERGE_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          PR="${{ steps.resolve.outputs.PR }}"
+          REPO="${{ github.repository }}"
+          FINAL_SHA="${{ steps.sync.outputs.FINAL_SHA }}"
+          GITPY="https://x-access-token:$GH_TOKEN@github.com/$REPO.git"
+          LOCK="refs/heads/_lock/auto-merge/$PR"
+          git init -q /tmp/lockrepo
+          git -C /tmp/lockrepo -c user.email=lock -c user.name=lock commit -q --allow-empty -m lock
+          if ! git -C /tmp/lockrepo push -q "$GITPY" HEAD:"$LOCK" 2>/dev/null; then
+            echo "another run holds the queue lock ($LOCK); this run exits without merging"
+            exit 0
+          fi
+          echo "queue lock acquired: $LOCK"
           gh pr view "$PR" --repo "$REPO" --json body --jq .body > /tmp/squash.md
           gh pr merge "$PR" --repo "$REPO" --squash --delete-branch \
             --subject "merge: $PR (green charly/pr-validator)" --body-file /tmp/squash.md
           sleep 8
           MERGED_SHA=$(gh api "repos/$REPO/pulls/$PR" --jq .merge_commit_sha)
           echo "merged_sha=$MERGED_SHA" >> "$GITHUB_OUTPUT"
-          echo "ver=$VER" >> "$GITHUB_OUTPUT"
-          echo "merged SHA: $MERGED_SHA (CalVer $VER)"
+          echo "ver=${{ steps.sync.outputs.TAG }}" >> "$GITHUB_OUTPUT"
+          echo "merged SHA: $MERGED_SHA (CalVer ${{ steps.sync.outputs.TAG }})"
 
       - name: Verify merged trailer and apply the CalVer tag
         id: tag
         if: steps.merge.outputs.merged_sha != ''
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN || secrets.AUTO_MERGE_PAT }}
+          GH_TOKEN: ${{ secrets.AUTO_MERGE_PAT || secrets.GITHUB_TOKEN }}
           MERGED_SHA: ${{ steps.merge.outputs.merged_sha }}
-          VER: ${{ steps.merge.outputs.ver }}
+          VER: ${{ steps.sync.outputs.TAG }}
         run: |
-          echo "merged SHA: $MERGED_SHA"
-          echo "tagging v$VER"
           GITPY="https://x-access-token:$GH_TOKEN@github.com/${{ github.repository }}.git"
-          git -C /tmp init -q
-          git -C /tmp fetch -q "$GITPY" "$MERGED_SHA"
-          git -C /tmp tag -a "v$VER" -m "merge $MERGED_SHA (green charly/pr-validator)" "$MERGED_SHA"
-          git -C /tmp push "$GITPY" "refs/tags/v$VER"
-          echo "tagged v$VER @ $MERGED_SHA"
+          git init -q /tmp/tagrepo
+          git -C /tmp/tagrepo fetch -q "$GITPY" "$MERGED_SHA"
+          git -C /tmp/tagrepo tag -a "$VER" -m "merge $MERGED_SHA (green charly/pr-validator)" "$MERGED_SHA"
+          git -C /tmp/tagrepo push "$GITPY" "refs/tags/$VER"
+          echo "tagged $VER @ $MERGED_SHA"
+
+      - name: Release the queue lock (always)
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.AUTO_MERGE_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          PR="${{ steps.resolve.outputs.PR }}"
+          [ -n "$PR" ] || exit 0
+          GITPY="https://x-access-token:$GH_TOKEN@github.com/${{ github.repository }}.git"
+          git -C /tmp/lockrepo push "$GITPY" --delete "refs/heads/_lock/auto-merge/$PR" 2>/dev/null || true
+          echo "released queue lock for PR $PR"
