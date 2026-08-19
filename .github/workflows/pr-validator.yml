@@ -11,9 +11,8 @@
 # Fully generic — nothing is hardcoded. The LLM provider is configured at
 # runtime from the GitHub environment:
 #   vars.AI_REVIEW_PROVIDER   (default openrouter)
-#   vars.AI_REVIEW_API        (default openai-completions)
 #   vars.AI_REVIEW_BASE_URL   (default https://openrouter.ai/api/v1)
-#   vars.AI_REVIEW_MODEL      (default openrouter/deepseek-v4-flash-latest)
+#   vars.AI_REVIEW_MODEL      (default ~deepseek/deepseek-v4-flash-latest)
 #   secrets.AI_REVIEW_API_KEY (the provider API key — org-level secret)
 # Set these as org-level variables/secrets (visibility: all) so every repo inherits them.
 name: charly/pr-validator
@@ -43,34 +42,19 @@ jobs:
         with:
           node-version: 24
 
-      - name: Configure LLM provider
-        run: |
-          mkdir -p ~/.pi/agent
-          cat > ~/.pi/agent/models.json << 'EOF'
-          {
-            "providers": {
-              "${{ vars.AI_REVIEW_PROVIDER }}": {
-                "baseUrl": "${{ vars.AI_REVIEW_BASE_URL }}",
-                "api": "${{ vars.AI_REVIEW_API }}",
-                "apiKey": "${{ secrets.AI_REVIEW_API_KEY }}",
-                "models": [{
-                  "id": "${{ vars.AI_REVIEW_MODEL }}",
-                  "name": "${{ vars.AI_REVIEW_MODEL }}",
-                  "contextWindow": 1000000,
-                  "maxTokens": 32000
-                }]
-              }
-            }
-          }
-          EOF
-
       - name: Run Pi review
         id: pi
         uses: shaftoe/pi-coding-agent-action@v2.27.0  # pin exact release
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          # pi resolves provider+model against its built-in catalog: `openrouter` is a
+          # built-in provider and `~deepseek/deepseek-v4-flash-latest` is its exact model
+          # id (verified against OpenRouter's public /models catalog). `token` sets the
+          # provider API key and `base_url` overrides the provider endpoint at runtime —
+          # no models.json is written, so nothing is hardcoded.
           provider: ${{ vars.AI_REVIEW_PROVIDER }}
           model: ${{ vars.AI_REVIEW_MODEL }}
+          base_url: ${{ vars.AI_REVIEW_BASE_URL }}
           token: ${{ secrets.AI_REVIEW_API_KEY }}
           loaded_tools: |
             get_pr_diff

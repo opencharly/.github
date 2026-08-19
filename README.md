@@ -39,15 +39,18 @@ level, with **visibility: all** so every repo inherits them):
 | Name | Kind | Default | Purpose |
 |---|---|---|---|
 | `AI_REVIEW_PROVIDER` | variable | `openrouter` | LLM provider name |
-| `AI_REVIEW_API` | variable | `openai-completions` | Provider API format |
-| `AI_REVIEW_BASE_URL` | variable | `https://openrouter.ai/api/v1` | Provider base URL |
-| `AI_REVIEW_MODEL` | variable | `openrouter/deepseek-v4-flash-latest` | Model ID |
+| `AI_REVIEW_BASE_URL` | variable | `https://openrouter.ai/api/v1` | Provider base URL override (empty = built-in) |
+| `AI_REVIEW_MODEL` | variable | `~deepseek/deepseek-v4-flash-latest` | Exact model ID in the provider's catalog |
 | `AI_REVIEW_API_KEY` | secret | — | Provider API key (never committed) |
 
-The workflow writes these into `~/.pi/agent/models.json` and passes them to the
-pi coding agent action (`shaftoe/pi-coding-agent-action`). The API key is read
-only from the `AI_REVIEW_API_KEY` secret — it is never stored in this
-repository. The action is pinned to an exact release; bump it deliberately.
+The workflow passes these straight to the pi coding agent action
+(`shaftoe/pi-coding-agent-action`) as its native `provider` / `model` / `base_url` /
+`token` inputs — pi resolves the model against its built-in provider catalog, sets the
+API key via `setRuntimeApiKey()`, and overrides the endpoint via `registerProvider()`.
+No `models.json` is written, so nothing is hardcoded. `provider` must be a built-in pi
+provider and `model` its exact catalog ID. The API key is read only from the
+`AI_REVIEW_API_KEY` secret — it is never stored in this repository. The action is pinned
+to an exact release; bump it deliberately.
 
 ## Authority vs. convenience
 
