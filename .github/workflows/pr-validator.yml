@@ -334,19 +334,25 @@ jobs:
             runtime gate, NOT a lighter review.
 
             1b.0 — The cold reader is MANDATORY, and it is not you. You cannot evaluate whether
-            a page teaches a stranger, because you are not one. Spawn a general-purpose
-            sub-agent and brief it EXACTLY: name the changed page paths and forbid it every
-            other source (no source code, no skills, no VISION.md, no web search); tell it to
-            state plainly where the answer is "I could not tell"; ask for (a) the sixty-second
-            test, (b) comprehension (define each term it claims to define), (c) where it got
-            lost with exact quotes, (d) unsupported claims quoted, (e) what it still cannot
-            answer, and (f) "Which section would you have DELETED, and which is MISSING?". Scope
-            the reader to at most a handful of pages. For a REFERENCE page (a skill, a verb
-            catalog) ask whether it answers what it claims to and where it sends the reader
-            next. Skip it ONLY when the diff touches NO reader-facing page at all (a
-            CHANGELOG-only or config-only change). Its findings are FINDINGS, not suggestions; a
-            page a competent engineer cannot follow is defective. If it reports nothing
-            substantive, say so explicitly.
+            a page teaches a stranger, because you are not one. Perform the cold-read INLINE
+            with a forced stranger lens: this runner is a single session and cannot spawn a
+            separate sub-agent, so do NOT depend on one. For the moment of this check, discard
+            your repo knowledge and judge ONLY the changed reader-facing lines as a reader who
+            has seen nothing else — everything the page fails to explain, you must NOT supply
+            from memory; where you would normally fill a gap, state "I could not tell". Ask
+            yourself, scoped to the changed lines: the sixty-second test (one sentence in a
+            stranger's own words, would they keep reading); comprehension (define every term
+            the changed text uses, and say which you are unsure about); where you got lost
+            (exact quotes); unsupported claims (quoted); what you still cannot answer (what
+            this solves, who it is for, what it costs, what it runs on); and "which section
+            would have been DELETED, and which is MISSING?" For a REFERENCE surface (a config
+            table, a catalog) the right question is whether it answers what it claims to and
+            where it sends the reader next. Skip ONLY when the diff touches NO reader-facing
+            page at all (a CHANGELOG-only or config-only change). Findings are FINDINGS, not
+            suggestions; a page a competent engineer cannot follow is defective. State
+            EXPLICITLY in your verdict that the cold-read was performed inline (single-session
+            limitation) and what it produced — silence must be visible, so a skipped reader
+            cannot masquerade as a clean one.
 
             1b.1 — Mechanical checks you run yourself:
             1. Contradiction sweep. A term defined NEGATIVELY in one place and used POSITIVELY
