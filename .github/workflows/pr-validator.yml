@@ -42,6 +42,22 @@ jobs:
         with:
           node-version: 24
 
+      - name: Emit ground-truth evidence (fresh re-run for the validator)
+        run: |
+          # Authoritative, freshly-executed numbers for THIS head. The validator reads
+          # this file with bash; it must prefer it over any count pasted in the body or
+          # thread (those may be stale or wrong).
+          {
+            echo "models_json_workflow_count=$(grep -c 'models.json' .github/workflows/pr-validator.yml)"
+            echo "models_json_lines:"
+            grep -n 'models.json' .github/workflows/pr-validator.yml || true
+            echo "workflow_files:"
+            ls .github/workflows/
+            echo "working_tree_status:"
+            git status --porcelain || true
+          } > ground_truth.txt
+          cat ground_truth.txt
+
       - name: Run Pi review
         id: pi
         uses: shaftoe/pi-coding-agent-action@v2.27.0  # pin exact release
@@ -91,6 +107,12 @@ jobs:
                 what is locally re-runnable: git greps (per submodule), YAML/JSON validation,
                 file reads, generator regeneration checks when the generator is present,
                 lint/vet/test where the toolchains exist.
+              - `ground_truth.txt` at the repo root: freshly-emitted, authoritative numbers
+                for THIS head (e.g. models.json count) produced by the workflow's
+                "Emit ground-truth evidence" step. Read it with bash and cite ITS numbers.
+                Prefer your own bash re-run and this file over any count pasted in the body or
+                thread — pasted figures can be stale and you must not adopt them when you can
+                verify the committed bytes yourself.
             LIMIT — no external bed infrastructure: the `charly` binary, a disposable
             target, and live VM/container/lab environments are NOT in this runner. Bed
             re-runs and live-target probes therefore cannot be executed here; verify those
