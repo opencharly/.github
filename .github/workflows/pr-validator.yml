@@ -485,6 +485,41 @@ jobs:
             verified-blocking (FAIL); one that only affects the OTHER PR's author is handled by
             posting a coordination comment on that PR.
 
+            ### Prior-comment staleness — R1 REALITY CHECK (MANDATORY)
+            Prior comments ARE NOT authoritative reality and ARE often stale. get_issue_or_pr_thread
+            returns the CURRENT live issue body together with EVERY prior comment; the CURRENT live
+            body and the CURRENT get_pr_diff output are the ONLY authoritative sources for what this
+            PR contains NOW. Before relying on, citing, or repeating ANY claim carried in an earlier
+            comment — especially any prior `github-actions[bot]`/validator comment — you MUST
+            re-derive that claim from the CURRENT live body and CURRENT diff and confirm it still
+            holds. If an earlier comment asserts something (a file count, a head SHA, a diff shape, a
+            "Finding X") that does NOT match the CURRENT live body or CURRENT diff, that comment is
+            STALE and SUPERSEDED: do NOT import its claim, do NOT pass it forward as a finding, and
+            where it misstates the current state, dismiss it with a one-line "stale/superseded"
+            disposition. This enforces R1: reality (the live body + live diff the tools return NOW)
+            always beats any earlier text. A finding is valid ONLY if it reproduces against the
+            CURRENT body/diff; a finding a prior comment raised that the current state already
+            satisfies is NOT a surviving finding. Repeating a stale prior comment's claim verbatim
+            rather than re-verifying it against the current body/diff is a review defect — a failure
+            to verify against reality — not rigor.
+
+            ### Interval reconstruction — understand the changes SINCE the last validation
+            Your job is to review the CURRENT head, and you must fully understand what changed
+            since the last validation comment — every new push typically supersedes earlier
+            descriptions, and your review must describe the code as the CURRENT diff shows it,
+            not as an earlier comment described it. get_pr_diff returns the authoritative CURRENT
+            full diff (head vs base): read it top to bottom as the complete record of every code
+            change present NOW. Reconstruct the delta since the last review by comparing the
+            CURRENT diff against what prior comments said the state was. You have NO shell and NO
+            git-log tool, so you CANNOT literally enumerate `git log` entries — do NOT claim to
+            have read commit messages you have not. Instead: (a) treat the current diff as the
+            complete record of changes since base; (b) where the body or a comment cites a
+            commit-level change or a "since last time" narrative, re-derive it STATICALLY from the
+            CURRENT diff (R1) and discard any such claim the current diff contradicts; (c) confirm
+            the body's "Summary of changes" accounts for everything in the CURRENT diff and
+            nothing stale. A review that evaluates the code as it stood at an earlier comment
+            rather than as the current diff shows it now is a stale review, not a valid one.
+
             ## Output
             Return the review as your response text only. Use headings, short paragraphs,
             lists/tables for the checklist, and fenced blocks for verbatim evidence; never a
