@@ -22,11 +22,9 @@ copy inherits the files here — so a change lands **once**, not in every repo.
   a PR comment with the validation result, and gates the check (named `charly/pr-validator`,
   satisfying branch protection) on the returned `Verdict: PASS|BLOCK`. Fully generic —
   the LLM provider is configured at runtime from the GitHub environment (see below).
-- **`.github/workflows/auto-merge.yml`** — the disposer half of the two-step landing.
-  Runs when the `charly/pr-validator` gate completes **success** (PASS): re-verifies the
-  green check on the exact head, mints the merge-time CalVer, finalizes the placeholder
-  `CHANGELOG/<CalVer>.md`, squash-merges the validated head (never `--admin`), and
-  creates the `v<VER>` tag. Fully generic and auditable in run logs.
+  The merge/tag disposer (`auto-merge.yml`) lands in the immediately-following PR and is
+  installed + validated **by this very gate** (dogfooding), so the gate first proves
+  itself on the gate-only install before it is given autonomous merge authority.
 
 Future org-wide defaults (issue templates, `CONTRIBUTING.md`, `SECURITY.md`,
 reusable CI workflows via `uses: opencharly/.github/.github/workflows/…@main`)
@@ -57,25 +55,23 @@ provider and `model` its exact catalog ID. The API key is read only from the
 `AI_REVIEW_API_KEY` secret — it is never stored in this repository. The action is pinned
 to an exact release; bump it deliberately.
 
-## The two-phase pipeline (gate → merge/tag)
+## The validation → disposal pipeline
 
-The two workflows form one validation → disposal pipeline for every germain PR:
+The gate (this PR) is the validator; the auto-merge disposer lands as the separate next
+PR and is itself installed and validated by this gate. Landing order:
 
-1. **`pr-validator.yml`** runs on every non-fork pull request. It posts the
-   `charly/pr-validator` check run (the branch-protection required context) and a single
-   verdict comment, then gates on the returned `Verdict: PASS|BLOCK`.
-2. **`auto-merge.yml`** is triggered by the gate's **success** completion. It re-verifies
-   that the `charly/pr-validator` check on the PR head is green, mints a free merge-time
-   CalVer `v<YYYY.DDD.HHMM>`, finalizes the placeholder `CHANGELOG/<CalVer>.md` on the PR
-   branch, squash-merges the validated head (never `--admin`), and creates the `v<VER>`
-   tag on the merged commit. If the gate is not yet green it exits quietly and the next
-   successful validator run finishes the merge — the state machine is idempotent and
-   loop-free.
+1. **This PR installs `pr-validator.yml`** — runs on every non-fork pull request, posts
+   the `charly/pr-validator` check run (the branch-protection required context) and a
+   single verdict comment, then gates on the returned `Verdict: PASS|BLOCK`.
+2. **The follow-up `auto-merge.yml` PR** is submitted and validated by the now-live gate.
+   On gate **success** it re-verifies the green check on the exact head being merged,
+   mints a free merge-time CalVer, finalizes the placeholder `CHANGELOG/<CalVer>.md` on
+   the PR branch, squash-merges the validated head (never `--admin`), and creates the
+   `v<VER>` tag on the merged commit — idempotent and loop-free.
 
-Security hardening of `auto-merge.yml` (least-privilege PAT scoping, verdict integrity,
-per-repo sdk CalVer form, per-branch queue lock) is a tracked follow-up; the first cut
-prefers API-based merges that still require a green `charly/pr-validator` check on the
-exact head being merged, and never merges `--admin` or force-pushes.
+Bootstrapping: because a gate cannot merge the PR that installs it (self-modifying
+install), this gate-only PR is merged by the operator once it is green; every subsequent
+PR — including the disposer — is handled entirely by the gate + disposer.
 
 ## Authority vs. convenience
 
