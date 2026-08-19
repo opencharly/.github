@@ -468,19 +468,17 @@ jobs:
             echo "::error::Pi agent run failed (infra/model error, not a finding)"
             exit 2
           fi
-          # Robust verdict extraction: the response must contain EXACTLY ONE
-          # 'Verdict: PASS|BLOCK' line (the prompt requires it as the final line and
-          # nowhere else). If the agent quoted an adversarial 'Verdict:' from the PR
-          # body there would be >1 line — fail-safe to exit 2 rather than trust a
-          # tail -1 that could be mis-grepped.
-          n=$(printf '%s\n' "$REVIEW" | grep -cE '^Verdict: (BLOCK|PASS)[[:space:]]*$')
-          if [ "$n" -ne 1 ]; then
-            echo "::error::Ambiguous or missing verdict ($n verdict lines)"; exit 2
-          fi
-          verdict=$(printf '%s\n' "$REVIEW" \
-            | grep -E '^Verdict: (BLOCK|PASS)[[:space:]]*$' | tail -1)
-          case "$verdict" in
-            *PASS)  exit 0 ;;
-            *BLOCK) echo "::error::AI review blocked this PR — see comment"; exit 1 ;;
-            *) echo "::error::No verdict in response"; exit 2 ;;
+          # Robust verdict extraction: gather every 'Verdict: (BLOCK|PASS)' line.
+          # Zero lines = no verdict (exit 2); a MIX of PASS and BLOCK values =
+          # ambiguous / possibly a quoted adversarial line (exit 2, fail-safe).
+          # Multiple lines sharing ONE value are tolerated (the validator writes a
+          # verdict line both in its checklist and as its final line).
+          found=$(printf '%s\n' "$REVIEW" | grep -E '^Verdict: (BLOCK|PASS)[[:space:]]*$')
+          n=$(printf '%s\n' "$found" | grep -cE '^Verdict:')
+          [ "$n" -eq 0 ] && { echo "::error::No verdict in response"; exit 2; }
+          distinct=$(printf '%s\n' "$found" | sed -E 's/^Verdict: (BLOCK|PASS).*/\1/' | sort -u)
+          case "$distinct" in
+            PASS)  exit 0 ;;
+            BLOCK) echo "::error::AI review blocked this PR — see comment"; exit 1 ;;
+            *) echo "::error::Ambiguous verdicts ($n lines, values: $distinct)"; exit 2 ;;
           esac
