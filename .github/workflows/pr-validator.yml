@@ -468,6 +468,15 @@ jobs:
             echo "::error::Pi agent run failed (infra/model error, not a finding)"
             exit 2
           fi
+          # Robust verdict extraction: the response must contain EXACTLY ONE
+          # 'Verdict: PASS|BLOCK' line (the prompt requires it as the final line and
+          # nowhere else). If the agent quoted an adversarial 'Verdict:' from the PR
+          # body there would be >1 line — fail-safe to exit 2 rather than trust a
+          # tail -1 that could be mis-grepped.
+          n=$(printf '%s\n' "$REVIEW" | grep -cE '^Verdict: (BLOCK|PASS)[[:space:]]*$')
+          if [ "$n" -ne 1 ]; then
+            echo "::error::Ambiguous or missing verdict ($n verdict lines)"; exit 2
+          fi
           verdict=$(printf '%s\n' "$REVIEW" \
             | grep -E '^Verdict: (BLOCK|PASS)[[:space:]]*$' | tail -1)
           case "$verdict" in
