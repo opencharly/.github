@@ -16,10 +16,35 @@ copy inherits the files here — so a change lands **once**, not in every repo.
   required PR-validator status. It discovers every active, non-fork repository
   through GitHub, replaces the required context in one batch, and verifies the
   resulting protection without maintaining per-repository copies or lists.
+- **`.github/workflows/ai-review.yml`** — the org-wide AI PR review + validation
+  gate. Runs the pi coding agent as a fresh, independent PR validator on every
+  pull request, posts the review as a PR comment, and gates the merge on the
+  returned `Verdict: PASS|BLOCK`. Fully generic — the LLM provider is
+  configured at runtime from the GitHub environment (see below).
 
 Future org-wide defaults (issue templates, `CONTRIBUTING.md`, `SECURITY.md`,
 reusable CI workflows via `uses: opencharly/.github/.github/workflows/…@main`)
 belong here too — one source, inherited everywhere.
+
+## The `ai-review` workflow — required org-level configuration
+
+`.github/workflows/ai-review.yml` runs on every non-fork pull request in the
+org. It is fully generic: nothing is hardcoded. Set these as **org-level**
+variables and secrets (Settings → Secrets and variables → Actions → New
+repository secret / New variable, at the org level) so every repo inherits them:
+
+| Name | Kind | Default | Purpose |
+|---|---|---|---|
+| `AI_REVIEW_PROVIDER` | variable | `openrouter` | LLM provider name |
+| `AI_REVIEW_API` | variable | `openai-completions` | Provider API format |
+| `AI_REVIEW_BASE_URL` | variable | `https://openrouter.ai/api/v1` | Provider base URL |
+| `AI_REVIEW_MODEL` | variable | `openrouter/deepseek-v4-flash-latest` | Model ID |
+| `AI_REVIEW_API_KEY` | secret | — | Provider API key (never committed) |
+
+The workflow writes these into `~/.pi/agent/models.json` and passes them to the
+pi coding agent action (`shaftoe/pi-coding-agent-action`). The API key is read
+only from the `AI_REVIEW_API_KEY` secret — it is never stored in this
+repository. The action is pinned to an exact release; bump it deliberately.
 
 ## Authority vs. convenience
 
