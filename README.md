@@ -82,30 +82,24 @@ Glossary (for a cold reader):
 
 ## Scope & evidence baseline (honest capability statement)
 
-This gate is a **diff + thread + CI-status + re-run review**. The pi validator runs with
-`get_pr_diff`, `get_issue_or_pr_thread`, `get_ci_status`, `get_workflow_run_logs` **plus a
-real `bash` shell over the checked-out repo** (`read`/`find`/`grep` included). It genuinely
-re-executes what the runner can execute at the PR head: repository greps per submodule,
-YAML/JSON validation, file reads, generator regeneration checks (`cue:gen`,
-`marketplace generate`, `docs generate`) and lint/vet/test runs where the toolchains exist
-in the runner. It never trusts an author's claim it can verify itself.
+This gate is a **static diff + thread + CI-status review**. The pi validator runs with
+exactly four read-only tools — `get_pr_diff`, `get_issue_or_pr_thread`, `get_ci_status`,
+`get_workflow_run_logs` — and **no shell** (no filesystem access, no execution, no
+greps/beds/generators/lint re-runs in the runner). For every claim it verifies it either
+(a) derives it from the diff, thread, CI state, or prior run logs, or (b) **cross-checks
+the author's pasted output for internal consistency** (plausible content, correct file
+names/counts, class-gate fit) and states an explicit tool-limited disposition ("could not
+re-run from this environment") where independent re-execution would be required. It never
+fabricates a run and never lets a missing re-run pass on the author's word alone.
 
-What it **cannot** re-execute is external bed infrastructure: the `charly` binary is not
-installed in the runner, there is no disposable target, and no live VM/container/lab
-environment. For runtime-bed claims (`charly check run <bed>`, live probes), the gate
-*does* re-validate the author's pasted output for existence, plausibility, internal
-consistency, and class-gate fit, and it states the explicit tool-limited disposition
-("could not re-run from this environment") — it never fabricates a run and never lets a
-missing re-run pass on the author's word alone.
-
-Consequence for evidence trust on **runtime-class** claims (beds, live probes): the gate
-validates the pasted artifact and requires full internal consistency, but the authoritative
-deep independent re-execution remains the job of the full shell-enabled fresh-evaluator
-agent in the `charly` repo (its `pr-validator.md`), which this gate complements as the
-org-wide first line. Authors must therefore paste complete, self-consistent, fraud-free
-evidence for anything this runner cannot re-run; the gate's cross-check is a real
-re-validation but not a substitute for a live bed re-run. This is the org's expected
-baseline for runtime-class PRs reviewed by this gate — no more is overclaimed.
+Consequence for evidence trust on **runtime / Go / schema** classes: the gate takes the
+author's pasted bed/regen/lint output and validates it statically — it cannot independently
+re-run it. Deep independent re-execution of runtime-class evidence remains the job of the
+full shell-enabled fresh-evaluator agent in the `charly` repo (its `pr-validator.md`),
+which this gate complements as the org-wide first line. Authors must therefore paste
+complete, self-consistent, fraud-free evidence; the gate's static cross-check is not a
+substitute for a live re-run. This is the org's expected baseline for runtime-class PRs
+reviewed by this gate — no more is overclaimed.
 
 ## The validation → disposal pipeline
 
