@@ -479,14 +479,16 @@ jobs:
           # the instant this (or any) PR merges. Permanent green after they land.
           for pr in "opencharly/charly 349" "opencharly/plugins 213"; do
             set -- $pr; repo=$1; num=$2
-            state=$(gh api "repos/$repo/pulls/$num" --jq '.state + "/" + (.merged|tostring)' 2>/dev/null || echo unknown)
+            # Companion repos are PUBLIC. Use the public API via curl so the repo-scoped
+            # GITHUB_TOKEN (which cannot authorize reading a different repository) does not
+            # 404 the call — otherwise the gate can never confirm the companion cut-over
+            # and stays red forever even after the companions merge.
+            state=$(curl -s -H "User-Agent: charly-pr-validator" "https://api.github.com/repos/$repo/pulls/$num" | jq -r '(.state)+"/"+((.merged|tostring))' 2>/dev/null || echo unreadable)
             echo "companion $repo#$num -> $state"
             case "$state" in
               closed/true) : ;;
-              *)
-                echo "::error::merge-order gate: companion $repo#$num not merged (state=$state — open or unreadable); the required charly/pr-validator check stays red until the companion cut-over lands"
-                exit 1
-                ;;
+              */*) echo "::error::merge-order gate: companion $repo#$num not merged yet (state=$state); the required charly/pr-validator check stays red until the companion cut-over lands"; exit 1 ;;
+              *) echo "::error::merge-order gate: could not read companion $repo#$num (state=$state); refusing to pass"; exit 1 ;;
             esac
           done
           # Robust verdict extraction: gather every 'Verdict: (BLOCK|PASS)' line.
