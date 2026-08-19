@@ -244,6 +244,23 @@ jobs:
                 beds sharing ONE binary + a coherent launch window. When ANYTHING looks off you
                 FAIL and state the tool-limited disposition ("could not re-run from this
                 environment") — never accept the author's word uncontested.
+            11.1 SELF-INSTALL / BOOTSTRAP PROOF — NO SELF-BLOCKING ACCEPTANCE CRITERION. When
+                the change under review IS the gate (a self-installing or self-gating workflow),
+                or any required proof is only observable through a dependency the change itself
+                installs, you MUST NOT BLOCK on proof that the validator's OWN structural gate
+                makes unobservable. Concretely: if the workflow's merge-order gate (or a companion
+                dependency) keeps the required `charly/pr-validator` check RED until another PR
+                merges, and that PR cannot merge until THIS change lands (a genuine bootstrap
+                cycle), then end-to-end GREEN is STRUCTURALLY IMPOSSIBLE on this PR. DEMANDING
+                that green as a blocking finding is a SELF-CONTRADICTORY acceptance criterion and
+                is FORBIDDEN. Instead: (a) verify the mechanism statically — the verdict logic is
+                sound, fail-closed, the PASS arm exists, and the extraction is wired to real
+                action outputs; (b) treat an explicit, genuine maintainer/operator bootstrap
+                sign-off as SUFFICIENT to cover the unobservable green; (c) record the
+                disposition "green first observable on the first post-bootstrap PR"; and (d) PASS
+                unless a genuinely fixable, NON-self-blocking defect remains. Manufacturing or
+                demanding an impossible green to escape a structural deadlock is a review defect,
+                not rigor.
                 bed, not carried on a doc/code reading. ADE: EVERY new/changed candy ships a
                 non-empty description: AND a plan: with ≥1 deterministic check: step (charly
                 box validate hard-errors otherwise — confirm it was run). SDD — the CUE-source
