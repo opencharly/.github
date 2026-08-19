@@ -78,6 +78,29 @@ Glossary (for a cold reader):
   auto-merge disposer), so the mechanism proves itself on the gate-only install before it is
   given autonomous merge authority.
 
+
+## Scope & evidence baseline (honest capability statement)
+
+This gate is a **static diff + thread + CI-status review**. The pi validator runs with
+exactly four tools — `get_pr_diff`, `get_issue_or_pr_thread`, `get_ci_status`,
+`get_workflow_run_logs` — and **no shell** (R9-style table below). It does **not**
+re-execute runtime beds, generators (`cue:gen`, `marketplace generate`, `docs generate`),
+or repository greps. For every claim it verifies, it either (a) derives it from the diff,
+thread, CI state, or prior run logs, or (b) **cross-checks the author's pasted output for
+internal consistency** and states an explicit tool-limited disposition ("could not
+re-run from this environment") where independent re-execution would be required. It
+never fabricates a run.
+
+Consequence for evidence trust on **runtime / Go / schema** classes: the gate takes the
+author's pasted bed/regen/lint output and validates it statically (existence, plausibility,
+internal consistency, class-gate fit) — it cannot independently re-run it. Deep
+independent re-execution of runtime-class evidence remains the job of the full
+shell-enabled fresh-evaluator agent in the `charly` repo (its `pr-validator.md`), which
+this gate complements as the org-wide first line. Authors must therefore paste complete,
+self-consistent, fraud-free evidence; the gate's static cross-check is not a substitute
+for a live re-run. This is the org's expected baseline for runtime-class PRs reviewed by
+this gate — no more is overclaimed.
+
 ## The validation → disposal pipeline
 
 The gate (this PR) is the validator; the auto-merge disposer lands as the separate next
