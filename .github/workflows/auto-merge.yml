@@ -249,7 +249,7 @@ jobs:
                 | grep -E '^CHANGELOG/[0-9]{4}\.[0-9]{3}\.[0-9]{4}\.md$' | head -1 || true)
               if [ -n "$placeholder" ]; then
                 if git show "origin/$head_branch:$placeholder" 2>/dev/null >/tmp/am-placeholder-check \
-                   && grep -q 'auto-merge-finalized' /tmp/am-placeholder-check; then
+                   && grep -q "auto-merge-finalized: $(basename "$placeholder" .md)" /tmp/am-placeholder-check; then
                   echo "CHANGELOG already finalized — skipping finalization"
                   STAMP=$(basename "$placeholder" .md)
                 else
