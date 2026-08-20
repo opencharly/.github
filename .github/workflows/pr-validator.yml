@@ -62,7 +62,7 @@ jobs:
     steps:
       - name: Run Pi review (opencharly/pi-review-action)
         id: review
-        uses: opencharly/pi-review-action@v1.0.2  # pin exact release tag
+        uses: opencharly/pi-review-action@v1.0.3  # pin exact release tag
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           # The validator prompt, tool set, and staleness handling live INSIDE the action
