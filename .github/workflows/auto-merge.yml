@@ -1,0 +1,76 @@
+# Auto-merge — disposer for the org-wide charly/pr-validator gate.
+#
+# When the gate's validator produces a PASS verdict, the check run (named
+# `charly/pr-validator`) completes with a `success` conclusion. This workflow
+# is triggered by that completion: it reads the PR number from the head SHA,
+# squash-merges the PR, and CalVer-tags the merged commit.
+#
+# This is the companion to the reusable gate at
+# `opencharly/.github/.github/workflows/pr-validator.yml`. It lives here
+# alongside the gate; any repo that inherits the gate can also inherit this
+# auto-merge by adding the same dispatcher pattern.
+#
+# Design: simple, safe, idempotent. Only runs on `pull_request` events from
+# the org-wide gate. A PASS verdict and a green check are the only gate.
+# No auto-merge runs on a BLOCK (the gate check would be `failure`).
+name: auto-merge
+
+on:
+  workflow_run:
+    workflows: ["charly/pr-validator"]
+    types: [completed]
+
+permissions:
+  pull-requests: write
+  contents: write
+
+jobs:
+  auto-merge:
+    if: >
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+
+      - name: Extract PR number from head SHA
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR=$(gh api "repos/${{ github.repository }}/commits/${{ github.event.workflow_run.head_sha }}/pulls" \
+            --jq '.[0].number // empty')
+          if [ -z "$PR" ]; then
+            echo "No open PR found for head SHA — already merged or not a PR branch"
+            exit 0
+          fi
+          echo "number=$PR" >> "$GITHUB_OUTPUT"
+
+      - name: Squash-merge and CalVer tag
+        if: steps.pr.outputs.number != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VER="v$(date -u +%Y.%j.%H%M)"
+          echo "Merging PR #${{ steps.pr.outputs.number }} with tag $VER"
+
+          # Squash-merge
+          gh pr merge "${{ steps.pr.outputs.number }}" --squash --delete-branch=false
+
+          # Wait for the merge commit to settle
+          sleep 3
+
+          # Read the merge commit SHA from the PR API
+          MERGE_SHA=$(gh api "repos/${{ github.repository }}/pulls/${{ steps.pr.outputs.number }}" \
+            --jq '.merge_commit.sha // empty')
+
+          if [ -n "$MERGE_SHA" ]; then
+            git tag -a "$VER" -m "auto-merge: $VER" "$MERGE_SHA"
+            git push origin "refs/tags/$VER"
+            echo "Tagged $VER at $MERGE_SHA"
+          else
+            echo "No merge commit SHA found — PR may not have been merged"
+          fi
