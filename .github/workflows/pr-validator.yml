@@ -13,6 +13,7 @@ on:
       ai_review_base_url:
         type: string
         required: false
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -51,6 +52,14 @@ jobs:
         run: |
           echo "::error::AI review blocked this PR"
           exit 1
+
+      - name: Gate verdict (ambiguous)
+        if: >
+          steps.parse.outputs.verdict != 'BLOCK' &&
+          steps.parse.outputs.verdict != 'PASS'
+        run: |
+          echo "::error::Ambiguous verdict: ${{ steps.parse.outputs.verdict }}"
+          exit 2
 
       - name: Checkout PR head
         if: steps.parse.outputs.verdict == 'PASS'
