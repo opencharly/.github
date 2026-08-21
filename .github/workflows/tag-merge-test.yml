@@ -1,0 +1,12 @@
+name: tag-merge-test
+
+on:
+  pull_request:
+    types: [closed, merged]
+
+jobs:
+  t:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "merged event received: ${{ github.event.action }}"
