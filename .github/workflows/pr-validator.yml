@@ -93,6 +93,15 @@ jobs:
           ref: ${{ steps.pr.outputs.head_sha }}
           fetch-depth: 0
 
+      - name: Debug git auth sources
+        run: |
+          echo "--- env GIT_CONFIG ---"
+          env | grep -i '^GIT_CONFIG' || echo "(none)"
+          echo "--- extraheader config ---"
+          git config --show-origin --get-regexp 'http\..*extraheader' || echo "(none)"
+          echo "--- all http config ---"
+          git config --show-origin --get-regexp '^http\.' || echo "(none)"
+
       # 1. Rename CHANGELOG first (before validation)
       - name: Rename CHANGELOG
         id: changelog
