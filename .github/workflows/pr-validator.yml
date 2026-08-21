@@ -122,14 +122,19 @@ jobs:
             commit -m "docs: finalize CHANGELOG placeholder to $stamp (merge-time CalVer)"
           # Bot-token push: its synchronize event runs WITHOUT approval,
           # because GitHub gates only GITHUB_TOKEN-pushed events.
-          # actions/checkout installs `http.https://github.com/.extraheader`
-          # with the GITHUB_TOKEN; an Authorization extraheader makes git
-          # IGNORE URL credentials (push counts as GITHUB_TOKEN → run
-          # lands in action_required), and adding a second extraheader
-          # fails with `remote: Duplicate header: "Authorization"` (400).
-          # Unset it, then push with the bot token in the URL.
+          # The runner injects the GITHUB_TOKEN as an Authorization
+          # extraheader via GIT_CONFIG_* env vars, and git IGNORES URL
+          # credentials while an Authorization extraheader exists (the
+          # push then counts as GITHUB_TOKEN and its run lands in
+          # action_required). Replace the env config with the bot
+          # token's header and drop any local extraheader; the push
+          # then sends exactly one Authorization header.
+          AUTH=$(printf 'x-access-token:%s' "$BOT_TOKEN" | base64 -w0)
           git config --unset-all http.https://github.com/.extraheader || true
-          git push "https://x-access-token:${BOT_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:${HEAD_REF}"
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${AUTH}"
+          git push "https://github.com/${GITHUB_REPOSITORY}.git" "HEAD:${HEAD_REF}"
           echo "renamed=true" >> "$GITHUB_OUTPUT"
 
       - name: Exit after rename
