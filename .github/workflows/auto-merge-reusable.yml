@@ -231,6 +231,7 @@ jobs:
 
       # -- Step 8 — Enable native auto-merge via GraphQL ----------------------
       - name: 🚀 Enable auto-merge
+        if: steps.pr.outputs.state == 'open'
         uses: actions/github-script@v7
         with:
           script: |
@@ -252,6 +253,7 @@ jobs:
 
       # -- Step 9 — Wait for merge, then tag ----------------------------------
       - name: ⏳ Wait for merge and tag
+        if: steps.pr.outputs.state == 'open'
         uses: actions/github-script@v7
         with:
           script: |
