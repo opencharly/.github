@@ -9,6 +9,17 @@
 name: charly/pr-validator
 
 on:
+  workflow_call:
+    inputs:
+      ai_review_provider:
+        type: string
+        required: false
+      ai_review_model:
+        type: string
+        required: false
+      ai_review_base_url:
+        type: string
+        required: false
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
@@ -26,9 +37,9 @@ jobs:
       - uses: opencharly/pi-review-action@v1.0.7
         id: review
         with:
-          provider: ${{ vars.AI_REVIEW_PROVIDER }}
-          model: ${{ vars.AI_REVIEW_MODEL }}
-          base_url: ${{ vars.AI_REVIEW_BASE_URL }}
+          provider: ${{ inputs.ai_review_provider || vars.AI_REVIEW_PROVIDER }}
+          model: ${{ inputs.ai_review_model || vars.AI_REVIEW_MODEL }}
+          base_url: ${{ inputs.ai_review_base_url || vars.AI_REVIEW_BASE_URL }}
           api_key: ${{ secrets.AI_REVIEW_API_KEY }}
           max_turns: 20
 
