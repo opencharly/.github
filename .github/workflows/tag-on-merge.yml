@@ -1,18 +1,17 @@
 # ORG-WIDE TAG-ON-MERGE (reusable via workflow_call)
 #
-# Triggered by a dispatcher on pull_request:closed when merged.
-# Creates the CalVer release tag on the merge commit.
+# Called by a push-triggered dispatcher (every squash merge pushes a
+# commit to main). Creates the CalVer release tag on the pushed sha.
+#
+# NOTE: the old pull_request:closed-based design never fired — this
+# GitHub emits action "merged" (not "closed") for merged PRs, and
+# "merged" is not a valid workflow trigger type.
 name: tag-on-merge
 
-# NOTE: `workflow_call` with BOTH `inputs:` and `secrets:` fails to
-# load on GitHub (observed: caller runs fail with no jobs; the
-# documented combination is rejected by the parser here). The working
-# pattern (as in pr-validator.yml) is: no secrets declaration + caller
-# `secrets: inherit` + direct `${{ secrets.X }}` references.
 on:
   workflow_call:
     inputs:
-      pr-number:
+      sha:
         required: true
         type: string
 
@@ -23,21 +22,12 @@ jobs:
       - uses: actions/github-script@v7
         with:
           script: |
-            const num = parseInt('${{ inputs.pr-number }}');
-            const { data: pr } = await github.rest.pulls.get({ ...context.repo, pull_number: num });
-
-            if (!pr.merged || !pr.merge_commit_sha) {
-              core.info(`PR #${num} not merged — skipping`);
-              return;
-            }
-
-            const sha = pr.merge_commit_sha;
-            const d = new Date(pr.merged_at);
+            const sha = '${{ inputs.sha }}';
+            const d = new Date();
             const y = d.getUTCFullYear();
             const doy = String(Math.floor((d - new Date(y, 0, 0)) / 86400000)).padStart(3, '0');
             const hh = String(d.getUTCHours()).padStart(2, '0');
             const mm = String(d.getUTCMinutes()).padStart(2, '0');
-
             const tag = context.repo.repo === 'sdk'
               ? `v0.${y}${doy}.${parseInt(hh + mm)}`
               : `v${y}.${doy}.${hh}${mm}`;
