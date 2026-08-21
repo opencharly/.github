@@ -1,0 +1,9 @@
+name: debug-check-run
+on:
+  check_run:
+    types: [completed]
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo '${{ toJSON(github.event) }}' | head -c 2000
