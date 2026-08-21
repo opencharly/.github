@@ -6,7 +6,16 @@ on:
     types: [completed]
   workflow_run:
     workflows: ["charly/pr-validator"]
-    types: [completed]
+   Types: [completed]
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+concurrency:
+  group: auto-merge-${{ github.event.check_run.check_suite.head_branch || github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
 
 jobs:
   engine:
