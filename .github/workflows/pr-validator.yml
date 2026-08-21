@@ -141,19 +141,6 @@ jobs:
             await github.rest.pulls.update({ ...context.repo, pull_number: num, body });
             core.info('PR body updated');
 
-      - name: Dispatch validator re-run on new head
-        if: steps.changelog.outputs.fresh == 'true'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            await github.rest.actions.createWorkflowDispatch({
-              ...context.repo,
-              workflow_id: 'pr-validator-dispatcher.yml',
-              ref: '${{ steps.pr.outputs.head_ref }}',
-              inputs: { 'pr-number': '${{ steps.pr.outputs.number }}' },
-            });
-            core.info('Validator dispatched on new head');
-
       - name: Enable native auto-merge
         if: steps.parse.outputs.verdict == 'PASS'
         uses: actions/github-script@v7
