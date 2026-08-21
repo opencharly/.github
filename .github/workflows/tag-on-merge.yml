@@ -4,15 +4,17 @@
 # Creates the CalVer release tag on the merge commit.
 name: tag-on-merge
 
+# NOTE: `workflow_call` with BOTH `inputs:` and `secrets:` fails to
+# load on GitHub (observed: caller runs fail with no jobs; the
+# documented combination is rejected by the parser here). The working
+# pattern (as in pr-validator.yml) is: no secrets declaration + caller
+# `secrets: inherit` + direct `${{ secrets.X }}` references.
 on:
   workflow_call:
     inputs:
       pr-number:
         required: true
         type: string
-    secrets:
-      GITHUB_TOKEN:
-        required: true
 
 jobs:
   tag:
