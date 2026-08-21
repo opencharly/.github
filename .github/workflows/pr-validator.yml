@@ -93,15 +93,6 @@ jobs:
           ref: ${{ steps.pr.outputs.head_sha }}
           fetch-depth: 0
 
-      - name: Debug git auth sources
-        run: |
-          echo "--- env GIT_CONFIG ---"
-          env | grep -i '^GIT_CONFIG' || echo "(none)"
-          echo "--- extraheader config ---"
-          git config --show-origin --get-regexp 'http\..*extraheader' || echo "(none)"
-          echo "--- all http config ---"
-          git config --show-origin --get-regexp '^http\.' || echo "(none)"
-
       # 1. Rename CHANGELOG first (before validation)
       - name: Rename CHANGELOG
         id: changelog
@@ -131,19 +122,16 @@ jobs:
             commit -m "docs: finalize CHANGELOG placeholder to $stamp (merge-time CalVer)"
           # Bot-token push: its synchronize event runs WITHOUT approval,
           # because GitHub gates only GITHUB_TOKEN-pushed events.
-          # The runner injects the GITHUB_TOKEN as an Authorization
-          # extraheader via GIT_CONFIG_* env vars, and git IGNORES URL
-          # credentials while an Authorization extraheader exists (the
-          # push then counts as GITHUB_TOKEN and its run lands in
-          # action_required). Replace the env config with the bot
-          # token's header and drop any local extraheader; the push
-          # then sends exactly one Authorization header.
-          AUTH=$(printf 'x-access-token:%s' "$BOT_TOKEN" | base64 -w0)
-          git config --unset-all http.https://github.com/.extraheader || true
-          export GIT_CONFIG_COUNT=1
-          export GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
-          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${AUTH}"
-          git push "https://github.com/${GITHUB_REPOSITORY}.git" "HEAD:${HEAD_REF}"
+          # actions/checkout injects the GITHUB_TOKEN Authorization
+          # extraheader through a temp config file referenced by
+          # `include.path` (observed:
+          # /home/runner/work/_temp/git-credentials-*.config). While an
+          # Authorization extraheader exists, git IGNORES URL
+          # credentials — the push counts as GITHUB_TOKEN and its
+          # synchronize run lands in action_required. Drop the include,
+          # then push with the bot token embedded in the URL.
+          git config --local --unset-all include.path || true
+          git push "https://x-access-token:${BOT_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:${HEAD_REF}"
           echo "renamed=true" >> "$GITHUB_OUTPUT"
 
       - name: Exit after rename
