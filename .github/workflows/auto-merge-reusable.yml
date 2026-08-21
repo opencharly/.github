@@ -1,12 +1,17 @@
 # ORG-WIDE AUTO-MERGE ENGINE (reusable via workflow_call)
 #
-# Canonical source — this file.  Called by a thin dispatcher
-# (auto-merge.yml) in each target repo when the charly/pr-validator
-# check passes.  This reusable workflow does ALL the work: wait for
-# all status checks, finalize the CHANGELOG placeholder, dispatch a
-# fresh validator run, enable native auto-merge via GraphQL, wait for
-# the merge, and mint the CalVer release tag.
+# Called by a thin dispatcher in each target repo.  It finalizes the
+# CHANGELOG placeholder, re-triggers the validator on the new head,
+# and enables GitHub's native auto-merge — which waits for ALL status
+# checks (including the re-run validator) through branch protection.
 #
+# The engine does NOT poll status checks.  GitHub's native auto-merge
+# (`enablePullRequestAutoMerge`) already handles that: it checks ALL
+# required branch-protection contexts and only merges when every one
+# is passing.  The only polling is a lightweight PR-state loop waiting
+# for the merge to complete.
+#
+# Canonical source: this file.
 # Install the dispatcher: opencharly/.github/org-wide-auto-merge-dispatcher.yml
 name: auto-merge
 
@@ -18,25 +23,21 @@ on:
         required: true
         type: string
     secrets:
-      # The caller passes `secrets: inherit` so GITHUB_TOKEN arrives
-      # with contents:write, pull-requests:write, actions:write.
       GITHUB_TOKEN:
         required: true
 
 jobs:
   engine:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
     steps:
-      # -- Checkout -----------------------------------------------------------
       - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.head-sha }}
           fetch-depth: 0
 
       # -- Step 1 — Find the PR, detect state, extract refs -------------------
-      - name: 🔍 Find PR
-        id: pr
+      - id: pr
         uses: actions/github-script@v7
         with:
           script: |
@@ -44,7 +45,6 @@ jobs:
               ...context.repo,
               commit_sha: '${{ inputs.head-sha }}',
             });
-
             const open = prs.find(p => p.state === 'open');
             if (open) {
               core.setOutput('number', String(open.number));
@@ -55,147 +55,84 @@ jobs:
               core.info(`PR #${open.number} open — ${open.head.ref} → ${open.base.ref}`);
               return;
             }
-
-            // Already merged — tag and let the next step exit early.
             const merged = prs.find(p => p.state === 'closed' && p.merge_commit_sha);
             if (merged) {
               core.setOutput('state', 'closed');
               core.setOutput('merge_sha', merged.merge_commit_sha);
               core.setOutput('merge_date', merged.merged_at);
-              core.info('PR already merged — will tag');
               return;
             }
-            core.setFailed('No open PR found');
+            core.setFailed('No open PR found for this commit');
 
-      # -- Step 2 — Tag an already-closed PR and exit (idempotent) ------------
-      - name: 🏷️ Tag merged PR
-        if: steps.pr.outputs.state == 'closed'
+      # -- Step 2 — Tag an already-closed PR and exit -------------------------
+      - if: steps.pr.outputs.state == 'closed'
         uses: actions/github-script@v7
         with:
           script: |
-            const { repo } = context.repo;
             const sha = '${{ steps.pr.outputs.merge_sha }}';
             const d = new Date('${{ steps.pr.outputs.merge_date }}');
             const y = d.getUTCFullYear();
             const doy = String(Math.floor((d - new Date(y, 0, 0)) / 86400000)).padStart(3, '0');
             const hh = String(d.getUTCHours()).padStart(2, '0');
             const mm = String(d.getUTCMinutes()).padStart(2, '0');
-            const stamp = `${y}.${doy}.${hh}${mm}`;
-            const tag = repo === 'sdk'
+            const tag = context.repo.repo === 'sdk'
               ? `v0.${y}${doy}.${parseInt(hh + mm)}`
-              : `v${stamp}`;
-
-            try {
-              await github.rest.git.getRef({ ...context.repo, ref: `tags/${tag}` });
-              core.info(`Tag ${tag} already exists — skipping`);
-            } catch {
-              await github.rest.git.createRef({ ...context.repo, ref: `refs/tags/${tag}`, sha });
-              core.info(`Tagged ${tag} at ${sha}`);
-            }
+              : `v${y}.${doy}.${hh}${mm}`;
+            try { await github.rest.git.getRef({ ...context.repo, ref: `tags/${tag}` }); }
+            catch { await github.rest.git.createRef({ ...context.repo, ref: `refs/tags/${tag}`, sha }); }
 
       # -- Step 3 — Fetch PR base + head branches for the diff ----------------
-      - name: 📡 Fetch branches
-        if: steps.pr.outputs.state == 'open'
+      - if: steps.pr.outputs.state == 'open'
         run: |
           git fetch origin \
             "+refs/heads/${{ steps.pr.outputs.base_ref }}:refs/remotes/origin/${{ steps.pr.outputs.base_ref }}" \
             "+refs/heads/${{ steps.pr.outputs.head_ref }}:refs/remotes/origin/${{ steps.pr.outputs.head_ref }}"
 
       # -- Step 4 — CHANGELOG finalization (git operations) -------------------
-      - name: 📝 Finalize CHANGELOG
-        if: steps.pr.outputs.state == 'open'
+      - if: steps.pr.outputs.state == 'open'
         id: changelog
         env:
           BASE_REF: ${{ steps.pr.outputs.base_ref }}
           HEAD_REF: ${{ steps.pr.outputs.head_ref }}
         run: |
           set -euo pipefail
-
-          placeholder=$(git diff --name-status "origin/${BASE_REF}...origin/${HEAD_REF}" -- CHANGELOG/ \
+          p=$(git diff --name-status "origin/${BASE_REF}...origin/${HEAD_REF}" -- CHANGELOG/ \
             | awk '$1=="A"{print $NF}' \
-            | grep -E '^CHANGELOG/[0-9]{4}\.[0-9]{3}\.[0-9]{4}\.md$' \
-            | head -1 || true)
-
-          if [ -z "$placeholder" ]; then
-            echo "No placeholder CHANGELOG — skipping"
-            exit 0
-          fi
-
-          # Already finalized?  Check the idempotency marker.
-          content=$(git show "origin/$HEAD_REF:$placeholder" 2>/dev/null || true)
-          if echo "$content" | grep -q "auto-merge-finalized: $(basename "$placeholder" .md)"; then
-            stamp=$(basename "$placeholder" .md)
-            echo "Already finalized at $stamp"
-            echo "stamp=$stamp" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
+            | grep -E '^CHANGELOG/[0-9]{4}\.[0-9]{3}\.[0-9]{4}\.md$' | head -1 || true)
+          [ -z "$p" ] && exit 0
+          c=$(git show "origin/$HEAD_REF:$p" 2>/dev/null || true)
+          echo "$c" | grep -q "auto-merge-finalized: $(basename "$p" .md)" \
+            && { echo "stamp=$(basename "$p" .md)" >> "$GITHUB_OUTPUT"; exit 0; }
           stamp=$(date -u +%Y.%j.%H%M)
-          base_stamp=$(basename "$placeholder" .md)
-
-          if [ "$base_stamp" = "$stamp" ]; then
-            echo "Placeholder already matches merge stamp $stamp"
-            echo "stamp=$stamp" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          echo "Finalizing $placeholder → CHANGELOG/$stamp.md"
+          [ "$(basename "$p" .md)" = "$stamp" ] \
+            && { echo "stamp=$stamp" >> "$GITHUB_OUTPUT"; exit 0; }
           git checkout -q -B dev/auto-merge "origin/$HEAD_REF"
-          git mv "$placeholder" "CHANGELOG/$stamp.md"
+          git mv "$p" "CHANGELOG/$stamp.md"
           sed -i -e "1s/^# [0-9]\{4\}\.[0-9]\{3\}\.[0-9]\{4\}/# $stamp/" \
-                 -e "1a\\<!-- auto-merge-finalized: $stamp -->" \
-                 "CHANGELOG/$stamp.md"
+                 -e "1a\\<!-- auto-merge-finalized: $stamp -->" "CHANGELOG/$stamp.md"
           git add "CHANGELOG/$stamp.md"
-          git -c user.name='opencharly auto-merge' \
-              -c user.email='actions@github.com' \
-              commit -m "docs: finalize CHANGELOG placeholder to $stamp (merge-time CalVer)"
+          git -c user.name='opencharly auto-merge' -c user.email='actions@github.com' \
+            commit -m "docs: finalize CHANGELOG placeholder to $stamp (merge-time CalVer)"
           git push origin "HEAD:${HEAD_REF}"
-
           echo "stamp=$stamp" >> "$GITHUB_OUTPUT"
 
-      # -- Step 5 — Update PR body (insert note BEFORE ## Attribution) --------
-      - name: 📝 Update PR body
-        if: steps.changelog.outputs.stamp != ''
+      # -- Step 5 — Update PR body with finalization note ---------------------
+      - if: steps.changelog.outputs.stamp != ''
         uses: actions/github-script@v7
         with:
           script: |
             const num = parseInt('${{ steps.pr.outputs.number }}');
             const stamp = '${{ steps.changelog.outputs.stamp }}';
-
             const { data: pr } = await github.rest.pulls.get({ ...context.repo, pull_number: num });
             let body = pr.body || '';
-
-            if (body.includes('<!-- auto-merge-finalization-note:')) {
-              core.info('Body already has finalization note — skipping');
-              return;
-            }
-
-            const note = [
-              '',
-              '## Auto-merge finalization',
-              '',
-              'This run finalized the CHANGELOG at merge time: the placeholder was',
-              `renamed to \`CHANGELOG/${stamp}.md\` (H1 rewritten to \`# ${stamp}\`).`,
-              'The current diff carries the finalized file.',
-              '',
-              `<!-- auto-merge-finalization-note: ${stamp} -->`,
-            ].join('\n');
-
-            // Insert BEFORE the ## Attribution section so the
-            // Assisted-by: footer stays at the very end of the body.
+            if (body.includes('<!-- auto-merge-finalization-note:')) return;
+            const note = `\n\n## Auto-merge finalization\n\nThis run finalized the CHANGELOG at merge time: the placeholder was renamed to \`CHANGELOG/${stamp}.md\` (H1 rewritten to \`# ${stamp}\`). The current diff carries the finalized file.\n\n<!-- auto-merge-finalization-note: ${stamp} -->`;
             const idx = body.indexOf('## Attribution');
-            if (idx >= 0) {
-              body = body.slice(0, idx) + note + '\n\n' + body.slice(idx);
-            } else {
-              body = body + note;
-            }
-
+            body = idx >= 0 ? body.slice(0, idx) + note + '\n\n' + body.slice(idx) : body + note;
             await github.rest.pulls.update({ ...context.repo, pull_number: num, body });
-            core.info('PR body updated');
 
-      # -- Step 6 — Dispatch a fresh validator run on the finalized head ------
-      - name: 🔄 Dispatch validator
-        if: steps.changelog.outputs.stamp != ''
+      # -- Step 6 — Dispatch validator on the finalized head ------------------
+      - if: steps.changelog.outputs.stamp != ''
         uses: actions/github-script@v7
         with:
           script: |
@@ -204,65 +141,46 @@ jobs:
               workflow_id: 'pr-validator.yml',
               ref: '${{ steps.pr.outputs.head_ref }}',
             });
-            core.info('Validator dispatched');
 
-      # -- Step 7 — Wait for the validator check-run to materialise -----------
-      - name: ⏳ Wait for validator
-        if: steps.changelog.outputs.stamp != ''
+      # -- Step 7 — Wait briefly for the validator check-run to appear --------
+      - if: steps.changelog.outputs.stamp != ''
         uses: actions/github-script@v7
         with:
           script: |
-            const headRef = '${{ steps.pr.outputs.head_ref }}';
             const snooze = ms => new Promise(r => setTimeout(r, ms));
-
-            for (let i = 0; i < 120; i++) {
-              const { data: checks } = await github.rest.checks.listForRef({
+            for (let i = 0; i < 60; i++) {
+              const { data: c } = await github.rest.checks.listForRef({
                 ...context.repo,
-                ref: headRef,
+                ref: '${{ steps.pr.outputs.head_ref }}',
               });
-              const v = checks.check_runs.find(c => c.name === 'charly/pr-validator');
-              if (v) {
-                core.info(`Validator present: ${v.status} / ${v.conclusion ?? '—'}`);
-                return;
-              }
+              if (c.check_runs.some(r => r.name === 'charly/pr-validator')) return;
               await snooze(5000);
             }
-            core.setFailed('Validator check-run did not appear in time');
+            core.warning('Validator check-run did not appear — auto-merge will still wait for it');
 
-      # -- Step 8 — Enable native auto-merge via GraphQL ----------------------
-      - name: 🚀 Enable auto-merge
-        if: steps.pr.outputs.state == 'open'
+      # -- Step 8 — Enable native auto-merge, wait, tag -----------------------
+      - if: steps.pr.outputs.state == 'open'
         uses: actions/github-script@v7
         with:
           script: |
             const num = parseInt('${{ steps.pr.outputs.number }}');
-            const nodeId = '${{ steps.pr.outputs.node_id }}';
+            const stamp = '${{ steps.changelog.outputs.stamp }}';
 
+            // Enable native auto-merge — GitHub handles ALL check waiting
+            // via branch protection.  It only merges when EVERY required
+            // status check is green on the PR head.
             await github.graphql(`
               mutation($id: ID!) {
                 enablePullRequestAutoMerge(input: {
-                  pullRequestId: $id,
-                  mergeMethod: SQUASH
-                }) {
-                  pullRequest { id }
-                }
+                  pullRequestId: $id, mergeMethod: SQUASH
+                }) { pullRequest { id } }
               }
-            `, { id: nodeId });
+            `, { id: '${{ steps.pr.outputs.node_id }}' });
+            core.info('Auto-merge enabled — GitHub will merge when all checks pass');
 
-            core.info('Auto-merge enabled (squash)');
-
-      # -- Step 9 — Wait for merge, then tag ----------------------------------
-      - name: ⏳ Wait for merge and tag
-        if: steps.pr.outputs.state == 'open'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const { repo } = context.repo;
-            const num = parseInt('${{ steps.pr.outputs.number }}');
-            const stamp = '${{ steps.changelog.outputs.stamp }}';
+            // Poll for merge completion (lightweight PR state check)
             const snooze = ms => new Promise(r => setTimeout(r, ms));
-
-            for (let i = 0; i < 120; i++) {
+            for (let i = 0; i < 180; i++) {
               const { data: pr } = await github.rest.pulls.get({ ...context.repo, pull_number: num });
               if (pr.state === 'closed' && pr.merge_commit_sha) {
                 const d = new Date(pr.merged_at);
@@ -271,19 +189,11 @@ jobs:
                 const hh = String(d.getUTCHours()).padStart(2, '0');
                 const mm = String(d.getUTCMinutes()).padStart(2, '0');
                 const ver = stamp || `${y}.${doy}.${hh}${mm}`;
-                const tag = repo === 'sdk'
+                const tag = context.repo.repo === 'sdk'
                   ? `v0.${y}${doy}.${parseInt(hh + mm)}`
                   : `v${ver}`;
-
-                try {
-                  await github.rest.git.getRef({ ...context.repo, ref: `tags/${tag}` });
-                  core.info(`Tag ${tag} already exists`);
-                } catch {
-                  await github.rest.git.createRef({
-                    ...context.repo, ref: `refs/tags/${tag}`, sha: pr.merge_commit_sha,
-                  });
-                  core.info(`Tagged ${tag} at ${pr.merge_commit_sha}`);
-                }
+                try { await github.rest.git.getRef({ ...context.repo, ref: `tags/${tag}` }); }
+                catch { await github.rest.git.createRef({ ...context.repo, ref: `refs/tags/${tag}`, sha: pr.merge_commit_sha }); }
                 return;
               }
               await snooze(5000);
