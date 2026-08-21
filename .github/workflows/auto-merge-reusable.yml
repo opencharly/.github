@@ -1,12 +1,12 @@
 # ORG-WIDE AUTO-MERGE ENGINE (reusable via workflow_call)
 #
-# Called by a thin dispatcher in each target repo when the
-# charly/pr-validator check passes.  This reusable workflow does ALL
-# the work: wait for all status checks, finalize the CHANGELOG
-# placeholder, dispatch a fresh validator run, enable native auto-merge
-# via GraphQL, wait for the merge, and mint the CalVer release tag.
+# Canonical source — this file.  Called by a thin dispatcher
+# (auto-merge.yml) in each target repo when the charly/pr-validator
+# check passes.  This reusable workflow does ALL the work: wait for
+# all status checks, finalize the CHANGELOG placeholder, dispatch a
+# fresh validator run, enable native auto-merge via GraphQL, wait for
+# the merge, and mint the CalVer release tag.
 #
-# Canonical source: opencharly/.github/.github/workflows/auto-merge.yml
 # Install the dispatcher: opencharly/.github/org-wide-auto-merge-dispatcher.yml
 name: auto-merge
 
