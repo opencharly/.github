@@ -122,7 +122,13 @@ jobs:
             commit -m "docs: finalize CHANGELOG placeholder to $stamp (merge-time CalVer)"
           # Bot-token push: its synchronize event runs WITHOUT approval,
           # so the next run validates the renamed head automatically.
-          git push "https://x-access-token:${BOT_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:${HEAD_REF}"
+          # actions/checkout installs a GITHUB_TOKEN Authorization
+          # extraheader that would override URL credentials (observed:
+          # the push then counts as a GITHUB_TOKEN push and the run
+          # lands in action_required). Send the bot token explicitly
+          # as the Authorization header instead.
+          AUTH=$(printf 'x-access-token:%s' "$BOT_TOKEN" | base64 -w0)
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${AUTH}"             push "https://github.com/${GITHUB_REPOSITORY}.git" "HEAD:${HEAD_REF}"
           echo "renamed=true" >> "$GITHUB_OUTPUT"
 
       - name: Exit after rename
