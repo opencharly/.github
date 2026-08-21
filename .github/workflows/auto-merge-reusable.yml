@@ -111,7 +111,7 @@ jobs:
       # Step 2 — Nothing to do (not all green)
       # ------------------------------------------------------------------
       - if: steps.pr.outputs.reason != 'proceed'
-        run: echo "Skip: ${{ steps.pr.outputs.reason }}"
+        run: echo 'Skip:' "${{ steps.pr.outputs.reason }}"
 
       # ------------------------------------------------------------------
       # Step 3 — Fetch PR branches for CHANGELOG diff
