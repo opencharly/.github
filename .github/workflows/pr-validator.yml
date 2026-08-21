@@ -29,7 +29,6 @@ permissions:
 
 jobs:
   pr-validator:
-    name: charly/pr-validator
     runs-on: ubuntu-latest
     steps:
       - name: Fetch PR metadata
