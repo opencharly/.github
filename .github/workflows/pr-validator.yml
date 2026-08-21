@@ -1,16 +1,12 @@
-# PR validator — AI-powered review gate for the opencharly org.
-#
-# Runs the org-wide `opencharly/pi-review-action` as a fresh, independent
-# validator on every pull request. Posts a single PR comment and sets the
-# `charly/pr-validator` check from the deterministic `Verdict: PASS|BLOCK`.
-#
-# Fully generic — nothing is hardcoded. Provider, model, and endpoint come
-# from org-level variables; the API key comes from the org-level secret.
+# ORG-WIDE PR VALIDATOR + MERGE ORCHESTRATOR (reusable via workflow_call)
 name: charly/pr-validator
 
 on:
   workflow_call:
     inputs:
+      pr-number:
+        required: true
+        type: string
       ai_review_provider:
         type: string
         required: false
@@ -20,20 +16,36 @@ on:
       ai_review_base_url:
         type: string
         required: false
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
+    inputs:
+      pr-number:
+        required: true
+        type: string
 
 permissions:
-  contents: read
+  contents: write
   pull-requests: write
-  issues: write
+  actions: write
 
 jobs:
   pr-validator:
-    name: charly/pr-validator
+    name: validate
     runs-on: ubuntu-latest
     steps:
+      - name: Fetch PR metadata
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const num = parseInt('${{ inputs.pr-number }}');
+            const { data: pr } = await github.rest.pulls.get({ ...context.repo, pull_number: num });
+            core.setOutput('number', String(pr.number));
+            core.setOutput('head_sha', pr.head.sha);
+            core.setOutput('head_ref', pr.head.ref);
+            core.setOutput('base_ref', pr.base.ref);
+            core.setOutput('node_id', pr.node_id);
+            core.info(`PR #${pr.number} head=${pr.head.sha.slice(0,12)} ref=${pr.head.ref}`);
+
       - uses: opencharly/pi-review-action@v1.0.8
         id: review
         with:
@@ -43,21 +55,116 @@ jobs:
           api_key: ${{ secrets.AI_REVIEW_API_KEY }}
           max_turns: 20
 
-      - name: Gate verdict
-        if: always()
+      - name: Parse verdict
+        id: parse
         env:
           REVIEW: ${{ steps.review.outputs.response }}
         run: |
-          if [ "${{ steps.review.outputs.success }}" != "true" ]; then
-            echo "::error::Validator run failed (infra/model error)"
-            exit 2
-          fi
+          echo "review_len=${#REVIEW}"
           found=$(printf '%s\n' "$REVIEW" | grep -E '^Verdict: (BLOCK|PASS)[[:space:]]*$')
           n=$(printf '%s\n' "$found" | grep -cE '^Verdict:')
+          echo "verdict_lines=$n"
           [ "$n" -eq 0 ] && { echo "::error::No verdict in response"; exit 2; }
           distinct=$(printf '%s\n' "$found" | sed -E 's/^Verdict: (BLOCK|PASS).*/\1/' | sort -u)
-          case "$distinct" in
-            BLOCK) echo "::error::AI review blocked this PR"; exit 1 ;;
-            PASS) echo "AI review passed"; exit 0 ;;
-            *) echo "::error::Ambiguous verdicts"; exit 2 ;;
-          esac
+          echo "verdict=$distinct" >> "$GITHUB_OUTPUT"
+
+      - name: Gate verdict (BLOCK)
+        if: steps.parse.outputs.verdict == 'BLOCK'
+        run: |
+          echo "::error::AI review blocked this PR"
+          exit 1
+
+      - name: Gate verdict (ambiguous)
+        if: >
+          steps.parse.outputs.verdict != 'BLOCK' &&
+          steps.parse.outputs.verdict != 'PASS'
+        run: |
+          echo "::error::Ambiguous verdict: ${{ steps.parse.outputs.verdict }}"
+          exit 2
+
+      - name: Checkout PR head
+        if: steps.parse.outputs.verdict == 'PASS'
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.pr.outputs.head_sha }}
+          fetch-depth: 0
+
+      - name: Rename CHANGELOG placeholder
+        if: steps.parse.outputs.verdict == 'PASS'
+        id: changelog
+        env:
+          HEAD_REF: ${{ steps.pr.outputs.head_ref }}
+          BASE_REF: ${{ steps.pr.outputs.base_ref }}
+        run: |
+          set -euo pipefail
+          git fetch origin \
+            "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}" \
+            "+refs/heads/${HEAD_REF}:refs/remotes/origin/${HEAD_REF}"
+          p=$(git diff --name-status "origin/${BASE_REF}...origin/${HEAD_REF}" -- CHANGELOG/ \
+            | awk '$1=="A"{print $NF}' \
+            | grep -E '^CHANGELOG/[0-9]{4}\.[0-9]{3}\.[0-9]{4}\.md$' | head -1 || true)
+          echo "placeholder=$p"
+          [ -z "$p" ] && echo "no-changelog" && exit 0
+          c=$(git show "origin/$HEAD_REF:$p" 2>/dev/null || true)
+          echo "$c" | grep -q "auto-merge-finalized: $(basename "$p" .md)" \
+            && { echo "already-finalized" && echo "stamp=$(basename "$p" .md)" >> "$GITHUB_OUTPUT"; exit 0; }
+          stamp=$(date -u +%Y.%j.%H%M)
+          [ "$(basename "$p" .md)" = "$stamp" ] \
+            && { echo "already-at-stamp" && echo "stamp=$stamp" >> "$GITHUB_OUTPUT"; exit 0; }
+          echo "Renaming $p -> CHANGELOG/$stamp.md"
+          git checkout -q -B dev/auto-merge "origin/$HEAD_REF"
+          git mv "$p" "CHANGELOG/$stamp.md"
+          sed -i -e "1s/^# [0-9]\{4\}\.[0-9]\{3\}\.[0-9]\{4\}/# $stamp/" \
+                 -e "1a\\<!-- auto-merge-finalized: $stamp -->" "CHANGELOG/$stamp.md"
+          git add "CHANGELOG/$stamp.md"
+          git -c user.name='opencharly auto-merge' -c user.email='actions@github.com' \
+            commit -m "docs: finalize CHANGELOG placeholder to $stamp (merge-time CalVer)"
+          git push origin "HEAD:${HEAD_REF}"
+          echo "pushed new head"
+          echo "stamp=$stamp" >> "$GITHUB_OUTPUT"
+          echo "fresh=true" >> "$GITHUB_OUTPUT"
+
+      - name: Update PR body (finalization note)
+        if: steps.changelog.outputs.fresh == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const num = parseInt('${{ steps.pr.outputs.number }}');
+            const stamp = '${{ steps.changelog.outputs.stamp }}';
+            const { data: pr } = await github.rest.pulls.get({ ...context.repo, pull_number: num });
+            let body = pr.body || '';
+            if (body.includes('<!-- auto-merge-finalization-note:')) return;
+            const note = `\n\n## Auto-merge finalization\n\nThis run finalized the CHANGELOG at merge time: the placeholder was renamed to \`CHANGELOG/${stamp}.md\` (H1 rewritten to \`# ${stamp}\`). The current diff carries the finalized file.\n\n<!-- auto-merge-finalization-note: ${stamp} -->`;
+            const idx = body.indexOf('## Attribution');
+            body = idx >= 0 ? body.slice(0, idx) + note + '\n\n' + body.slice(idx) : body + note;
+            await github.rest.pulls.update({ ...context.repo, pull_number: num, body });
+            core.info('PR body updated');
+
+      - name: Dispatch validator re-run on new head
+        if: steps.changelog.outputs.fresh == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              ...context.repo,
+              workflow_id: 'pr-validator-dispatcher.yml',
+              ref: '${{ steps.pr.outputs.head_ref }}',
+              inputs: { 'pr-number': '${{ steps.pr.outputs.number }}' },
+            });
+            core.info('Validator dispatched on new head');
+
+      - name: Enable native auto-merge
+        if: steps.parse.outputs.verdict == 'PASS'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const num = parseInt('${{ steps.pr.outputs.number }}');
+            const { data: pr } = await github.rest.pulls.get({ ...context.repo, pull_number: num });
+            await github.graphql(`
+              mutation($id: ID!) {
+                enablePullRequestAutoMerge(input: {
+                  pullRequestId: $id, mergeMethod: SQUASH
+                }) { pullRequest { id } }
+              }
+            `, { id: pr.node_id });
+            core.info('Auto-merge enabled — GitHub will merge when all checks pass');

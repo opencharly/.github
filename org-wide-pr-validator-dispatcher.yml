@@ -1,25 +1,26 @@
-# ORG-WIDE GATE DISPATCHER — install this one file in every opencharly repo that
-# should be covered by the org-wide `charly/pr-validator` gate. It inherits the single
-# reusable gate (opencharly/.github/.github/workflows/pr-validator.yml, `workflow_call`)
-# so there is one source of truth and no per-repo copy of the validator logic.
+# ORG-WIDE PR-VALIDATOR DISPATCHER — install at .github/workflows/pr-validator.yml
 #
-# Install at: .github/workflows/pr-validator.yml   (in the target repo)
+# Triggers on pull_request events, calls the reusable validator in
+# opencharly/.github which reviews the PR, renames the CHANGELOG, and
+# enables native auto-merge on PASS.
 name: charly/pr-validator
+
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+
 permissions:
-  contents: read
+  contents: write
   pull-requests: write
-  issues: write
+  actions: write
+
 jobs:
   pr-validator:
     name: charly/pr-validator
-    # Skip forks (secrets not available there / comment posting fails).
     if: github.event.pull_request.head.repo.fork == false
     uses: opencharly/.github/.github/workflows/pr-validator.yml@main
     with:
-      # Org vars are auto-available, but pass explicitly so the caller's overrides win.
+      pr-number: ${{ github.event.pull_request.number }}
       ai_review_provider: ${{ vars.AI_REVIEW_PROVIDER }}
       ai_review_model: ${{ vars.AI_REVIEW_MODEL }}
       ai_review_base_url: ${{ vars.AI_REVIEW_BASE_URL }}
