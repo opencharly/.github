@@ -1,12 +1,16 @@
 # ORG-WIDE TAG-ON-MERGE DISPATCHER — install at .github/workflows/tag-on-merge.yml
 #
-# Fires when a pull request is closed.  If merged, calls the reusable
+# Fires when a pull request is closed. If merged, calls the reusable
 # tag workflow which creates the CalVer release tag on the merge commit.
 name: tag-on-merge
 
 on:
   pull_request:
     types: [closed]
+
+permissions:
+  contents: write
+  pull-requests: write
 
 jobs:
   tag:

@@ -1,12 +1,13 @@
 # ORG-WIDE AUTO-MERGE ENGINE (reusable via workflow_call)
 #
-# Triggered by EVERY completed check run on the PR branch.  Does a
-# single check: "Are ALL check runs on the PR head green, including the
-# pr-validator?"  If yes → finalize CHANGELOG and enable native auto-merge.
-# If not → exit — the next check_run event will re-trigger.
+# Triggered by the pr-validator passing (workflow_run event). Does:
+#   1. Find the PR
+#   2. Rename the CHANGELOG placeholder to the merge-time CalVer
+#   3. Dispatch a fresh validator run on the new head
+#   4. Enable GitHub's native auto-merge (waits for ALL checks)
+#   5. Exit — GitHub handles the merge via branch protection
 #
-# This is the correct event-driven pattern: every check completion
-# naturally fires a re-check, regardless of which order checks finish.
+# Companion: tag-on-merge.yml — tags the merge commit on PR close.
 name: auto-merge
 
 on:
@@ -26,11 +27,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.head-sha }}
           fetch-depth: 0
 
-      # ------------------------------------------------------------------
-      # Step 1 — Find the PR and check ALL checks on its current head
-      # ------------------------------------------------------------------
+      # -- Step 1: Find the PR ------------------------------------------------
       - id: pr
         uses: actions/github-script@v7
         with:
@@ -40,92 +40,30 @@ jobs:
             });
             const pr = prs.find(p => p.state === 'open');
             if (!pr) {
-              core.setOutput('reason', 'no-open-pr');
-              core.info('No open PR for this commit — skipping');
+              core.setOutput('state', 'closed');
+              core.info('PR already closed — nothing to do');
               return;
             }
-
-            // Get ALL check runs on the PR's current head.
-            const { data: checks } = await github.rest.checks.listForRef({
-              ...context.repo, ref: pr.head.sha,
-            });
-
-            // 1. The pr-validator must exist AND be green.
-            const validator = checks.check_runs.find(c => c.name === 'charly/pr-validator');
-            if (!validator) {
-              core.setOutput('reason', 'validator-not-run');
-              core.info('Validator not yet run — skipping');
-              return;
-            }
-            if (validator.status !== 'completed') {
-              core.setOutput('reason', 'validator-pending');
-              core.info('Validator still pending — skipping');
-              return;
-            }
-            if (validator.conclusion !== 'success') {
-              core.setOutput('reason', 'validator-failed');
-              core.info(`Validator conclusion: ${validator.conclusion} — skipping`);
-              return;
-            }
-
-            // 2. All OTHER check runs must be completed and green.
-            const others = checks.check_runs.filter(c => c.name !== 'charly/pr-validator');
-            const pending = others.filter(c => c.status !== 'completed');
-            const failed = others.filter(c =>
-              c.status === 'completed' &&
-              !['success', 'skipped', 'neutral'].includes(c.conclusion)
-            );
-
-            if (pending.length > 0) {
-              core.setOutput('reason', 'checks-pending');
-              core.info(`${pending.length} check(s) still pending — will retry on next check_run`);
-              pending.forEach(c => core.info(`  ${c.name}: ${c.status}`));
-              return;
-            }
-
-            if (failed.length > 0) {
-              core.setOutput('reason', 'checks-failed');
-              core.info(`${failed.length} check(s) failed`);
-              failed.forEach(c => core.info(`  ${c.name}: ${c.conclusion}`));
-              return;
-            }
-
-            // ALL checks green — proceed.
-            core.info(`All ${checks.check_runs.length} check(s) green — merging`);
-
-            // If the PR has a merge_commit_sha, auto-merge was already enabled
-            // (by a previous engine run) and the PR is about to merge.  Skip.
-            if (pr.merge_commit_sha) {
-              core.setOutput('reason', 'already-merging');
-              core.info('PR already has a merge commit — auto-merge is in progress');
-              return;
-            }
-
-            core.setOutput('reason', 'proceed');
+            core.setOutput('state', 'open');
             core.setOutput('number', String(pr.number));
             core.setOutput('head_ref', pr.head.ref);
             core.setOutput('base_ref', pr.base.ref);
             core.setOutput('node_id', pr.node_id);
+            core.info(`PR #${pr.number} open — ${pr.head.ref} → ${pr.base.ref}`);
 
-      # ------------------------------------------------------------------
-      # Step 2 — Nothing to do (not all green)
-      # ------------------------------------------------------------------
-      - if: steps.pr.outputs.reason != 'proceed'
-        run: echo 'Skip:' "${{ steps.pr.outputs.reason }}"
+      # -- Step 2: Closed PR — nothing to do ----------------------------------
+      - if: steps.pr.outputs.state == 'closed'
+        run: echo "PR closed — nothing to do"
 
-      # ------------------------------------------------------------------
-      # Step 3 — Fetch PR branches for CHANGELOG diff
-      # ------------------------------------------------------------------
-      - if: steps.pr.outputs.reason == 'proceed'
+      # -- Step 3: Fetch PR branches for the diff -----------------------------
+      - if: steps.pr.outputs.state == 'open'
         run: |
           git fetch origin \
             "+refs/heads/${{ steps.pr.outputs.base_ref }}:refs/remotes/origin/${{ steps.pr.outputs.base_ref }}" \
             "+refs/heads/${{ steps.pr.outputs.head_ref }}:refs/remotes/origin/${{ steps.pr.outputs.head_ref }}"
 
-      # ------------------------------------------------------------------
-      # Step 4 — Finalize CHANGELOG (if placeholder exists)
-      # ------------------------------------------------------------------
-      - if: steps.pr.outputs.reason == 'proceed'
+      # -- Step 4: Rename CHANGELOG placeholder to merge-time CalVer ----------
+      - if: steps.pr.outputs.state == 'open'
         id: changelog
         env:
           BASE_REF: ${{ steps.pr.outputs.base_ref }}
@@ -156,10 +94,8 @@ jobs:
           echo "stamp=$stamp" >> "$GITHUB_OUTPUT"
           echo "fresh=true" >> "$GITHUB_OUTPUT"
 
-      # ------------------------------------------------------------------
-      # Step 5 — Update PR body (insert note before Attribution)
-      # ------------------------------------------------------------------
-      - if: steps.changelog.outputs.stamp != '' && steps.changelog.outputs.stamp != 'no-changelog'
+      # -- Step 5: Update PR body (note before Attribution) -------------------
+      - if: steps.changelog.outputs.fresh == 'true'
         uses: actions/github-script@v7
         with:
           script: |
@@ -173,9 +109,7 @@ jobs:
             body = idx >= 0 ? body.slice(0, idx) + note + '\n\n' + body.slice(idx) : body + note;
             await github.rest.pulls.update({ ...context.repo, pull_number: num, body });
 
-      # ------------------------------------------------------------------
-      # Step 6 — Dispatch validator re-run on new head (only fresh finalization)
-      # ------------------------------------------------------------------
+      # -- Step 6: Dispatch validator re-run on the new head -------------------
       - if: steps.changelog.outputs.fresh == 'true'
         uses: actions/github-script@v7
         with:
@@ -185,11 +119,10 @@ jobs:
               workflow_id: 'pr-validator.yml',
               ref: '${{ steps.pr.outputs.head_ref }}',
             });
+            core.info('Validator dispatched on new head');
 
-      # ------------------------------------------------------------------
-      # Step 7 — Enable native auto-merge
-      # ------------------------------------------------------------------
-      - if: steps.pr.outputs.reason == 'proceed'
+      # -- Step 7: Enable native auto-merge -----------------------------------
+      - if: steps.pr.outputs.state == 'open'
         uses: actions/github-script@v7
         with:
           script: |
@@ -200,4 +133,4 @@ jobs:
                 }) { pullRequest { id } }
               }
             `, { id: '${{ steps.pr.outputs.node_id }}' });
-            core.info('Auto-merge enabled');
+            core.info('Auto-merge enabled — GitHub will merge when all checks pass');

@@ -2,18 +2,25 @@
 name: auto-merge
 
 on:
-  check_run:
-    types: [completed]
   workflow_run:
     workflows: ["charly/pr-validator"]
     types: [completed]
 
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+concurrency:
+  group: auto-merge-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
 jobs:
   engine:
     if: >
-      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch != github.event.repository.default_branch) ||
-      (github.event_name == 'check_run' && github.event.check_run.check_suite.head_branch != github.event.repository.default_branch)
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch != github.event.repository.default_branch
     uses: ./.github/workflows/auto-merge-reusable.yml
     with:
-      head-sha: ${{ github.event.check_run.check_suite.head_sha || github.event.workflow_run.head_sha }}
+      head-sha: ${{ github.event.workflow_run.head_sha }}
     secrets: inherit
