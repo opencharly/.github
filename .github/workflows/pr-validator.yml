@@ -122,15 +122,17 @@ jobs:
             commit -m "docs: finalize CHANGELOG placeholder to $stamp (merge-time CalVer)"
           # Bot-token push: its synchronize event runs WITHOUT approval,
           # because GitHub gates only GITHUB_TOKEN-pushed events.
-          # actions/checkout injects the GITHUB_TOKEN Authorization
-          # extraheader through a temp config file referenced by
-          # `include.path` (observed:
-          # /home/runner/work/_temp/git-credentials-*.config). While an
+          # actions/checkout installs the GITHUB_TOKEN Authorization
+          # extraheader via `git config --global include.path
+          # <temp/git-credentials-*.config>` (checkout source,
+          # git-auth-helper.ts configureGlobalCredentials). While an
           # Authorization extraheader exists, git IGNORES URL
           # credentials — the push counts as GITHUB_TOKEN and its
-          # synchronize run lands in action_required. Drop the include,
-          # then push with the bot token embedded in the URL.
-          git config --local --unset-all include.path || true
+          # synchronize run lands in action_required. Remove the
+          # credential include (global + local), then push with the bot
+          # token embedded in the URL.
+          git config --global --unset-all include.path 'git-credentials-.*\.config' || true
+          git config --local --unset-all include.path 'git-credentials-.*\.config' || true
           git push "https://x-access-token:${BOT_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:${HEAD_REF}"
           echo "renamed=true" >> "$GITHUB_OUTPUT"
 
