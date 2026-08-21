@@ -11,8 +11,8 @@ on:
 jobs:
   engine:
     if: >
-      github.event_name == 'workflow_run' ||
-      github.event.check_run.check_suite.head_branch != github.event.repository.default_branch
+      (github.event_name == 'workflow_run' && github.event.workflow_run.head_branch != github.event.repository.default_branch) ||
+      (github.event_name == 'check_run' && github.event.check_run.check_suite.head_branch != github.event.repository.default_branch)
     uses: ./.github/workflows/auto-merge-reusable.yml
     with:
       head-sha: ${{ github.event.check_run.check_suite.head_sha || github.event.workflow_run.head_sha }}
