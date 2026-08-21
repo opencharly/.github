@@ -1,0 +1,31 @@
+# ORG-WIDE AUTO-MERGE DISPATCHER — install this one file in every opencharly
+# repo that should be covered by the org-wide auto-merge engine.  It inherits
+# the single reusable engine (opencharly/.github/.github/workflows/auto-merge-reusable.yml,
+# `workflow_call`) so there is one source of truth and no per-repo copy of the
+# engine logic.
+#
+# Install at:  .github/workflows/auto-merge.yml   (in the target repo)
+name: auto-merge
+
+on:
+  workflow_run:
+    workflows: ["charly/pr-validator"]
+    types: [completed]
+
+# The CHANGELOG-finalization step pushes a commit to the PR head branch, which
+# re-runs the validator, which re-triggers this workflow. Grouping by the PR
+# head branch serialises runs for the same PR (a new run queues, never
+# cancels), so only one auto-merge run is ever active per PR.
+concurrency:
+  group: auto-merge-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
+jobs:
+  call-auto-merge:
+    if: >
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request'
+    uses: opencharly/.github/.github/workflows/auto-merge-reusable.yml@main
+    with:
+      head-sha: ${{ github.event.workflow_run.head_sha }}
+    secrets: inherit
