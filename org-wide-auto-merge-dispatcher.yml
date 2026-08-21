@@ -17,7 +17,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
- Actions: write
+  actions: write
 
 jobs:
   engine:
