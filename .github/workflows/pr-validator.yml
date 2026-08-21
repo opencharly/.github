@@ -113,22 +113,31 @@ jobs:
           echo "$c" | grep -q "auto-merge-finalized: $(basename "$p" .md)" && exit 0
           stamp=$(date -u +%Y.%j.%H%M)
           [ "$(basename "$p" .md)" = "$stamp" ] && exit 0
-          git checkout -q -B dev/auto-merge "origin/$HEAD_REF"
-          git mv "$p" "CHANGELOG/$stamp.md"
-          sed -i -e "1s/^# [0-9]\{4\}\.[0-9]\{3\}\.[0-9]\{4\}/# $stamp/" \
-                 -e "1a\\<!-- auto-merge-finalized: $stamp -->" "CHANGELOG/$stamp.md"
-          git add "CHANGELOG/$stamp.md"
-          git -c user.name='opencharly auto-merge' -c user.email='actions@github.com' \
-            commit -m "docs: finalize CHANGELOG placeholder to $stamp (merge-time CalVer)"
-          # Bot-token push: its synchronize event runs WITHOUT approval,
-          # so the next run validates the renamed head automatically.
-          # actions/checkout installs a GITHUB_TOKEN Authorization
-          # extraheader that would override URL credentials (observed:
-          # the push then counts as a GITHUB_TOKEN push and the run
-          # lands in action_required). Send the bot token explicitly
-          # as the Authorization header instead.
-          AUTH=$(printf 'x-access-token:%s' "$BOT_TOKEN" | base64 -w0)
-          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${AUTH}"             push "https://github.com/${GITHUB_REPOSITORY}.git" "HEAD:${HEAD_REF}"
+          # Finalize via the Contents API with the bot token: the commit
+          # is attributed to the app, so the resulting synchronize event
+          # runs WITHOUT approval. (A git push from the runner would
+          # inherit actions/checkout's GITHUB_TOKEN Authorization
+          # extraheader — installed via a temp global config under an
+          # overridden HOME plus local includeIf entries, which git
+          # config scoping cannot reliably remove — and count as a
+          # GITHUB_TOKEN push whose run lands in action_required.)
+          new="CHANGELOG/$stamp.md"
+          content=$(printf '%s' "$c" | sed -e "1s/^# [0-9]\{4\}\.[0-9]\{3\}\.[0-9]\{4\}/# $stamp/" \
+            -e "1a\\<!-- auto-merge-finalized: $stamp -->")
+          b64=$(printf '%s' "$content" | base64 -w0)
+          old_sha=$(curl -fsS -H "Authorization: Bearer ${BOT_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/${p}?ref=${HEAD_REF}" | jq -r .sha)
+          curl -fsS -X PUT -H "Authorization: Bearer ${BOT_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/${new}" \
+            -d "$(jq -nc --arg msg "docs: finalize CHANGELOG placeholder to $stamp (merge-time CalVer)" --arg content "$b64" --arg branch "$HEAD_REF" '{message:$msg,content:$content,branch:$branch}')" \
+            | jq -e '.commit.sha' >/dev/null
+          curl -fsS -X DELETE -H "Authorization: Bearer ${BOT_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/${p}" \
+            -d "$(jq -nc --arg msg "docs: remove placeholder ${p}" --arg sha "$old_sha" --arg branch "$HEAD_REF" '{message:$msg,sha:$sha,branch:$branch}')" \
+            | jq -e '.commit.sha' >/dev/null
           echo "renamed=true" >> "$GITHUB_OUTPUT"
 
       - name: Exit after rename
