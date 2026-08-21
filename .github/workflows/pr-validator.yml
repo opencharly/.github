@@ -46,13 +46,14 @@ jobs:
             core.setOutput('node_id', pr.node_id);
             core.info(`PR #${pr.number} head=${pr.head.sha.slice(0,12)} ref=${pr.head.ref}`);
 
-      - uses: opencharly/pi-review-action@v1.0.8
+      - uses: opencharly/pi-review-action@v1.0.9
         id: review
         with:
           provider: ${{ inputs.ai_review_provider || vars.AI_REVIEW_PROVIDER }}
           model: ${{ inputs.ai_review_model || vars.AI_REVIEW_MODEL }}
           base_url: ${{ inputs.ai_review_base_url || vars.AI_REVIEW_BASE_URL }}
           api_key: ${{ secrets.AI_REVIEW_API_KEY }}
+          pr_number: ${{ inputs.pr-number }}
           max_turns: 20
 
       - name: Parse verdict
