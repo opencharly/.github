@@ -15,9 +15,7 @@ concurrency:
 
 jobs:
   call-auto-merge:
-    if: >
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event == 'pull_request'
+    if: github.event.workflow_run.conclusion == 'success'
     uses: opencharly/.github/.github/workflows/auto-merge-reusable.yml@main
     with:
       head-sha: ${{ github.event.workflow_run.head_sha }}
