@@ -1,25 +1,19 @@
 # ORG-WIDE AUTO-MERGE ENGINE (reusable via workflow_call)
 #
-# Event-driven — zero polling, zero timeouts, zero sleep.
-# Each action triggers the next via GitHub's native event system:
+# Fires every time pr-validator completes.  Does a SINGLE check of ALL
+# check runs on the PR head.  If all green → finalize CHANGELOG, enable
+# native auto-merge, and exit.  If not all green → exit gracefully.
 #
-#   pr-validator passes
-#     ↓ workflow_run
-#   This engine: finalize CHANGELOG → dispatch validator → enable auto-merge
-#     ↓ exits
-#   Native auto-merge merges PR when all checks pass
-#     ↓ pull_request:closed
-#   tag-on-merge workflow creates CalVer tag on merge commit
+# The next trigger (push, manual re-run, or re-validator pass) will
+# re-check.  No polling, no sleep, no loops.
 #
-# Canonical source: this file.
-# Install the dispatcher: opencharly/.github/org-wide-auto-merge-dispatcher.yml
+# Companion: tag-on-merge.yml — tags the merge commit when PR merges.
 name: auto-merge
 
 on:
   workflow_call:
     inputs:
       head-sha:
-        description: SHA of the PR head that triggered this run
         required: true
         type: string
     secrets:
@@ -36,41 +30,75 @@ jobs:
           ref: ${{ inputs.head-sha }}
           fetch-depth: 0
 
-      # -- Find PR, detect state ------------------------------------------------
+      # ------------------------------------------------------------------
+      # Step 1 — Find PR and verify ALL check runs are green
+      # ------------------------------------------------------------------
       - id: pr
         uses: actions/github-script@v7
         with:
           script: |
             const { data: prs } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
-              ...context.repo,
-              commit_sha: '${{ inputs.head-sha }}',
+              ...context.repo, commit_sha: '${{ inputs.head-sha }}',
             });
-            const open = prs.find(p => p.state === 'open');
-            if (open) {
-              core.setOutput('number', String(open.number));
-              core.setOutput('state', open.state);
-              core.setOutput('head_ref', open.head.ref);
-              core.setOutput('base_ref', open.base.ref);
-              core.setOutput('node_id', open.node_id);
-              core.info(`PR #${open.number} open — ${open.head.ref} → ${open.base.ref}`);
-            } else {
-              core.setOutput('state', 'closed');
-              core.info('PR already closed — skipping');
+            const pr = prs.find(p => p.state === 'open');
+            if (!pr) {
+              core.setOutput('verdict', 'skip');
+              core.info('PR already closed — nothing to do');
+              return;
             }
 
-      # -- Already closed: nothing to do (tag-on-merge handles tagging) --------
-      - if: steps.pr.outputs.state == 'closed'
-        run: echo "PR closed — nothing to do"
+            // Single non-looping check of ALL check runs on the PR head.
+            const { data: checks } = await github.rest.checks.listForRef({
+              ...context.repo, ref: pr.head.sha,
+            });
 
-      # -- Fetch PR branches for diff -------------------------------------------
-      - if: steps.pr.outputs.state == 'open'
+            const pending = checks.check_runs.filter(c => c.status !== 'completed');
+            const failed = checks.check_runs.filter(c =>
+              c.status === 'completed' &&
+              !['success', 'skipped', 'neutral'].includes(c.conclusion)
+            );
+
+            if (pending.length > 0) {
+              core.setOutput('verdict', 'skip');
+              core.info(`${pending.length} check(s) still pending — will retry on next trigger`);
+              pending.forEach(c => core.info(`  pending: ${c.name} (${c.status})`));
+              return;
+            }
+
+            if (failed.length > 0) {
+              core.setOutput('verdict', 'skip');
+              core.info(`${failed.length} check(s) failed — will retry on next trigger`);
+              failed.forEach(c => core.info(`  failed: ${c.name} (${c.conclusion})`));
+              return;
+            }
+
+            // ALL checks green — proceed with merge.
+            core.info(`All ${checks.check_runs.length} check(s) green`);
+            core.setOutput('verdict', 'proceed');
+            core.setOutput('number', String(pr.number));
+            core.setOutput('head_ref', pr.head.ref);
+            core.setOutput('base_ref', pr.base.ref);
+            core.setOutput('node_id', pr.node_id);
+
+      # ------------------------------------------------------------------
+      # Step 2 — Nothing to do (PR closed or checks not ready)
+      # ------------------------------------------------------------------
+      - if: steps.pr.outputs.verdict == 'skip'
+        run: echo "Skip — $(echo ${{ steps.pr.outputs.verdict }})"
+
+      # ------------------------------------------------------------------
+      # Step 3 — Fetch PR branches for CHANGELOG diff
+      # ------------------------------------------------------------------
+      - if: steps.pr.outputs.verdict == 'proceed'
         run: |
           git fetch origin \
             "+refs/heads/${{ steps.pr.outputs.base_ref }}:refs/remotes/origin/${{ steps.pr.outputs.base_ref }}" \
             "+refs/heads/${{ steps.pr.outputs.head_ref }}:refs/remotes/origin/${{ steps.pr.outputs.head_ref }}"
 
-      # -- Finalize CHANGELOG placeholder (git operations) ----------------------
-      - if: steps.pr.outputs.state == 'open'
+      # ------------------------------------------------------------------
+      # Step 4 — Finalize CHANGELOG (if placeholder exists)
+      # ------------------------------------------------------------------
+      - if: steps.pr.outputs.verdict == 'proceed'
         id: changelog
         env:
           BASE_REF: ${{ steps.pr.outputs.base_ref }}
@@ -80,13 +108,16 @@ jobs:
           p=$(git diff --name-status "origin/${BASE_REF}...origin/${HEAD_REF}" -- CHANGELOG/ \
             | awk '$1=="A"{print $NF}' \
             | grep -E '^CHANGELOG/[0-9]{4}\.[0-9]{3}\.[0-9]{4}\.md$' | head -1 || true)
-          [ -z "$p" ] && exit 0
+          [ -z "$p" ] && echo "no-changelog" && exit 0
+
           c=$(git show "origin/$HEAD_REF:$p" 2>/dev/null || true)
           echo "$c" | grep -q "auto-merge-finalized: $(basename "$p" .md)" \
             && { echo "stamp=$(basename "$p" .md)" >> "$GITHUB_OUTPUT"; exit 0; }
+
           stamp=$(date -u +%Y.%j.%H%M)
           [ "$(basename "$p" .md)" = "$stamp" ] \
             && { echo "stamp=$stamp" >> "$GITHUB_OUTPUT"; exit 0; }
+
           git checkout -q -B dev/auto-merge "origin/$HEAD_REF"
           git mv "$p" "CHANGELOG/$stamp.md"
           sed -i -e "1s/^# [0-9]\{4\}\.[0-9]\{3\}\.[0-9]\{4\}/# $stamp/" \
@@ -97,8 +128,10 @@ jobs:
           git push origin "HEAD:${HEAD_REF}"
           echo "stamp=$stamp" >> "$GITHUB_OUTPUT"
 
-      # -- Update PR body with finalization note (before Attribution) -----------
-      - if: steps.changelog.outputs.stamp != ''
+      # ------------------------------------------------------------------
+      # Step 5 — Update PR body (insert note before Attribution)
+      # ------------------------------------------------------------------
+      - if: steps.changelog.outputs.stamp != '' && steps.changelog.outputs.stamp != 'no-changelog'
         uses: actions/github-script@v7
         with:
           script: |
@@ -112,8 +145,10 @@ jobs:
             body = idx >= 0 ? body.slice(0, idx) + note + '\n\n' + body.slice(idx) : body + note;
             await github.rest.pulls.update({ ...context.repo, pull_number: num, body });
 
-      # -- Dispatch validator re-run on finalized head --------------------------
-      - if: steps.changelog.outputs.stamp != ''
+      # ------------------------------------------------------------------
+      # Step 6 — Dispatch validator re-run on new head (if finalized)
+      # ------------------------------------------------------------------
+      - if: steps.changelog.outputs.stamp != '' && steps.changelog.outputs.stamp != 'no-changelog'
         uses: actions/github-script@v7
         with:
           script: |
@@ -122,10 +157,11 @@ jobs:
               workflow_id: 'pr-validator.yml',
               ref: '${{ steps.pr.outputs.head_ref }}',
             });
-            core.info('Validator dispatched — will trigger another engine run when it completes');
 
-      # -- Enable native auto-merge (GitHub waits for all required checks) ------
-      - if: steps.pr.outputs.state == 'open'
+      # ------------------------------------------------------------------
+      # Step 7 — Enable native auto-merge
+      # ------------------------------------------------------------------
+      - if: steps.pr.outputs.verdict == 'proceed'
         uses: actions/github-script@v7
         with:
           script: |
@@ -136,7 +172,4 @@ jobs:
                 }) { pullRequest { id } }
               }
             `, { id: '${{ steps.pr.outputs.node_id }}' });
-            core.info('Auto-merge enabled — GitHub will merge when all checks pass');
-
-            # No polling, no waiting.  The tag-on-merge workflow
-            # handles tagging when pull_request:closed fires.
+            core.info('Auto-merge enabled — PR will merge when all checks pass');
