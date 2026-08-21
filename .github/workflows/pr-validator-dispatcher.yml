@@ -1,8 +1,4 @@
-# ORG-WIDE PR-VALIDATOR DISPATCHER — install at .github/workflows/pr-validator.yml
-#
-# Triggers on pull_request events, calls the reusable validator in
-# opencharly/.github which reviews the PR, renames the CHANGELOG, and
-# enables native auto-merge on PASS.
+# ORG-WIDE PR-VALIDATOR DISPATCHER — .github repo's own instance.
 name: charly/pr-validator
 
 on:
@@ -18,7 +14,7 @@ jobs:
   pr-validator:
     name: charly/pr-validator
     if: github.event.pull_request.head.repo.fork == false
-    uses: opencharly/.github/.github/workflows/pr-validator.yml@main
+    uses: ./.github/workflows/pr-validator.yml
     with:
       ai_review_provider: ${{ vars.AI_REVIEW_PROVIDER }}
       ai_review_model: ${{ vars.AI_REVIEW_MODEL }}
