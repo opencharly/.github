@@ -1,11 +1,7 @@
 # PR validator — AI-powered review gate for the opencharly org.
 #
 # Runs the org-wide `opencharly/pi-review-action` as a fresh, independent
-# validator on every pull request. Posts a single PR comment and sets the
-# `charly/pr-validator` check from the deterministic `Verdict: PASS|BLOCK`.
-#
-# Fully generic — nothing is hardcoded. Provider, model, and endpoint come
-# from org-level variables; the API key comes from the org-level secret.
+# validator on every pull request. Retries up to 3 times on empty response.
 name: charly/pr-validator
 
 on:
@@ -44,28 +40,20 @@ jobs:
           api_key: ${{ secrets.AI_REVIEW_API_KEY }}
           max_turns: 20
 
-      - name: Parse verdict
+      - name: Parse verdict (attempt 1)
         id: parse
         env:
           REVIEW: ${{ steps.review.outputs.response }}
         run: |
-          if [ -z "$REVIEW" ]; then
-            echo "empty=true" >> "$GITHUB_OUTPUT"
-            echo "verdict=RETRY" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          if [ -z "$REVIEW" ]; then exit 0; fi
           found=$(printf '%s\n' "$REVIEW" | grep -E '^Verdict: (BLOCK|PASS)[[:space:]]*$')
           n=$(printf '%s\n' "$found" | grep -cE '^Verdict:')
-          if [ "$n" -eq 0 ]; then
-            echo "empty=true" >> "$GITHUB_OUTPUT"
-            echo "verdict=RETRY" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          if [ "$n" -eq 0 ]; then exit 0; fi
           distinct=$(printf '%s\n' "$found" | sed -E 's/^Verdict: (BLOCK|PASS).*/\1/' | sort -u)
           echo "verdict=$distinct" >> "$GITHUB_OUTPUT"
 
-      - name: Retry if empty (attempt 1/3)
-        if: steps.parse.outputs.empty == 'true'
+      - name: Retry (attempt 2)
+        if: steps.parse.outputs.verdict == ''
         uses: opencharly/pi-review-action@v1.0.7
         id: review2
         continue-on-error: true
@@ -77,28 +65,20 @@ jobs:
           max_turns: 20
 
       - name: Parse verdict (attempt 2)
-        if: steps.parse.outputs.empty == 'true'
+        if: steps.parse.outputs.verdict == ''
         id: parse2
         env:
           REVIEW: ${{ steps.review2.outputs.response }}
         run: |
-          if [ -z "$REVIEW" ]; then
-            echo "empty=true" >> "$GITHUB_OUTPUT"
-            echo "verdict=RETRY" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          if [ -z "$REVIEW" ]; then exit 0; fi
           found=$(printf '%s\n' "$REVIEW" | grep -E '^Verdict: (BLOCK|PASS)[[:space:]]*$')
           n=$(printf '%s\n' "$found" | grep -cE '^Verdict:')
-          if [ "$n" -eq 0 ]; then
-            echo "empty=true" >> "$GITHUB_OUTPUT"
-            echo "verdict=RETRY" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          if [ "$n" -eq 0 ]; then exit 0; fi
           distinct=$(printf '%s\n' "$found" | sed -E 's/^Verdict: (BLOCK|PASS).*/\1/' | sort -u)
           echo "verdict=$distinct" >> "$GITHUB_OUTPUT"
 
-      - name: Retry if empty (attempt 2/3)
-        if: steps.parse2.outputs.empty == 'true'
+      - name: Retry (attempt 3)
+        if: steps.parse2.outputs.verdict == ''
         uses: opencharly/pi-review-action@v1.0.7
         id: review3
         continue-on-error: true
@@ -110,23 +90,15 @@ jobs:
           max_turns: 20
 
       - name: Parse verdict (attempt 3)
-        if: steps.parse2.outputs.empty == 'true'
+        if: steps.parse2.outputs.verdict == ''
         id: parse3
         env:
           REVIEW: ${{ steps.review3.outputs.response }}
         run: |
-          if [ -z "$REVIEW" ]; then
-            echo "empty=true" >> "$GITHUB_OUTPUT"
-            echo "verdict=RETRY" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          if [ -z "$REVIEW" ]; then exit 0; fi
           found=$(printf '%s\n' "$REVIEW" | grep -E '^Verdict: (BLOCK|PASS)[[:space:]]*$')
           n=$(printf '%s\n' "$found" | grep -cE '^Verdict:')
-          if [ "$n" -eq 0 ]; then
-            echo "empty=true" >> "$GITHUB_OUTPUT"
-            echo "verdict=RETRY" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          if [ "$n" -eq 0 ]; then exit 0; fi
           distinct=$(printf '%s\n' "$found" | sed -E 's/^Verdict: (BLOCK|PASS).*/\1/' | sort -u)
           echo "verdict=$distinct" >> "$GITHUB_OUTPUT"
 
@@ -138,6 +110,6 @@ jobs:
           case "$VERDICT" in
             PASS) echo "AI review passed"; exit 0 ;;
             BLOCK) echo "::error::AI review blocked this PR"; exit 1 ;;
-            RETRY) echo "::error::All 3 review attempts returned empty responses"; exit 2 ;;
+            "") echo "::error::All 3 review attempts returned empty responses"; exit 2 ;;
             *) echo "::error::Invalid verdict: $VERDICT"; exit 2 ;;
           esac
