@@ -1,9 +1,4 @@
 # ORG-WIDE VALIDATOR-RUN APPROVER
-#
-# GITHUB_TOKEN pushes (e.g. the CHANGELOG rename) create
-# `pull_request: synchronize` runs in an approval-required state.
-# This workflow automatically approves them so the validator re-runs
-# on the PR head without manual intervention.
 name: approve-validator-runs
 
 on:
@@ -15,6 +10,15 @@ permissions:
   actions: write
 
 jobs:
+  debug:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "conclusion=${{ github.event.workflow_run.conclusion }}"
+          echo "event=${{ github.event.workflow_run.event }}"
+          echo "id=${{ github.event.workflow_run.id }}"
+          echo "name=${{ github.event.workflow_run.name }}"
+
   approve:
     if: github.event.workflow_run.conclusion == 'action_required'
     runs-on: ubuntu-latest
