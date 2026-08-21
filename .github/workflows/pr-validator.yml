@@ -6,10 +6,6 @@
 #    b. Dispatch a fresh validator run on the new head
 #    c. Enable GitHub's native auto-merge (waits for ALL checks)
 # 3. If BLOCK: fail
-#
-# GitHub's native auto-merge (repo setting + enablePullRequestAutoMerge)
-# does the actual merging. This workflow only orchestrates the CHANGELOG
-# rename and enables auto-merge after validation passes.
 name: charly/pr-validator
 
 on:
@@ -38,6 +34,16 @@ jobs:
     name: charly/pr-validator
     runs-on: ubuntu-latest
     steps:
+      - name: Log event context
+        run: |
+          echo "event_name=${{ github.event_name }}"
+          echo "repo=${{ github.repository }}"
+          echo "pr_number=${{ github.event.pull_request.number }}"
+          echo "head_sha=${{ github.event.pull_request.head.sha }}"
+          echo "head_ref=${{ github.event.pull_request.head.ref }}"
+          echo "base_ref=${{ github.event.pull_request.base.ref }}"
+          echo "fork=${{ github.event.pull_request.head.repo.fork }}"
+
       - uses: opencharly/pi-review-action@v1.0.8
         id: review
         with:
@@ -52,17 +58,24 @@ jobs:
         env:
           REVIEW: ${{ steps.review.outputs.response }}
         run: |
+          echo "review_len=${#REVIEW}"
           found=$(printf '%s\n' "$REVIEW" | grep -E '^Verdict: (BLOCK|PASS)[[:space:]]*$')
           n=$(printf '%s\n' "$found" | grep -cE '^Verdict:')
+          echo "verdict_lines=$n"
           [ "$n" -eq 0 ] && { echo "::error::No verdict in response"; exit 2; }
           distinct=$(printf '%s\n' "$found" | sed -E 's/^Verdict: (BLOCK|PASS).*/\1/' | sort -u)
           echo "verdict=$distinct" >> "$GITHUB_OUTPUT"
+          echo "verdict_value=$distinct"
 
       - name: Gate verdict (BLOCK)
         if: steps.parse.outputs.verdict == 'BLOCK'
         run: |
           echo "::error::AI review blocked this PR"
           exit 1
+
+      - name: Log PASS path
+        if: steps.parse.outputs.verdict == 'PASS'
+        run: echo "AI review PASS — proceeding with CHANGELOG rename + auto-merge"
 
       # ---- PASS path: rename CHANGELOG + enable native auto-merge ----
       - name: Checkout PR head
@@ -80,22 +93,25 @@ jobs:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
           set -euo pipefail
+          echo "Fetching branches: base=$BASE_REF head=$HEAD_REF"
           git fetch origin \
             "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}" \
             "+refs/heads/${HEAD_REF}:refs/remotes/origin/${HEAD_REF}"
           p=$(git diff --name-status "origin/${BASE_REF}...origin/${HEAD_REF}" -- CHANGELOG/ \
             | awk '$1=="A"{print $NF}' \
             | grep -E '^CHANGELOG/[0-9]{4}\.[0-9]{3}\.[0-9]{4}\.md$' | head -1 || true)
+          echo "placeholder=$p"
           [ -z "$p" ] && echo "no-changelog" && exit 0
 
           c=$(git show "origin/$HEAD_REF:$p" 2>/dev/null || true)
           echo "$c" | grep -q "auto-merge-finalized: $(basename "$p" .md)" \
-            && { echo "stamp=$(basename "$p" .md)" >> "$GITHUB_OUTPUT"; exit 0; }
+            && { echo "already-finalized" && echo "stamp=$(basename "$p" .md)" >> "$GITHUB_OUTPUT"; exit 0; }
 
           stamp=$(date -u +%Y.%j.%H%M)
           [ "$(basename "$p" .md)" = "$stamp" ] \
-            && { echo "stamp=$stamp" >> "$GITHUB_OUTPUT"; exit 0; }
+            && { echo "already-at-stamp" && echo "stamp=$stamp" >> "$GITHUB_OUTPUT"; exit 0; }
 
+          echo "Renaming $p -> CHANGELOG/$stamp.md"
           git checkout -q -B dev/auto-merge "origin/$HEAD_REF"
           git mv "$p" "CHANGELOG/$stamp.md"
           sed -i -e "1s/^# [0-9]\{4\}\.[0-9]\{3\}\.[0-9]\{4\}/# $stamp/" \
@@ -104,6 +120,7 @@ jobs:
           git -c user.name='opencharly auto-merge' -c user.email='actions@github.com' \
             commit -m "docs: finalize CHANGELOG placeholder to $stamp (merge-time CalVer)"
           git push origin "HEAD:${HEAD_REF}"
+          echo "pushed new head"
           echo "stamp=$stamp" >> "$GITHUB_OUTPUT"
           echo "fresh=true" >> "$GITHUB_OUTPUT"
 
@@ -121,6 +138,7 @@ jobs:
             const idx = body.indexOf('## Attribution');
             body = idx >= 0 ? body.slice(0, idx) + note + '\n\n' + body.slice(idx) : body + note;
             await github.rest.pulls.update({ ...context.repo, pull_number: num, body });
+            core.info('PR body updated with finalization note');
 
       - name: Dispatch validator re-run on new head
         if: steps.changelog.outputs.fresh == 'true'
