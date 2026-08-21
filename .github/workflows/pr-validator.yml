@@ -1,11 +1,4 @@
 # ORG-WIDE PR VALIDATOR + MERGE ORCHESTRATOR (reusable via workflow_call)
-#
-# 1. AI review (pi-review-action v1.0.8, retries on empty responses)
-# 2. If PASS:
-#    a. Rename the CHANGELOG placeholder to the merge-time CalVer
-#    b. Dispatch a fresh validator run on the new head
-#    c. Enable GitHub's native auto-merge (waits for ALL checks)
-# 3. If BLOCK: fail
 name: charly/pr-validator
 
 on:
@@ -20,9 +13,6 @@ on:
       ai_review_base_url:
         type: string
         required: false
-    secrets:
-      GITHUB_TOKEN:
-        required: true
 
 permissions:
   contents: write
@@ -34,16 +24,6 @@ jobs:
     name: charly/pr-validator
     runs-on: ubuntu-latest
     steps:
-      - name: Log event context
-        run: |
-          echo "event_name=${{ github.event_name }}"
-          echo "repo=${{ github.repository }}"
-          echo "pr_number=${{ github.event.pull_request.number }}"
-          echo "head_sha=${{ github.event.pull_request.head.sha }}"
-          echo "head_ref=${{ github.event.pull_request.head.ref }}"
-          echo "base_ref=${{ github.event.pull_request.base.ref }}"
-          echo "fork=${{ github.event.pull_request.head.repo.fork }}"
-
       - uses: opencharly/pi-review-action@v1.0.8
         id: review
         with:
@@ -65,7 +45,6 @@ jobs:
           [ "$n" -eq 0 ] && { echo "::error::No verdict in response"; exit 2; }
           distinct=$(printf '%s\n' "$found" | sed -E 's/^Verdict: (BLOCK|PASS).*/\1/' | sort -u)
           echo "verdict=$distinct" >> "$GITHUB_OUTPUT"
-          echo "verdict_value=$distinct"
 
       - name: Gate verdict (BLOCK)
         if: steps.parse.outputs.verdict == 'BLOCK'
@@ -73,11 +52,6 @@ jobs:
           echo "::error::AI review blocked this PR"
           exit 1
 
-      - name: Log PASS path
-        if: steps.parse.outputs.verdict == 'PASS'
-        run: echo "AI review PASS — proceeding with CHANGELOG rename + auto-merge"
-
-      # ---- PASS path: rename CHANGELOG + enable native auto-merge ----
       - name: Checkout PR head
         if: steps.parse.outputs.verdict == 'PASS'
         uses: actions/checkout@v7
@@ -93,7 +67,6 @@ jobs:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
           set -euo pipefail
-          echo "Fetching branches: base=$BASE_REF head=$HEAD_REF"
           git fetch origin \
             "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}" \
             "+refs/heads/${HEAD_REF}:refs/remotes/origin/${HEAD_REF}"
@@ -102,15 +75,12 @@ jobs:
             | grep -E '^CHANGELOG/[0-9]{4}\.[0-9]{3}\.[0-9]{4}\.md$' | head -1 || true)
           echo "placeholder=$p"
           [ -z "$p" ] && echo "no-changelog" && exit 0
-
           c=$(git show "origin/$HEAD_REF:$p" 2>/dev/null || true)
           echo "$c" | grep -q "auto-merge-finalized: $(basename "$p" .md)" \
             && { echo "already-finalized" && echo "stamp=$(basename "$p" .md)" >> "$GITHUB_OUTPUT"; exit 0; }
-
           stamp=$(date -u +%Y.%j.%H%M)
           [ "$(basename "$p" .md)" = "$stamp" ] \
             && { echo "already-at-stamp" && echo "stamp=$stamp" >> "$GITHUB_OUTPUT"; exit 0; }
-
           echo "Renaming $p -> CHANGELOG/$stamp.md"
           git checkout -q -B dev/auto-merge "origin/$HEAD_REF"
           git mv "$p" "CHANGELOG/$stamp.md"
@@ -138,7 +108,7 @@ jobs:
             const idx = body.indexOf('## Attribution');
             body = idx >= 0 ? body.slice(0, idx) + note + '\n\n' + body.slice(idx) : body + note;
             await github.rest.pulls.update({ ...context.repo, pull_number: num, body });
-            core.info('PR body updated with finalization note');
+            core.info('PR body updated');
 
       - name: Dispatch validator re-run on new head
         if: steps.changelog.outputs.fresh == 'true'
