@@ -104,3 +104,21 @@ accordingly never treats that as a blocking finding: it verifies the mechanism
 statically, accepts an explicit operator sign-off, and passes unless a genuinely
 fixable, non-self-blocking defect remains. This is the only instance where the
 gate's own check is not independently green.
+
+## Bot-token rename push (org secrets)
+
+Every PR must carry a CHANGELOG placeholder renamed to the merge-time
+CalVer. The validator performs that rename **with a bot token, not
+GITHUB_TOKEN**: GitHub requires approval for runs triggered by
+GITHUB_TOKEN pushes, and no event exists that can auto-approve them.
+A bot-token push re-triggers `pull_request: synchronize` normally.
+
+Setup (already done org-wide):
+
+- GitHub App `charly-auto-merge` (id 4675576), installed on `opencharly`
+  with All-repositories access.
+- Org secrets `CHARLY_AUTO_MERGE_APP_ID` + `CHARLY_AUTO_MERGE_PRIVATE_KEY`.
+  Fallback: `CHARLY_BOT_TOKEN` (fine-grained PAT, Contents: write).
+
+The rename step hard-fails when neither is configured, so a missing
+secret never silently degrades to the approval-required loop.
