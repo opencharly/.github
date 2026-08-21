@@ -4,6 +4,9 @@ name: charly/pr-validator
 on:
   workflow_call:
     inputs:
+      pr-number:
+        required: true
+        type: string
       ai_review_provider:
         type: string
         required: false
@@ -14,6 +17,10 @@ on:
         type: string
         required: false
   workflow_dispatch:
+    inputs:
+      pr-number:
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -25,6 +32,20 @@ jobs:
     name: charly/pr-validator
     runs-on: ubuntu-latest
     steps:
+      - name: Fetch PR metadata
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const num = parseInt('${{ inputs.pr-number }}');
+            const { data: pr } = await github.rest.pulls.get({ ...context.repo, pull_number: num });
+            core.setOutput('number', String(pr.number));
+            core.setOutput('head_sha', pr.head.sha);
+            core.setOutput('head_ref', pr.head.ref);
+            core.setOutput('base_ref', pr.base.ref);
+            core.setOutput('node_id', pr.node_id);
+            core.info(`PR #${pr.number} head=${pr.head.sha.slice(0,12)} ref=${pr.head.ref}`);
+
       - uses: opencharly/pi-review-action@v1.0.8
         id: review
         with:
@@ -65,15 +86,15 @@ jobs:
         if: steps.parse.outputs.verdict == 'PASS'
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ steps.pr.outputs.head_sha }}
           fetch-depth: 0
 
       - name: Rename CHANGELOG placeholder
         if: steps.parse.outputs.verdict == 'PASS'
         id: changelog
         env:
-          HEAD_REF: ${{ github.event.pull_request.head.ref }}
-          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_REF: ${{ steps.pr.outputs.head_ref }}
+          BASE_REF: ${{ steps.pr.outputs.base_ref }}
         run: |
           set -euo pipefail
           git fetch origin \
@@ -108,7 +129,7 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const num = parseInt('${{ github.event.pull_request.number }}');
+            const num = parseInt('${{ steps.pr.outputs.number }}');
             const stamp = '${{ steps.changelog.outputs.stamp }}';
             const { data: pr } = await github.rest.pulls.get({ ...context.repo, pull_number: num });
             let body = pr.body || '';
@@ -126,8 +147,9 @@ jobs:
           script: |
             await github.rest.actions.createWorkflowDispatch({
               ...context.repo,
-              workflow_id: 'pr-validator.yml',
-              ref: '${{ github.event.pull_request.head.ref }}',
+              workflow_id: 'pr-validator-dispatcher.yml',
+              ref: '${{ steps.pr.outputs.head_ref }}',
+              inputs: { 'pr-number': '${{ steps.pr.outputs.number }}' },
             });
             core.info('Validator dispatched on new head');
 
@@ -136,7 +158,7 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
-            const num = parseInt('${{ github.event.pull_request.number }}');
+            const num = parseInt('${{ steps.pr.outputs.number }}');
             const { data: pr } = await github.rest.pulls.get({ ...context.repo, pull_number: num });
             await github.graphql(`
               mutation($id: ID!) {
