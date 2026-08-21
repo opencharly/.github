@@ -1,11 +1,20 @@
 # ORG-WIDE PR VALIDATOR (reusable, called via @main)
 #
-# Runs on every PR event (pull_request) and on workflow_dispatch.
-#   1. If the CHANGELOG placeholder is not finalized: rename it, push,
-#      then dispatch a validation run on the PR branch (workflow_dispatch
-#      always runs, no approval needed), and EXIT.
-#   2. Otherwise (CHANGELOG finalized): AI review ONCE. On PASS, enable
-#      native auto-merge.
+# Event-driven validation: no dispatch, no polling, no approval races.
+#
+# A GITHUB_TOKEN push (the CHANGELOG rename) would create an
+# approval-required `pull_request: synchronize` run that can never run.
+# The rename therefore pushes with a BOT token (GitHub App token
+# preferred, PAT fallback) — GitHub does not gate runs triggered by
+# non-GITHUB_TOKEN pushes, so the resulting synchronize event starts a
+# normal validation run on the renamed head.
+#
+# Flow:
+#   1. If the CHANGELOG placeholder is not finalized: rename it and
+#      push with the bot token, then EXIT. The push's synchronize
+#      event re-triggers this workflow (no approval needed).
+#   2. Otherwise: AI review ONCE. On PASS, enable native auto-merge
+#      (GitHub waits for the run's own check on the head commit).
 name: charly/pr-validator
 
 on:
@@ -51,6 +60,28 @@ jobs:
             core.setOutput('base_ref', pr.base.ref);
             core.setOutput('node_id', pr.node_id);
 
+      # Bot token for the rename push. GitHub App token preferred;
+      # PAT fallback; hard fail when neither is configured.
+      - name: Create bot token (GitHub App)
+        id: bot-token-app
+        if: secrets.CHARLY_AUTO_MERGE_APP_ID != ''
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.CHARLY_AUTO_MERGE_APP_ID }}
+          private-key: ${{ secrets.CHARLY_AUTO_MERGE_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Use PAT bot token
+        id: bot-token-pat
+        if: secrets.CHARLY_AUTO_MERGE_APP_ID == '' && secrets.CHARLY_BOT_TOKEN != ''
+        run: echo "token=${{ secrets.CHARLY_BOT_TOKEN }}" >> "$GITHUB_OUTPUT"
+
+      - name: Require bot token
+        if: secrets.CHARLY_AUTO_MERGE_APP_ID == '' && secrets.CHARLY_BOT_TOKEN == ''
+        run: |
+          echo "::error::No bot token configured. Set org secrets CHARLY_AUTO_MERGE_APP_ID + CHARLY_AUTO_MERGE_PRIVATE_KEY (GitHub App) or CHARLY_BOT_TOKEN (PAT)."
+          exit 2
+
       - uses: actions/checkout@v7
         with:
           ref: ${{ steps.pr.outputs.head_sha }}
@@ -62,6 +93,7 @@ jobs:
         env:
           HEAD_REF: ${{ steps.pr.outputs.head_ref }}
           BASE_REF: ${{ steps.pr.outputs.base_ref }}
+          BOT_TOKEN: ${{ steps.bot-token-app.outputs.token || steps.bot-token-pat.outputs.token }}
         run: |
           set -euo pipefail
           git fetch origin \
@@ -82,37 +114,23 @@ jobs:
           git add "CHANGELOG/$stamp.md"
           git -c user.name='opencharly auto-merge' -c user.email='actions@github.com' \
             commit -m "docs: finalize CHANGELOG placeholder to $stamp (merge-time CalVer)"
-          git push origin "HEAD:${HEAD_REF}"
+          # Bot-token push: its synchronize event runs WITHOUT approval,
+          # so the next run validates the renamed head automatically.
+          git push "https://x-access-token:${BOT_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:${HEAD_REF}"
           echo "renamed=true" >> "$GITHUB_OUTPUT"
-
-      # If renamed: dispatch validation on the PR branch and exit.
-      # The dispatch always works (workflow_dispatch) and creates a
-      # check on the PR head (the PR branch head).
-      - name: Dispatch validation on PR branch
-        if: steps.changelog.outputs.renamed == 'true'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            await github.rest.actions.createWorkflowDispatch({
-              ...context.repo,
-              workflow_id: 'pr-validator-dispatcher.yml',
-              ref: '${{ steps.pr.outputs.head_ref }}',
-              inputs: { 'pr-number': '${{ inputs.pr-number }}' },
-            });
-            core.info('Validation dispatched on PR branch');
 
       - name: Exit after rename
         if: steps.changelog.outputs.renamed == 'true'
-        run: echo "Renamed — validation dispatched"
+        run: echo "Renamed — synchronize event re-triggers validation"
 
       # 2. AI review (only when not renamed in this run)
       - uses: opencharly/pi-review-action@v1.0.9
         if: steps.changelog.outputs.renamed != 'true'
         id: review
         with:
-          provider: ${{ vars.AI_REVIEW_PROVIDER }}
-          model: ${{ vars.AI_REVIEW_MODEL }}
-          base_url: ${{ vars.AI_REVIEW_BASE_URL }}
+          provider: ${{ inputs.ai_review_provider || vars.AI_REVIEW_PROVIDER }}
+          model: ${{ inputs.ai_review_model || vars.AI_REVIEW_MODEL }}
+          base_url: ${{ inputs.ai_review_base_url || vars.AI_REVIEW_BASE_URL }}
           api_key: ${{ secrets.AI_REVIEW_API_KEY }}
           max_turns: 20
           pr_number: ${{ inputs.pr-number }}
@@ -134,6 +152,12 @@ jobs:
         run: |
           echo "::error::AI review blocked this PR"
           exit 1
+
+      - name: Gate (ambiguous)
+        if: steps.changelog.outputs.renamed != 'true' && steps.parse.outputs.verdict != 'PASS' && steps.parse.outputs.verdict != 'BLOCK'
+        run: |
+          echo "::error::Ambiguous verdict from AI review"
+          exit 2
 
       # 3. Enable native auto-merge — GitHub waits for all checks
       - name: Enable auto-merge
