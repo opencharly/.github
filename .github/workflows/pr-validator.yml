@@ -61,10 +61,13 @@ jobs:
             core.setOutput('node_id', pr.node_id);
 
       # Bot token for the rename push. GitHub App token preferred;
-      # PAT fallback; hard fail when neither is configured.
+      # PAT fallback. NOTE: `secrets` is not available in `if:` conditions
+      # (GitHub rejects the workflow file at parse time), so both steps run
+      # unconditionally: the App step fails harmlessly when the app is not
+      # configured, and the guard step enforces that SOME token resolved.
       - name: Create bot token (GitHub App)
         id: bot-token-app
-        if: secrets.CHARLY_AUTO_MERGE_APP_ID != ''
+        continue-on-error: true
         uses: actions/create-github-app-token@v1
         with:
           app-id: ${{ secrets.CHARLY_AUTO_MERGE_APP_ID }}
@@ -73,14 +76,17 @@ jobs:
 
       - name: Use PAT bot token
         id: bot-token-pat
-        if: secrets.CHARLY_AUTO_MERGE_APP_ID == '' && secrets.CHARLY_BOT_TOKEN != ''
         run: echo "token=${{ secrets.CHARLY_BOT_TOKEN }}" >> "$GITHUB_OUTPUT"
 
       - name: Require bot token
-        if: secrets.CHARLY_AUTO_MERGE_APP_ID == '' && secrets.CHARLY_BOT_TOKEN == ''
+        env:
+          APP_TOKEN: ${{ steps.bot-token-app.outputs.token }}
+          PAT_TOKEN: ${{ steps.bot-token-pat.outputs.token }}
         run: |
-          echo "::error::No bot token configured. Set org secrets CHARLY_AUTO_MERGE_APP_ID + CHARLY_AUTO_MERGE_PRIVATE_KEY (GitHub App) or CHARLY_BOT_TOKEN (PAT)."
-          exit 2
+          if [ -z "$APP_TOKEN" ] && [ -z "$PAT_TOKEN" ]; then
+            echo "::error::No bot token configured: set org secrets CHARLY_AUTO_MERGE_APP_ID + CHARLY_AUTO_MERGE_PRIVATE_KEY (GitHub App) or CHARLY_BOT_TOKEN (PAT)."
+            exit 2
+          fi
 
       - uses: actions/checkout@v7
         with:
