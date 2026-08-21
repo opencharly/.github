@@ -1,17 +1,20 @@
 # ORG-WIDE TAG-ON-MERGE (reusable via workflow_call)
 #
-# Called by a push-triggered dispatcher (every squash merge pushes a
-# commit to main). Creates the CalVer release tag on the pushed sha.
+# Called by a workflow_run-triggered dispatcher after every validator
+# completion. The PR usually merged moments earlier (auto-merge fires
+# on the green check); if the PR is merged and untagged, create the
+# CalVer tag on its merge commit.
 #
-# NOTE: the old pull_request:closed-based design never fired — this
-# GitHub emits action "merged" (not "closed") for merged PRs, and
-# "merged" is not a valid workflow trigger type.
+# NOTE: neither pull_request:closed (this GitHub emits action
+# "merged", an invalid trigger type) nor push to main (GITHUB_TOKEN
+# events create no runs) can be used; workflow_run is the only event
+# that fires after a bot auto-merge.
 name: tag-on-merge
 
 on:
   workflow_call:
     inputs:
-      sha:
+      head-sha:
         required: true
         type: string
 
@@ -22,8 +25,18 @@ jobs:
       - uses: actions/github-script@v7
         with:
           script: |
-            const sha = '${{ inputs.sha }}';
-            const d = new Date();
+            const headSha = '${{ inputs.head-sha }}';
+            const { data: prs } = await github.rest.pulls.list({
+              ...context.repo, state: 'closed', sort: 'updated', direction: 'desc', per_page: 5,
+            });
+            const pr = prs.find(p => p.head.sha === headSha);
+            if (!pr) { core.info(`No PR for head ${headSha} — skipping`); return; }
+            if (!pr.merged || !pr.merge_commit_sha) { core.info(`PR #${pr.number} not merged — skipping`); return; }
+
+            const { data: commit } = await github.rest.git.getCommit({
+              ...context.repo, commit_sha: pr.merge_commit_sha,
+            });
+            const d = new Date(commit.committer.date);
             const y = d.getUTCFullYear();
             const doy = String(Math.floor((d - new Date(y, 0, 0)) / 86400000)).padStart(3, '0');
             const hh = String(d.getUTCHours()).padStart(2, '0');
@@ -39,6 +52,6 @@ jobs:
             } catch {}
 
             await github.rest.git.createRef({
-              ...context.repo, ref: `refs/tags/${tag}`, sha: sha,
+              ...context.repo, ref: `refs/tags/${tag}`, sha: pr.merge_commit_sha,
             });
-            core.info(`Tagged ${tag} at ${sha}`);
+            core.info(`Tagged ${tag} at ${pr.merge_commit_sha}`);
