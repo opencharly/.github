@@ -1,18 +1,20 @@
 # ORG-WIDE TAG-ON-MERGE DISPATCHER — .github repo's own instance.
+#
+# Every squash-merge pushes a commit to main; tag it with the
+# merge-time CalVer. (pull_request:closed never fires for auto-merges —
+# this GitHub emits action "merged", which is not a valid trigger.)
 name: tag-on-merge
 
 on:
-  pull_request:
-    types: [closed]
+  push:
+    branches: [main]
 
 permissions:
   contents: write
-  pull-requests: write
 
 jobs:
   tag:
-    if: github.event.pull_request.merged == true
     uses: ./.github/workflows/tag-on-merge.yml
     with:
-      pr-number: ${{ github.event.pull_request.number }}
+      sha: ${{ github.sha }}
     secrets: inherit
