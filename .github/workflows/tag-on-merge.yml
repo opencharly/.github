@@ -1,18 +1,13 @@
 # ORG-WIDE TAG-ON-MERGE (reusable via workflow_call)
 #
-# Triggered by a thin dispatcher when a pull_request:closed event
-# fires with merged:true.  Creates the CalVer release tag on the
-# merge commit.
-#
-# Canonical source: this file.
-# Install the dispatcher: opencharly/.github/org-wide-tag-on-merge-dispatcher.yml
+# Triggered by a dispatcher on pull_request:closed when merged.
+# Creates the CalVer release tag on the merge commit.
 name: tag-on-merge
 
 on:
   workflow_call:
     inputs:
       pr-number:
-        description: Number of the merged PR
         required: true
         type: string
     secrets:
@@ -47,13 +42,11 @@ jobs:
 
             try {
               await github.rest.git.getRef({ ...context.repo, ref: `tags/${tag}` });
-              core.info(`Tag ${tag} already exists on ${sha} — skipping`);
+              core.info(`Tag ${tag} already exists — skipping`);
               return;
             } catch {}
 
             await github.rest.git.createRef({
-              ...context.repo,
-              ref: `refs/tags/${tag}`,
-              sha: sha,
+              ...context.repo, ref: `refs/tags/${tag}`, sha: sha,
             });
             core.info(`Tagged ${tag} at ${sha}`);
