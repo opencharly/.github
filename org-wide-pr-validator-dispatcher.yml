@@ -20,6 +20,7 @@ jobs:
     if: github.event.pull_request.head.repo.fork == false
     uses: opencharly/.github/.github/workflows/pr-validator.yml@main
     with:
+      pr-number: ${{ github.event.pull_request.number }}
       ai_review_provider: ${{ vars.AI_REVIEW_PROVIDER }}
       ai_review_model: ${{ vars.AI_REVIEW_MODEL }}
       ai_review_base_url: ${{ vars.AI_REVIEW_BASE_URL }}
