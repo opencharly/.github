@@ -1,15 +1,15 @@
 # ORG-WIDE AUTO-MERGE ENGINE (reusable via workflow_call)
 #
-# Called by a thin dispatcher in each target repo.  It finalizes the
-# CHANGELOG placeholder, re-triggers the validator on the new head,
-# and enables GitHub's native auto-merge — which waits for ALL status
-# checks (including the re-run validator) through branch protection.
+# Event-driven — zero polling, zero timeouts, zero sleep.
+# Each action triggers the next via GitHub's native event system:
 #
-# The engine does NOT poll status checks.  GitHub's native auto-merge
-# (`enablePullRequestAutoMerge`) already handles that: it checks ALL
-# required branch-protection contexts and only merges when every one
-# is passing.  The only polling is a lightweight PR-state loop waiting
-# for the merge to complete.
+#   pr-validator passes
+#     ↓ workflow_run
+#   This engine: finalize CHANGELOG → dispatch validator → enable auto-merge
+#     ↓ exits
+#   Native auto-merge merges PR when all checks pass
+#     ↓ pull_request:closed
+#   tag-on-merge workflow creates CalVer tag on merge commit
 #
 # Canonical source: this file.
 # Install the dispatcher: opencharly/.github/org-wide-auto-merge-dispatcher.yml
@@ -29,14 +29,14 @@ on:
 jobs:
   engine:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.head-sha }}
           fetch-depth: 0
 
-      # -- Step 1 — Find the PR, detect state, extract refs -------------------
+      # -- Find PR, detect state ------------------------------------------------
       - id: pr
         uses: actions/github-script@v7
         with:
@@ -53,42 +53,23 @@ jobs:
               core.setOutput('base_ref', open.base.ref);
               core.setOutput('node_id', open.node_id);
               core.info(`PR #${open.number} open — ${open.head.ref} → ${open.base.ref}`);
-              return;
-            }
-            const merged = prs.find(p => p.state === 'closed' && p.merge_commit_sha);
-            if (merged) {
+            } else {
               core.setOutput('state', 'closed');
-              core.setOutput('merge_sha', merged.merge_commit_sha);
-              core.setOutput('merge_date', merged.merged_at);
-              return;
+              core.info('PR already closed — skipping');
             }
-            core.setFailed('No open PR found for this commit');
 
-      # -- Step 2 — Tag an already-closed PR and exit -------------------------
+      # -- Already closed: nothing to do (tag-on-merge handles tagging) --------
       - if: steps.pr.outputs.state == 'closed'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const sha = '${{ steps.pr.outputs.merge_sha }}';
-            const d = new Date('${{ steps.pr.outputs.merge_date }}');
-            const y = d.getUTCFullYear();
-            const doy = String(Math.floor((d - new Date(y, 0, 0)) / 86400000)).padStart(3, '0');
-            const hh = String(d.getUTCHours()).padStart(2, '0');
-            const mm = String(d.getUTCMinutes()).padStart(2, '0');
-            const tag = context.repo.repo === 'sdk'
-              ? `v0.${y}${doy}.${parseInt(hh + mm)}`
-              : `v${y}.${doy}.${hh}${mm}`;
-            try { await github.rest.git.getRef({ ...context.repo, ref: `tags/${tag}` }); }
-            catch { await github.rest.git.createRef({ ...context.repo, ref: `refs/tags/${tag}`, sha }); }
+        run: echo "PR closed — nothing to do"
 
-      # -- Step 3 — Fetch PR base + head branches for the diff ----------------
+      # -- Fetch PR branches for diff -------------------------------------------
       - if: steps.pr.outputs.state == 'open'
         run: |
           git fetch origin \
             "+refs/heads/${{ steps.pr.outputs.base_ref }}:refs/remotes/origin/${{ steps.pr.outputs.base_ref }}" \
             "+refs/heads/${{ steps.pr.outputs.head_ref }}:refs/remotes/origin/${{ steps.pr.outputs.head_ref }}"
 
-      # -- Step 4 — CHANGELOG finalization (git operations) -------------------
+      # -- Finalize CHANGELOG placeholder (git operations) ----------------------
       - if: steps.pr.outputs.state == 'open'
         id: changelog
         env:
@@ -116,7 +97,7 @@ jobs:
           git push origin "HEAD:${HEAD_REF}"
           echo "stamp=$stamp" >> "$GITHUB_OUTPUT"
 
-      # -- Step 5 — Update PR body with finalization note ---------------------
+      # -- Update PR body with finalization note (before Attribution) -----------
       - if: steps.changelog.outputs.stamp != ''
         uses: actions/github-script@v7
         with:
@@ -131,7 +112,7 @@ jobs:
             body = idx >= 0 ? body.slice(0, idx) + note + '\n\n' + body.slice(idx) : body + note;
             await github.rest.pulls.update({ ...context.repo, pull_number: num, body });
 
-      # -- Step 6 — Dispatch validator on the finalized head ------------------
+      # -- Dispatch validator re-run on finalized head --------------------------
       - if: steps.changelog.outputs.stamp != ''
         uses: actions/github-script@v7
         with:
@@ -141,34 +122,13 @@ jobs:
               workflow_id: 'pr-validator.yml',
               ref: '${{ steps.pr.outputs.head_ref }}',
             });
+            core.info('Validator dispatched — will trigger another engine run when it completes');
 
-      # -- Step 7 — Wait briefly for the validator check-run to appear --------
-      - if: steps.changelog.outputs.stamp != ''
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const snooze = ms => new Promise(r => setTimeout(r, ms));
-            for (let i = 0; i < 60; i++) {
-              const { data: c } = await github.rest.checks.listForRef({
-                ...context.repo,
-                ref: '${{ steps.pr.outputs.head_ref }}',
-              });
-              if (c.check_runs.some(r => r.name === 'charly/pr-validator')) return;
-              await snooze(5000);
-            }
-            core.warning('Validator check-run did not appear — auto-merge will still wait for it');
-
-      # -- Step 8 — Enable native auto-merge, wait, tag -----------------------
+      # -- Enable native auto-merge (GitHub waits for all required checks) ------
       - if: steps.pr.outputs.state == 'open'
         uses: actions/github-script@v7
         with:
           script: |
-            const num = parseInt('${{ steps.pr.outputs.number }}');
-            const stamp = '${{ steps.changelog.outputs.stamp }}';
-
-            // Enable native auto-merge — GitHub handles ALL check waiting
-            // via branch protection.  It only merges when EVERY required
-            // status check is green on the PR head.
             await github.graphql(`
               mutation($id: ID!) {
                 enablePullRequestAutoMerge(input: {
@@ -178,24 +138,5 @@ jobs:
             `, { id: '${{ steps.pr.outputs.node_id }}' });
             core.info('Auto-merge enabled — GitHub will merge when all checks pass');
 
-            // Poll for merge completion (lightweight PR state check)
-            const snooze = ms => new Promise(r => setTimeout(r, ms));
-            for (let i = 0; i < 180; i++) {
-              const { data: pr } = await github.rest.pulls.get({ ...context.repo, pull_number: num });
-              if (pr.state === 'closed' && pr.merge_commit_sha) {
-                const d = new Date(pr.merged_at);
-                const y = d.getUTCFullYear();
-                const doy = String(Math.floor((d - new Date(y, 0, 0)) / 86400000)).padStart(3, '0');
-                const hh = String(d.getUTCHours()).padStart(2, '0');
-                const mm = String(d.getUTCMinutes()).padStart(2, '0');
-                const ver = stamp || `${y}.${doy}.${hh}${mm}`;
-                const tag = context.repo.repo === 'sdk'
-                  ? `v0.${y}${doy}.${parseInt(hh + mm)}`
-                  : `v${ver}`;
-                try { await github.rest.git.getRef({ ...context.repo, ref: `tags/${tag}` }); }
-                catch { await github.rest.git.createRef({ ...context.repo, ref: `refs/tags/${tag}`, sha: pr.merge_commit_sha }); }
-                return;
-              }
-              await snooze(5000);
-            }
-            core.setFailed('Timed out waiting for merge');
+            # No polling, no waiting.  The tag-on-merge workflow
+            # handles tagging when pull_request:closed fires.

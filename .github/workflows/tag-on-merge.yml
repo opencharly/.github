@@ -1,0 +1,59 @@
+# ORG-WIDE TAG-ON-MERGE (reusable via workflow_call)
+#
+# Triggered by a thin dispatcher when a pull_request:closed event
+# fires with merged:true.  Creates the CalVer release tag on the
+# merge commit.
+#
+# Canonical source: this file.
+# Install the dispatcher: opencharly/.github/org-wide-tag-on-merge-dispatcher.yml
+name: tag-on-merge
+
+on:
+  workflow_call:
+    inputs:
+      pr-number:
+        description: Number of the merged PR
+        required: true
+        type: string
+    secrets:
+      GITHUB_TOKEN:
+        required: true
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const num = parseInt('${{ inputs.pr-number }}');
+            const { data: pr } = await github.rest.pulls.get({ ...context.repo, pull_number: num });
+
+            if (!pr.merged || !pr.merge_commit_sha) {
+              core.info(`PR #${num} not merged — skipping`);
+              return;
+            }
+
+            const sha = pr.merge_commit_sha;
+            const d = new Date(pr.merged_at);
+            const y = d.getUTCFullYear();
+            const doy = String(Math.floor((d - new Date(y, 0, 0)) / 86400000)).padStart(3, '0');
+            const hh = String(d.getUTCHours()).padStart(2, '0');
+            const mm = String(d.getUTCMinutes()).padStart(2, '0');
+
+            const tag = context.repo.repo === 'sdk'
+              ? `v0.${y}${doy}.${parseInt(hh + mm)}`
+              : `v${y}.${doy}.${hh}${mm}`;
+
+            try {
+              await github.rest.git.getRef({ ...context.repo, ref: `tags/${tag}` });
+              core.info(`Tag ${tag} already exists on ${sha} — skipping`);
+              return;
+            } catch {}
+
+            await github.rest.git.createRef({
+              ...context.repo,
+              ref: `refs/tags/${tag}`,
+              sha: sha,
+            });
+            core.info(`Tagged ${tag} at ${sha}`);
