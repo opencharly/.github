@@ -1,20 +1,11 @@
-# ORG-WIDE PR VALIDATOR (reusable, called via @main)
+# ORG-WIDE PR VALIDATOR (reusable, called via workflow_call)
 #
-# Event-driven validation: no dispatch, no polling, no approval races.
+# Validates a PR via AI review. On PASS, enables GitHub native auto-merge
+# (squash). GitHub branch protection waits for all required checks
+# (including repo-specific CI gates like verify/go) before merging.
 #
-# A GITHUB_TOKEN push (the CHANGELOG rename) would create an
-# approval-required `pull_request: synchronize` run that can never run.
-# The rename therefore pushes with a BOT token (GitHub App token
-# preferred, PAT fallback) — GitHub does not gate runs triggered by
-# non-GITHUB_TOKEN pushes, so the resulting synchronize event starts a
-# normal validation run on the renamed head.
-#
-# Flow:
-#   1. If the CHANGELOG placeholder is not finalized: rename it and
-#      push with the bot token, then EXIT. The push's synchronize
-#      event re-triggers this workflow (no approval needed).
-#   2. Otherwise: AI review ONCE. On PASS, enable native auto-merge
-#      (GitHub waits for the run's own check on the head commit).
+# No CHANGELOG rename — the merge workflow creates CHANGELOG from PR body.
+# No bot tokens needed.
 name: charly/pr-validator
 
 on:
@@ -41,7 +32,6 @@ on:
 permissions:
   contents: write
   pull-requests: write
-  actions: write
 
 jobs:
   validate:
@@ -60,93 +50,12 @@ jobs:
             core.setOutput('base_ref', pr.base.ref);
             core.setOutput('node_id', pr.node_id);
 
-      # Bot token for the rename push. GitHub App token preferred;
-      # PAT fallback. NOTE: `secrets` is not available in `if:` conditions
-      # (GitHub rejects the workflow file at parse time), so both steps run
-      # unconditionally: the App step fails harmlessly when the app is not
-      # configured, and the guard step enforces that SOME token resolved.
-      - name: Create bot token (GitHub App)
-        id: bot-token-app
-        continue-on-error: true
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: ${{ secrets.CHARLY_AUTO_MERGE_APP_ID }}
-          private-key: ${{ secrets.CHARLY_AUTO_MERGE_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-
-      - name: Use PAT bot token
-        id: bot-token-pat
-        run: echo "token=${{ secrets.CHARLY_BOT_TOKEN }}" >> "$GITHUB_OUTPUT"
-
-      - name: Require bot token
-        env:
-          APP_TOKEN: ${{ steps.bot-token-app.outputs.token }}
-          PAT_TOKEN: ${{ steps.bot-token-pat.outputs.token }}
-        run: |
-          if [ -z "$APP_TOKEN" ] && [ -z "$PAT_TOKEN" ]; then
-            echo "::error::No bot token configured: set org secrets CHARLY_AUTO_MERGE_APP_ID + CHARLY_AUTO_MERGE_PRIVATE_KEY (GitHub App) or CHARLY_BOT_TOKEN (PAT)."
-            exit 2
-          fi
-
       - uses: actions/checkout@v7
         with:
           ref: ${{ steps.pr.outputs.head_sha }}
           fetch-depth: 0
 
-      # 1. Rename CHANGELOG first (before validation)
-      - name: Rename CHANGELOG
-        id: changelog
-        env:
-          HEAD_REF: ${{ steps.pr.outputs.head_ref }}
-          BASE_REF: ${{ steps.pr.outputs.base_ref }}
-          BOT_TOKEN: ${{ steps.bot-token-app.outputs.token || steps.bot-token-pat.outputs.token }}
-        run: |
-          set -euo pipefail
-          git fetch origin \
-            "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}" \
-            "+refs/heads/${HEAD_REF}:refs/remotes/origin/${HEAD_REF}"
-          p=$(git diff --name-status "origin/${BASE_REF}...origin/${HEAD_REF}" -- CHANGELOG/ \
-            | awk '$1=="A"{print $NF}' \
-            | grep -E '^CHANGELOG/[0-9]{4}\.[0-9]{3}\.[0-9]{4}\.md$' | head -1 || true)
-          [ -z "$p" ] && exit 0
-          c=$(git show "origin/$HEAD_REF:$p" 2>/dev/null || true)
-          echo "$c" | grep -q "auto-merge-finalized: $(basename "$p" .md)" && exit 0
-          stamp=$(date -u +%Y.%j.%H%M)
-          [ "$(basename "$p" .md)" = "$stamp" ] && exit 0
-          # Finalize via the Contents API with the bot token: the commit
-          # is attributed to the app, so the resulting synchronize event
-          # runs WITHOUT approval. (A git push from the runner would
-          # inherit actions/checkout's GITHUB_TOKEN Authorization
-          # extraheader — installed via a temp global config under an
-          # overridden HOME plus local includeIf entries, which git
-          # config scoping cannot reliably remove — and count as a
-          # GITHUB_TOKEN push whose run lands in action_required.)
-          new="CHANGELOG/$stamp.md"
-          content=$(printf '%s' "$c" | sed -e "1s/^# [0-9]\{4\}\.[0-9]\{3\}\.[0-9]\{4\}/# $stamp/" \
-            -e "1a\\<!-- auto-merge-finalized: $stamp -->")
-          b64=$(printf '%s' "$content" | base64 -w0)
-          old_sha=$(curl -fsS -H "Authorization: Bearer ${BOT_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/${p}?ref=${HEAD_REF}" | jq -r .sha)
-          curl -fsS -X PUT -H "Authorization: Bearer ${BOT_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/${new}" \
-            -d "$(jq -nc --arg msg "docs: finalize CHANGELOG placeholder to $stamp (merge-time CalVer)" --arg content "$b64" --arg branch "$HEAD_REF" '{message:$msg,content:$content,branch:$branch}')" \
-            | jq -e '.commit.sha' >/dev/null
-          curl -fsS -X DELETE -H "Authorization: Bearer ${BOT_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/${p}" \
-            -d "$(jq -nc --arg msg "docs: remove placeholder ${p}" --arg sha "$old_sha" --arg branch "$HEAD_REF" '{message:$msg,sha:$sha,branch:$branch}')" \
-            | jq -e '.commit.sha' >/dev/null
-          echo "renamed=true" >> "$GITHUB_OUTPUT"
-
-      - name: Exit after rename
-        if: steps.changelog.outputs.renamed == 'true'
-        run: echo "Renamed — synchronize event re-triggers validation"
-
-      # 2. AI review (only when not renamed in this run)
       - uses: opencharly/pi-review-action@v1.0.9
-        if: steps.changelog.outputs.renamed != 'true'
         id: review
         with:
           provider: ${{ inputs.ai_review_provider || vars.AI_REVIEW_PROVIDER }}
@@ -157,7 +66,6 @@ jobs:
           pr_number: ${{ inputs.pr-number }}
 
       - name: Parse verdict
-        if: steps.changelog.outputs.renamed != 'true'
         id: parse
         env:
           REVIEW: ${{ steps.review.outputs.response }}
@@ -169,20 +77,19 @@ jobs:
           echo "verdict=$distinct" >> "$GITHUB_OUTPUT"
 
       - name: Gate (BLOCK)
-        if: steps.changelog.outputs.renamed != 'true' && steps.parse.outputs.verdict == 'BLOCK'
+        if: steps.parse.outputs.verdict == 'BLOCK'
         run: |
           echo "::error::AI review blocked this PR"
           exit 1
 
       - name: Gate (ambiguous)
-        if: steps.changelog.outputs.renamed != 'true' && steps.parse.outputs.verdict != 'PASS' && steps.parse.outputs.verdict != 'BLOCK'
+        if: steps.parse.outputs.verdict != 'PASS' && steps.parse.outputs.verdict != 'BLOCK'
         run: |
           echo "::error::Ambiguous verdict from AI review"
           exit 2
 
-      # 3. Enable native auto-merge — GitHub waits for all checks
       - name: Enable auto-merge
-        if: steps.changelog.outputs.renamed != 'true' && steps.parse.outputs.verdict == 'PASS'
+        if: steps.parse.outputs.verdict == 'PASS'
         uses: actions/github-script@v7
         with:
           script: |
