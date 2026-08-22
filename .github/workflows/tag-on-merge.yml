@@ -1,26 +1,19 @@
 # ORG-WIDE TAG-ON-MERGE (reusable via workflow_call)
 #
-# Event-driven mode: called on workflow_run after each validator
-# completion; tags the PR's merge commit if already merged.
-# Sweep mode: called on schedule; tags every merged-but-untagged PR —
-# the fallback for the race where the event arrives before the merge.
+# Sweep mode only: scans closed PRs updated in the last 24h and tags
+# every merged PR that lacks its CalVer tag.
 #
-# NOTE: neither pull_request:closed (this GitHub emits action
-# "merged", an invalid trigger type) nor push to main (GITHUB_TOKEN
-# events create no runs) can be used; workflow_run + schedule is the
-# only mechanism that covers bot auto-merges.
+# Why not event-driven: the workflow_run head_sha does not reliably
+# match the PR's final head (the rename produces multiple commits), so
+# a head-based lookup can miss; the sweep is robust by construction.
+# NOTE: pull_request:closed never fires for auto-merges (the merge
+# event action is "merged", an invalid trigger type), and push events
+# from GITHUB_TOKEN create no runs — workflow_run is the only event
+# that fires after a bot auto-merge.
 name: tag-on-merge
 
 on:
   workflow_call:
-    inputs:
-      head-sha:
-        required: false
-        type: string
-      sweep:
-        required: false
-        type: boolean
-        default: false
 
 jobs:
   tag:
@@ -29,8 +22,10 @@ jobs:
       - uses: actions/github-script@v7
         with:
           script: |
-            async function tagIfUntagged(repo, pr) {
-              if (!pr.merged || !pr.merge_commit_sha) return false;
+            const repo = { ...context.repo };
+
+            async function tagIfUntagged(pr) {
+              if (!pr.merged || !pr.merge_commit_sha) return;
               const { data: commit } = await github.rest.git.getCommit({
                 ...repo, commit_sha: pr.merge_commit_sha,
               });
@@ -44,31 +39,14 @@ jobs:
                 : `v${y}.${doy}.${hh}${mm}`;
               try {
                 await github.rest.git.getRef({ ...repo, ref: `tags/${tag}` });
-                return false;
+                return;
               } catch {}
               await github.rest.git.createRef({
                 ...repo, ref: `refs/tags/${tag}`, sha: pr.merge_commit_sha,
               });
               core.info(`Tagged ${tag} at ${pr.merge_commit_sha} (PR #${pr.number})`);
-              return true;
             }
 
-            const repo = { ...context.repo };
-            const sweep = ${{ inputs.sweep }};
-
-            if (!sweep) {
-              const headSha = '${{ inputs.head-sha }}';
-              if (!headSha) { core.info('No head-sha — skipping'); return; }
-              const { data: prs } = await github.rest.pulls.list({
-                ...repo, state: 'closed', sort: 'updated', direction: 'desc', per_page: 5,
-              });
-              const pr = prs.find(p => p.head.sha === headSha);
-              if (!pr) { core.info(`No PR for head ${headSha} — skipping`); return; }
-              await tagIfUntagged(repo, pr);
-              return;
-            }
-
-            // Sweep: every closed PR updated in the last 24h.
             const since = new Date(Date.now() - 24 * 3600 * 1000);
             let page = 1, done = false;
             while (!done) {
@@ -79,7 +57,7 @@ jobs:
               if (!prs.length) break;
               for (const p of prs) {
                 if (new Date(p.updated_at) < since) { done = true; break; }
-                await tagIfUntagged(repo, p);
+                await tagIfUntagged(p);
               }
               if (done || prs.length < 100) break;
               page++;
