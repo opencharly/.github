@@ -57,7 +57,7 @@ jobs:
               if (!prs.length) break;
               for (const p of prs) {
                 if (new Date(p.updated_at) < since) { done = true; break; }
-                await tagIfNewer(p);
+                await tagIfUntagged(p);
               }
               if (done || prs.length < 100) break;
               page++;
