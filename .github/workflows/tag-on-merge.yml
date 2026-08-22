@@ -1,31 +1,31 @@
 # ORG-WIDE TAG-ON-MERGE (reusable via workflow_call)
 #
-# Sweep mode only: scans closed PRs updated in the last 24h and tags
-# every merged PR that lacks its CalVer tag.
+# For every merged PR without a CalVer tag:
+#   1. Creates a CalVer tag at the merge commit.
+#   2. Creates CHANGELOG/<calver>.md from the PR body ## CHANGELOG section.
 #
-# Why not event-driven: the workflow_run head_sha does not reliably
-# match the PR's final head (the rename produces multiple commits), so
-# a head-based lookup can miss; the sweep is robust by construction.
-# NOTE: pull_request:closed never fires for auto-merges (the merge
-# event action is "merged", an invalid trigger type), and push events
-# from GITHUB_TOKEN create no runs — workflow_run is the only event
-# that fires after a bot auto-merge.
+# Triggered by pull_request:closed (merged) or scheduled sweep.
 name: tag-on-merge
 
 on:
   workflow_call:
 
 jobs:
-  tag:
+  tag-and-changelog:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
     steps:
       - uses: actions/github-script@v7
         with:
           script: |
             const repo = { ...context.repo };
 
-            async function tagIfUntagged(pr) {
+            async function processMergedPr(pr) {
               if (!pr.merged_at || !pr.merge_commit_sha) return;
+
+              // Compute CalVer from merge commit time
               const { data: commit } = await github.rest.git.getCommit({
                 ...repo, commit_sha: pr.merge_commit_sha,
               });
@@ -37,16 +37,62 @@ jobs:
               const tag = repo.repo === 'sdk'
                 ? `v0.${y}${doy}.${parseInt(hh + mm)}`
                 : `v${y}.${doy}.${hh}${mm}`;
+              const calver = tag.replace(/^v/, '');
+
+              // Skip if already tagged
               try {
                 await github.rest.git.getRef({ ...repo, ref: `tags/${tag}` });
                 return;
               } catch {}
+
+              // Create tag
               await github.rest.git.createRef({
                 ...repo, ref: `refs/tags/${tag}`, sha: pr.merge_commit_sha,
               });
               core.info(`Tagged ${tag} at ${pr.merge_commit_sha} (PR #${pr.number})`);
+
+              // Extract CHANGELOG from PR body
+              const body = pr.body || '';
+              const changelogMatch = body.match(/## CHANGELOG\s*\n([\s\S]*?)(?=\n## |\n*$)/);
+              let changelogContent = '';
+              if (changelogMatch) {
+                changelogContent = changelogMatch[1].trim();
+              }
+
+              if (!changelogContent) {
+                core.info(`No ## CHANGELOG section in PR #${pr.number} — skipping CHANGELOG creation`);
+                return;
+              }
+
+              const changelogPath = `CHANGELOG/${calver}.md`;
+              const header = `# ${calver} — ${pr.title}\n\n`;
+              const fullContent = header + changelogContent;
+              const b64 = Buffer.from(fullContent).toString('base64');
+
+              try {
+                await github.rest.repos.createOrUpdateFileContents({
+                  ...repo,
+                  path: changelogPath,
+                  message: `docs: add CHANGELOG ${calver} for PR #${pr.number}`,
+                  content: b64,
+                  branch: 'main',
+                });
+                core.info(`Created ${changelogPath}`);
+              } catch (e) {
+                core.warning(`Failed to create CHANGELOG: ${e.message}`);
+              }
             }
 
+            // Single-PR mode: triggered by pull_request:closed
+            if (context.eventName === 'pull_request' && context.payload.pull_request) {
+              const pr = context.payload.pull_request;
+              if (pr.merged) {
+                await processMergedPr(pr);
+              }
+              return;
+            }
+
+            // Sweep mode: scan recently merged PRs
             const since = new Date(Date.now() - 24 * 3600 * 1000);
             let page = 1, done = false;
             while (!done) {
@@ -58,7 +104,7 @@ jobs:
               for (const p of prs) {
                 if (new Date(p.updated_at) < since) { done = true; break; }
                 try {
-                  await tagIfUntagged(p);
+                  await processMergedPr(p);
                 } catch (e) {
                   core.warning(`PR #${p.number}: ${e.message} — continuing`);
                 }
