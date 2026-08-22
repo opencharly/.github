@@ -55,7 +55,7 @@ jobs:
           ref: ${{ steps.pr.outputs.head_sha }}
           fetch-depth: 0
 
-      - uses: opencharly/pi-review-action@v1.0.9
+      - uses: opencharly/pi-review-action@v1.0.10
         id: review
         with:
           provider: ${{ inputs.ai_review_provider || vars.AI_REVIEW_PROVIDER }}
