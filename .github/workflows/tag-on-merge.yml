@@ -68,17 +68,15 @@ jobs:
                 : `v${y}.${doy}.${hh}${mm}`;
               const calver = tag.replace(/^v/, '');
 
-              // Skip if already tagged
+              // Tag: create if missing (idempotent — independent of CHANGELOG)
               try {
                 await github.rest.git.getRef({ ...repo, ref: `tags/${tag}` });
-                return;
-              } catch {}
-
-              // Create tag
-              await github.rest.git.createRef({
-                ...repo, ref: `refs/tags/${tag}`, sha: pr.merge_commit_sha,
-              });
-              core.info(`Tagged ${tag} at ${pr.merge_commit_sha} (PR #${pr.number})`);
+              } catch {
+                await github.rest.git.createRef({
+                  ...repo, ref: `refs/tags/${tag}`, sha: pr.merge_commit_sha,
+                });
+                core.info(`Tagged ${tag} at ${pr.merge_commit_sha} (PR #${pr.number})`);
+              }
 
               // CHANGELOG content = the PR body itself (title + body). The
               // PR body IS the changelog; no separate section required.
@@ -89,6 +87,21 @@ jobs:
               }
 
               const changelogPath = `CHANGELOG/${calver}.md`;
+
+              // CHANGELOG: create if missing (idempotent — independent of tag)
+              try {
+                await github.rest.repos.getContent({
+                  ...repo, path: changelogPath, ref: 'main',
+                });
+                core.info(`${changelogPath} already exists — skipping`);
+                return;
+              } catch (e) {
+                if (e.status !== 404) {
+                  core.warning(`CHANGELOG existence check failed: ${e.message}`);
+                  return;
+                }
+              }
+
               const header = `# ${calver} — ${pr.title}\n\n`;
               const fullContent = header + body;
               const b64 = Buffer.from(fullContent).toString('base64');
