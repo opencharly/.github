@@ -54,7 +54,7 @@ jobs:
             }
 
             const repo = { ...context.repo };
-            const sweep = ${{ inputs.sweep || 'false' }};
+            const sweep = ${{ inputs.sweep }};
 
             if (!sweep) {
               const headSha = '${{ inputs.head-sha }}';
