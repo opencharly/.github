@@ -57,7 +57,11 @@ jobs:
               if (!prs.length) break;
               for (const p of prs) {
                 if (new Date(p.updated_at) < since) { done = true; break; }
-                await tagIfUntagged(p);
+                try {
+                  await tagIfUntagged(p);
+                } catch (e) {
+                  core.warning(`PR #${p.number}: ${e.message} — continuing`);
+                }
               }
               if (done || prs.length < 100) break;
               page++;
