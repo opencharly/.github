@@ -107,21 +107,29 @@ jobs:
               const b64 = Buffer.from(fullContent).toString('base64');
 
               try {
-                const octokit = github;
-                // Override auth with the bot token so the write to
-                // branch-protected main is authorized (bypasses required
-                // status checks — the App/PAT has admin-level access).
-                const req = await octokit.request('PUT /repos/{owner}/{repo}/contents/{path}', {
-                  ...repo,
-                  path: changelogPath,
-                  message: `docs: add CHANGELOG ${calver} for PR #${pr.number}`,
-                  content: b64,
-                  branch: 'main',
+                // Raw fetch with the bot token: octokit's auth override is
+                // unreliable in github-script (the client is pre-authed with
+                // GITHUB_TOKEN), and the write must carry the App/PAT
+                // identity that IS the ruleset bypass actor for main.
+                const api = `https://api.github.com/repos/${repo.owner}/${repo.repo}/contents/${changelogPath}`;
+                const res = await fetch(api, {
+                  method: 'PUT',
                   headers: {
                     authorization: `Bearer ${process.env.BOT_TOKEN}`,
-                    'X-GitHub-Api-Version': '2022-11-28',
+                    'content-type': 'application/json',
+                    'accept': 'application/vnd.github+json',
+                    'x-github-api-version': '2022-11-28',
                   },
+                  body: JSON.stringify({
+                    message: `docs: add CHANGELOG ${calver} for PR #${pr.number}`,
+                    content: b64,
+                    branch: 'main',
+                  }),
                 });
+                if (!res.ok) {
+                  const body = await res.text();
+                  throw new Error(`${res.status} ${body.slice(0, 200)}`);
+                }
                 core.info(`Created ${changelogPath}`);
               } catch (e) {
                 core.warning(`Failed to create CHANGELOG: ${e.message}`);
