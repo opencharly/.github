@@ -1,22 +1,26 @@
 # ORG-WIDE TAG-ON-MERGE DISPATCHER — .github repo's own instance.
 #
-# workflow_run fires on every validator completion (unlike
-# pull_request:closed, which never fires for auto-merges). The reusable
-# finds the PR by the run's head sha and tags the merge commit.
+# Event-driven (workflow_run on the validator) + a scheduled sweep that
+# closes the race where the event fires before the merge commits.
 name: tag-on-merge
 
 on:
   workflow_run:
     workflows: ["charly/pr-validator"]
     types: [completed]
+  schedule:
+    - cron: "*/15 * * * *"
 
 permissions:
   contents: write
 
 jobs:
   tag:
-    if: github.event.workflow_run.conclusion == 'success'
+    if: >
+      github.event_name == 'schedule' ||
+      github.event.workflow_run.conclusion == 'success'
     uses: ./.github/workflows/tag-on-merge.yml
     with:
-      head-sha: ${{ github.event.workflow_run.head_sha }}
+      head-sha: ${{ github.event.workflow_run.head_sha || '' }}
+      sweep: ${{ github.event_name == 'schedule' }}
     secrets: inherit
