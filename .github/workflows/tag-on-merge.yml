@@ -25,7 +25,7 @@ jobs:
             const repo = { ...context.repo };
 
             async function tagIfUntagged(pr) {
-              if (!pr.merged || !pr.merge_commit_sha) return;
+              if (!pr.merged_at || !pr.merge_commit_sha) return;
               const { data: commit } = await github.rest.git.getCommit({
                 ...repo, commit_sha: pr.merge_commit_sha,
               });
