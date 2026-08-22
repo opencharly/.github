@@ -1,20 +1,26 @@
 # ORG-WIDE TAG-ON-MERGE DISPATCHER — .github repo's own instance.
 #
-# Every squash-merge pushes a commit to main; tag it with the
-# merge-time CalVer. (pull_request:closed never fires for auto-merges —
-# this GitHub emits action "merged", which is not a valid trigger.)
+# Event-driven (workflow_run on the validator) + a scheduled sweep that
+# closes the race where the event fires before the merge commits.
 name: tag-on-merge
 
 on:
-  push:
-    branches: [main]
+  workflow_run:
+    workflows: ["charly/pr-validator"]
+    types: [completed]
+  schedule:
+    - cron: "*/15 * * * *"
 
 permissions:
   contents: write
 
 jobs:
   tag:
+    if: >
+      github.event_name == 'schedule' ||
+      github.event.workflow_run.conclusion == 'success'
     uses: ./.github/workflows/tag-on-merge.yml
     with:
-      sha: ${{ github.sha }}
+      head-sha: ${{ github.event.workflow_run.head_sha || '' }}
+      sweep: ${{ github.event_name == 'schedule' }}
     secrets: inherit
