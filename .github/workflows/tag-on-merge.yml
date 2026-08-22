@@ -24,7 +24,7 @@ jobs:
       - name: Create bot token (GitHub App)
         id: bot-token-app
         continue-on-error: true
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547
         with:
           app-id: ${{ secrets.CHARLY_AUTO_MERGE_APP_ID }}
           private-key: ${{ secrets.CHARLY_AUTO_MERGE_PRIVATE_KEY }}
