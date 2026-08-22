@@ -1,7 +1,9 @@
 # ORG-WIDE TAG-ON-MERGE DISPATCHER — .github repo's own instance.
 #
-# Event-driven (workflow_run on the validator) + a scheduled sweep that
-# closes the race where the event fires before the merge commits.
+# Runs the sweep after every validator completion; the schedule is a
+# redundant fallback. workflow_run is the only event that fires after
+# a bot auto-merge (pull_request:closed never fires; GITHUB_TOKEN
+# pushes create no runs).
 name: tag-on-merge
 
 on:
@@ -20,7 +22,4 @@ jobs:
       github.event_name == 'schedule' ||
       github.event.workflow_run.conclusion == 'success'
     uses: ./.github/workflows/tag-on-merge.yml
-    with:
-      head-sha: ${{ github.event.workflow_run.head_sha || '' }}
-      sweep: ${{ github.event_name == 'schedule' }}
     secrets: inherit
