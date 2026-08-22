@@ -2,7 +2,7 @@
 #
 # For every merged PR without a CalVer tag:
 #   1. Creates a CalVer tag at the merge commit.
-#   2. Creates CHANGELOG/<calver>.md from the PR body ## CHANGELOG section.
+#   2. Creates CHANGELOG/<calver>.md from the PR body (the body IS the changelog).
 #
 # Triggered by pull_request:closed (merged) or scheduled sweep.
 name: tag-on-merge
@@ -51,22 +51,17 @@ jobs:
               });
               core.info(`Tagged ${tag} at ${pr.merge_commit_sha} (PR #${pr.number})`);
 
-              // Extract CHANGELOG from PR body
-              const body = pr.body || '';
-              const changelogMatch = body.match(/## CHANGELOG\s*\n([\s\S]*?)(?=\n## |\n*$)/);
-              let changelogContent = '';
-              if (changelogMatch) {
-                changelogContent = changelogMatch[1].trim();
-              }
-
-              if (!changelogContent) {
-                core.info(`No ## CHANGELOG section in PR #${pr.number} — skipping CHANGELOG creation`);
+              // CHANGELOG content = the PR body itself (title + body). The
+              // PR body IS the changelog; no separate section required.
+              const body = (pr.body || '').trim();
+              if (!body) {
+                core.info(`PR #${pr.number} has no body — skipping CHANGELOG creation`);
                 return;
               }
 
               const changelogPath = `CHANGELOG/${calver}.md`;
               const header = `# ${calver} — ${pr.title}\n\n`;
-              const fullContent = header + changelogContent;
+              const fullContent = header + body;
               const b64 = Buffer.from(fullContent).toString('base64');
 
               try {
