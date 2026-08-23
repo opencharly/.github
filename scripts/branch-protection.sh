@@ -51,7 +51,7 @@ ruleset_state() {
     --jq ".[] | select(.name == \"$RULESET_NAME\" and .target == \"branch\" and .enforcement == \"active\") | .id" 2>/dev/null || true)"
   [[ -n "$id" ]] || return 1
   gh api "repos/$ORG/$repo/rulesets/$id" \
-    --jq "{id, strict: [.rules[] | select(.type == \"required_status_checks\") | .parameters.strict_required_status_checks_policy][0], checks: [.rules[] | select(.type == \"required_status_checks\") | .parameters.required_status_checks[].context], bypass: [.bypass_actors[] | select(.actor_type == \"Integration\") | .actor_id]}" 2>/dev/null
+    --jq "{id, rules: [.rules[].type], strict: [.rules[] | select(.type == \"required_status_checks\") | .parameters.strict_required_status_checks_policy][0], checks: [.rules[] | select(.type == \"required_status_checks\") | .parameters.required_status_checks[].context], bypass: [.bypass_actors[] | select(.actor_type == \"Integration\") | .actor_id]}" 2>/dev/null
 }
 
 legacy_state() {
@@ -106,6 +106,9 @@ for repo in "${repos[@]}"; do
   echo "$state" | jq -e --arg ctx "$CONTEXT" '(.checks | index($ctx)) != null' >/dev/null || ok=0
   echo "$state" | jq -e '.checks | length == 1' >/dev/null || { echo "$repo: ruleset must require EXACTLY ONE check" >&2; ok=0; }
   echo "$state" | jq -e '.strict == true' >/dev/null || { echo "$repo: ruleset must be strict (head up-to-date before merge)" >&2; ok=0; }
+  echo "$state" | jq -e '.rules | index("non_fast_forward") != null' >/dev/null || { echo "$repo: ruleset must block force pushes (legacy allow_force_pushes=false)" >&2; ok=0; }
+  echo "$state" | jq -e '.rules | index("deletion") != null' >/dev/null || { echo "$repo: ruleset must block deletions (legacy allow_deletions=false)" >&2; ok=0; }
+  echo "$state" | jq -e '.rules | index("pull_request") == null' >/dev/null || { echo "$repo: ruleset must NOT require pull-request reviews (the legacy protection required none; the validator is the gate)" >&2; ok=0; }
   echo "$state" | jq -e --argjson app "$APP_ID" '(.bypass | index($app)) != null' >/dev/null || ok=0
   if [[ "$ok" == 1 ]]; then
     echo "$repo: verified main ruleset (strict, one check, app bypass)"
