@@ -51,7 +51,7 @@ ruleset_state() {
     --jq ".[] | select(.name == \"$RULESET_NAME\" and .target == \"branch\" and .enforcement == \"active\") | .id" 2>/dev/null || true)"
   [[ -n "$id" ]] || return 1
   gh api "repos/$ORG/$repo/rulesets/$id" \
-    --jq "{id, rules: [.rules[].type], checks: [.rules[] | select(.type == \"required_status_checks\") | .parameters.required_status_checks[].context], bypass: [.bypass_actors[] | select(.actor_type == \"Integration\") | .actor_id]}" 2>/dev/null
+    --jq "{id, strict: [.rules[] | select(.type == \"required_status_checks\") | .parameters.strict_required_status_checks_policy][0], checks: [.rules[] | select(.type == \"required_status_checks\") | .parameters.required_status_checks[].context], bypass: [.bypass_actors[] | select(.actor_type == \"Integration\") | .actor_id]}" 2>/dev/null
 }
 
 legacy_state() {
@@ -68,7 +68,7 @@ ruleset_payload() {
   "conditions": {"ref_name": {"include": ["refs/heads/main"], "exclude": []}},
   "bypass_actors": [{"actor_id": $APP_ID, "actor_type": "Integration", "bypass_mode": "always"}],
   "rules": [
-    {"type": "required_status_checks", "parameters": {"strict_required_status_checks_policy": false, "required_status_checks": [{"context": "$CONTEXT"}]}},
+    {"type": "required_status_checks", "parameters": {"strict_required_status_checks_policy": true, "required_status_checks": [{"context": "$CONTEXT"}]}},
     {"type": "non_fast_forward", "parameters": {}},
     {"type": "deletion", "parameters": {}},
     {"type": "creation", "parameters": {}}
@@ -81,7 +81,8 @@ if [[ "$mode" == apply ]]; then
   for repo in "${repos[@]}"; do
     existing="$(gh api "repos/$ORG/$repo/rulesets" --jq ".[] | select(.name == \"$RULESET_NAME\") | .id" 2>/dev/null || true)"
     if [[ -n "$existing" ]]; then
-      echo "$repo: ruleset already present ($existing)"
+      gh api --method PUT "repos/$ORG/$repo/rulesets/$existing" --input <(ruleset_payload) --jq .id >/dev/null
+      echo "$repo: updated ruleset $existing (canonical payload)"
     else
       id="$(gh api --method POST "repos/$ORG/$repo/rulesets" --input <(ruleset_payload) --jq .id)"
       echo "$repo: created ruleset $id"
@@ -103,9 +104,11 @@ for repo in "${repos[@]}"; do
   [[ -n "$state" ]] || { echo "$repo: no active main ruleset" >&2; fail=1; continue; }
   ok=1
   echo "$state" | jq -e --arg ctx "$CONTEXT" '(.checks | index($ctx)) != null' >/dev/null || ok=0
+  echo "$state" | jq -e '.checks | length == 1' >/dev/null || { echo "$repo: ruleset must require EXACTLY ONE check" >&2; ok=0; }
+  echo "$state" | jq -e '.strict == true' >/dev/null || { echo "$repo: ruleset must be strict (head up-to-date before merge)" >&2; ok=0; }
   echo "$state" | jq -e --argjson app "$APP_ID" '(.bypass | index($app)) != null' >/dev/null || ok=0
   if [[ "$ok" == 1 ]]; then
-    echo "$repo: verified main ruleset (required check + app bypass)"
+    echo "$repo: verified main ruleset (strict, one check, app bypass)"
   else
     echo "$repo: ruleset missing the required check and/or the app bypass" >&2
     fail=1
