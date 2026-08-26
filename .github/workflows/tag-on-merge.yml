@@ -78,6 +78,25 @@ jobs:
                 core.info(`Tagged ${tag} at ${pr.merge_commit_sha} (PR #${pr.number})`);
               }
 
+              // Subdir MODULE tag for compiled-plugin repos (github.com/opencharly/<repo>/
+              // candy/<repo>, the standalone module convention): the go.mod pin must be a
+              // clean CalVer tag, and the module path is subdir-prefixed (candy/<repo>/), so
+              // a ROOT-only tag leaves the pin as a proxy PSEUDO-VERSION that no git ref
+              // resolves — which breaks pluginsgen's fetch (TestPluginsGenReproducible).
+              // The module tag mirrors the root CalVer in SDK form: v0.<y><doy>.<hhmm>
+              // with the leading zero stripped from hhmm (semver patch must not start 0).
+              if (repo.repo.startsWith('plugin-')) {
+                const moduleTag = `candy/${repo.repo}/v0.${y}${doy}.${parseInt(hh + mm)}`;
+                try {
+                  await github.rest.git.getRef({ ...repo, ref: `tags/${moduleTag}` });
+                } catch {
+                  await github.rest.git.createRef({
+                    ...repo, ref: `refs/tags/${moduleTag}`, sha: pr.merge_commit_sha,
+                  });
+                  core.info(`Tagged module ${moduleTag} at ${pr.merge_commit_sha} (PR #${pr.number})`);
+                }
+              }
+
               // CHANGELOG content = the PR body itself (title + body). The
               // PR body IS the changelog; no separate section required.
               const body = (pr.body || '').trim();
