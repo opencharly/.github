@@ -63,7 +63,19 @@ jobs:
               const doy = String(Math.floor((d - new Date(y, 0, 0)) / 86400000)).padStart(3, '0');
               const hh = String(d.getUTCHours()).padStart(2, '0');
               const mm = String(d.getUTCMinutes()).padStart(2, '0');
-              const tag = repo.repo === 'sdk'
+              // The ROOT Go-module repos are tagged in Go's form; everything else gets
+              // the plain repo CalVer. `sdk` and `spec` are both root modules resolved
+              // from the proxy at `v0.<YYYYDDD>.<HHMM>` pins (charly/go.mod requires
+              // github.com/opencharly/sdk and github.com/opencharly/spec at exactly
+              // that shape), so a repo CalVer tag is unusable as a module version.
+              //
+              // spec was missing from this list, so its Go-module releases stopped at
+              // v0.2026232.520 while its repo tags kept advancing: every spec change
+              // after that day was merged but UNCONSUMABLE, because no consumer could
+              // name a version containing it. Candy repos are unaffected — they are
+              // tagged separately below in `candy/<repo>/v0.…` form.
+              const goModuleRepos = ['sdk', 'spec'];
+              const tag = goModuleRepos.includes(repo.repo)
                 ? `v0.${y}${doy}.${parseInt(hh + mm)}`
                 : `v${y}.${doy}.${hh}${mm}`;
               const calver = tag.replace(/^v/, '');
