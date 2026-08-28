@@ -1,13 +1,20 @@
 # ORG-WIDE PR-VALIDATOR DISPATCHER — install at .github/workflows/pr-validator.yml
 #
-# Triggers on pull_request events, calls the reusable validator in
-# opencharly/.github which reviews the PR, renames the CHANGELOG, and
-# enables native auto-merge on PASS.
+# Copy VERBATIM into every repo. The job MUST stay named `validate`: the branch
+# ruleset requires the status check `validate / validate` (scripts/branch-protection.sh
+# $CONTEXT), and a check run from a reusable-workflow call is named
+# `<caller job name> / <called job name>`. Renaming this job renames the check, the
+# required check then never appears, and the repo can never merge.
 name: charly/pr-validator
 
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pr-number:
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -15,12 +22,14 @@ permissions:
   actions: write
 
 jobs:
-  pr-validator:
-    name: charly/pr-validator
-    if: github.event.pull_request.head.repo.fork == false
+  validate:
+    name: validate
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.pull_request.head.repo.fork == false
     uses: opencharly/.github/.github/workflows/pr-validator.yml@main
     with:
-      pr-number: ${{ github.event.pull_request.number }}
+      pr-number: ${{ inputs.pr-number || github.event.pull_request.number }}
       ai_review_provider: ${{ vars.AI_REVIEW_PROVIDER }}
       ai_review_model: ${{ vars.AI_REVIEW_MODEL }}
       ai_review_base_url: ${{ vars.AI_REVIEW_BASE_URL }}
