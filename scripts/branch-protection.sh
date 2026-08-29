@@ -93,6 +93,16 @@ if [[ "$mode" == apply ]]; then
       gh api --method DELETE "repos/$ORG/$repo/branches/main/protection" >/dev/null
       echo "$repo: removed legacy branch protection"
     fi
+    # repo-level auto-merge must be ON: the org-wide pr-validator enables native
+    # auto-merge (GraphQL enablePullRequestAutoMerge) on a PASS verdict, which
+    # fails with "Auto merge is not allowed for this repository" when the setting
+    # is off — the validator then posts PASS yet the check run goes red and the
+    # PR stays BLOCKED. New repos default to off, so enforce it here.
+    auto="$(gh api "repos/$ORG/$repo" --jq '.allow_auto_merge' 2>/dev/null || true)"
+    if [[ "$auto" != "true" ]]; then
+      gh api --method PATCH "repos/$ORG/$repo" -f allow_auto_merge=true --jq .allow_auto_merge >/dev/null
+      echo "$repo: enabled repo-level allow_auto_merge"
+    fi
   done
 fi
 
@@ -100,6 +110,11 @@ fail=0
 for repo in "${repos[@]}"; do
   legacy="$(legacy_state "$repo")"
   [[ "$legacy" == "absent" ]] || { echo "$repo: legacy branch protection still present" >&2; fail=1; }
+  auto="$(gh api "repos/$ORG/$repo" --jq '.allow_auto_merge' 2>/dev/null || true)"
+  if [[ "$auto" != "true" ]]; then
+    echo "$repo: allow_auto_merge must be true (the validator enables native auto-merge on PASS; off means a PASS verdict still leaves the check red)" >&2
+    fail=1
+  fi
   state="$(ruleset_state "$repo" || true)"
   [[ -n "$state" ]] || { echo "$repo: no active main ruleset" >&2; fail=1; continue; }
   ok=1
