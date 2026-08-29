@@ -1,6 +1,13 @@
 # ORG-WIDE TAG-ON-MERGE DISPATCHER — install at .github/workflows/tag-on-merge.yml
 #
-# Copy VERBATIM into every repo.
+# Copy VERBATIM into every repo. The `permissions:` block MUST list
+# `pull-requests: read` alongside `contents: write`: the reusable workflow this
+# calls declares both at job level, a caller that sets an explicit permissions
+# block makes every scope it does NOT list `none`, and a reusable workflow may
+# not request more than its caller's ceiling. Dropping it does not degrade — the
+# call is rejected before any job starts, which surfaces as `startup_failure`
+# with no job to inspect and NO tag for the merge. Eight repos shipped a
+# dispatcher missing that one line and silently stopped tagging entirely.
 name: tag-on-merge
 
 # Event-driven — no cron (RCA of all previous trigger designs, measured in
