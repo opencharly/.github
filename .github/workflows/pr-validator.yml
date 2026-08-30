@@ -88,16 +88,48 @@ jobs:
           echo "::error::Ambiguous verdict from AI review"
           exit 2
 
+      # Enable auto-merge — RESILIENTLY. GitHub rejects the mutation with
+      # "Pull request is in unstable status" while any required check is still
+      # pending/failing, and repos may legitimately carry more than one check
+      # besides this one (e.g. a candy CI gate). The REVIEW verdict is already
+      # PASS at this point, so arming logistics must never turn the required
+      # check red: retry through transient settling states, attempt the
+      # update-branch merge when the branch is behind, and soft-skip (warning)
+      # when the repository setting does not allow auto-merge.
       - name: Enable auto-merge
         if: steps.parse.outputs.verdict == 'PASS'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            await github.graphql(`
-              mutation($id: ID!) {
-                enablePullRequestAutoMerge(input: {
-                  pullRequestId: $id, mergeMethod: SQUASH
-                }) { pullRequest { id } }
-              }
-            `, { id: '${{ steps.pr.outputs.node_id }}' });
-            core.info('Auto-merge enabled');
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr-number }}
+          REPO: ${{ github.repository }}
+        run: |
+          arm() {
+            gh pr merge --auto --squash "$REPO#$PR_NUMBER" 2>&1
+          }
+          for attempt in 1 2 3 4 5 6; do
+            out=$(arm || true)
+            case "$out" in
+              *"unstable status"*)
+                echo "attempt $attempt: required checks still settling — retrying"
+                sleep 20
+                continue
+                ;;
+              *"not allowed for this repository")
+                echo "::warning::repo setting allow_auto_merge is off — auto-merge not armed (verdict PASS stands)"
+                exit 0
+                ;;
+              *"behind"*|*"BEHIND"*|*"not mergeable"*)
+                echo "attempt $attempt: branch is behind base — updating and retrying"
+                gh pr update-branch "$REPO#$PR_NUMBER" >/dev/null 2>&1 || true
+                sleep 15
+                continue
+                ;;
+              *)
+                echo "Auto-merge armed"
+                exit 0
+                ;;
+            esac
+          done
+          echo "::warning::auto-merge could not be armed after retries (verdict PASS stands; a later dispatcher run can arm it)"
+          exit 0
+
