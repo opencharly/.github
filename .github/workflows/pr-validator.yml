@@ -103,11 +103,14 @@ jobs:
           PR_NUMBER: ${{ inputs.pr-number }}
           REPO: ${{ github.repository }}
         run: |
-          arm() {
-            gh pr merge --auto --squash "$REPO#$PR_NUMBER" 2>&1
-          }
           for attempt in 1 2 3 4 5 6; do
-            out=$(arm || true)
+            out=$(gh pr merge --auto --squash "$REPO#$PR_NUMBER" 2>&1)
+            rc=$?
+            echo "attempt $attempt rc=$rc: $out"
+            if [ $rc -eq 0 ]; then
+              echo "Auto-merge armed"
+              exit 0
+            fi
             case "$out" in
               *"unstable status"*)
                 echo "attempt $attempt: required checks still settling — retrying"
@@ -125,11 +128,10 @@ jobs:
                 continue
                 ;;
               *)
-                echo "Auto-merge armed"
-                exit 0
+                echo "::warning::unrecognized arming failure (attempt $attempt, rc=$rc) — retrying; verdict PASS stands regardless"
+                sleep 15
                 ;;
             esac
           done
           echo "::warning::auto-merge could not be armed after retries (verdict PASS stands; a later dispatcher run can arm it)"
           exit 0
-
