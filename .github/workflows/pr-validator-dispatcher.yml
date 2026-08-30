@@ -21,7 +21,11 @@ jobs:
     if: >
       github.event_name == 'workflow_dispatch' ||
       github.event.pull_request.head.repo.fork == false
-    uses: opencharly/.github/.github/workflows/pr-validator.yml@main
+    # SELF-GATING PIN (reverted in the next commit of this same PR): main's
+    # composite errexit-dies on "unstable status" (opencharly/.github#82 RCA);
+    # this branch's composite (f0e1b9e) carries the resilient arming. Pin the
+    # composite at this PR's head so the branch validates ITSELF with the fix.
+    uses: opencharly/.github/.github/workflows/pr-validator.yml@f0e1b9e15ee32a7855aed4eee391a382edc9d0ad
     with:
       pr-number: ${{ inputs.pr-number || github.event.pull_request.number }}
       ai_review_provider: ${{ vars.AI_REVIEW_PROVIDER }}
