@@ -26,3 +26,9 @@ jobs:
     # its own gate on main. The pin intentionally persists in the landed tree;
     # the body documents the follow-up PR that re-pins @main.
     uses: opencharly/.github/.github/workflows/pr-validator.yml@f0e1b9e15ee32a7855aed4eee391a382edc9d0ad
+    with:
+      pr-number: ${{ inputs.pr-number || github.event.pull_request.number }}
+      ai_review_provider: ${{ vars.AI_REVIEW_PROVIDER }}
+      ai_review_model: ${{ vars.AI_REVIEW_MODEL }}
+      ai_review_base_url: ${{ vars.AI_REVIEW_BASE_URL }}
+    secrets: inherit
