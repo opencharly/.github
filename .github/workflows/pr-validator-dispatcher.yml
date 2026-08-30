@@ -21,7 +21,11 @@ jobs:
     if: >
       github.event_name == 'workflow_dispatch' ||
       github.event.pull_request.head.repo.fork == false
-    uses: opencharly/.github/.github/workflows/pr-validator.yml@main
+    # SELF-GATING PIN (this PR only): main's composite errexit-dies on
+    # "unstable status" (opencharly/.github#82 RCA) and this PR cannot pass
+    # its own gate on main. The pin intentionally persists in the landed tree;
+    # the body documents the follow-up PR that re-pins @main.
+    uses: opencharly/.github/.github/workflows/pr-validator.yml@f0e1b9e15ee32a7855aed4eee391a382edc9d0ad
     with:
       pr-number: ${{ inputs.pr-number || github.event.pull_request.number }}
       ai_review_provider: ${{ vars.AI_REVIEW_PROVIDER }}

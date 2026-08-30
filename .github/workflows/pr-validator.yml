@@ -104,8 +104,11 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           for attempt in 1 2 3 4 5 6; do
-            out=$(gh pr merge --auto --squash "$REPO#$PR_NUMBER" 2>&1)
-            rc=$?
+            # The job shell runs with -e: a bare failing $( ) assignment would
+            # kill the script before the retry loop runs. Capture in a
+            # condition context (errexit-immune) instead.
+            rc=0
+            out=$(gh pr merge --auto --squash "$REPO#$PR_NUMBER" 2>&1) || rc=$?
             echo "attempt $attempt rc=$rc: $out"
             if [ $rc -eq 0 ]; then
               echo "Auto-merge armed"
