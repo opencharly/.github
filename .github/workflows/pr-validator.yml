@@ -108,7 +108,7 @@ jobs:
             # kill the script before the retry loop runs. Capture in a
             # condition context (errexit-immune) instead.
             rc=0
-            out=$(gh pr merge --auto --squash "$REPO#$PR_NUMBER" 2>&1) || rc=$?
+            out=$(gh pr merge --auto --squash "$PR_NUMBER" --repo "$REPO" 2>&1) || rc=$?
             echo "attempt $attempt rc=$rc: $out"
             if [ $rc -eq 0 ]; then
               echo "Auto-merge armed"
@@ -126,7 +126,7 @@ jobs:
                 ;;
               *"behind"*|*"BEHIND"*|*"not mergeable"*)
                 echo "attempt $attempt: branch is behind base — updating and retrying"
-                gh pr update-branch "$REPO#$PR_NUMBER" >/dev/null 2>&1 || true
+                gh pr update-branch "$PR_NUMBER" --repo "$REPO" >/dev/null 2>&1 || true
                 sleep 15
                 continue
                 ;;
