@@ -103,7 +103,7 @@ jobs:
           GITHUB_TOKEN:        ${{ github.token }}
         run: |
           cd "$GITHUB_WORKSPACE/runner-config"
-          charly review --plan review-plan --out /tmp/review.txt
+          charly review --plan "$REVIEW_PLAN_PATH" --out /tmp/review.txt
           # Explicit $GITHUB_OUTPUT contract (the parse step consumes
           # steps.review.outputs.response/verdict): write them from the saved
           # file so the step is self-contained and verifiable.
