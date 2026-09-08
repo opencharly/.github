@@ -78,7 +78,11 @@ jobs:
           # (vars.CHARLY_VERSION overrides). No runtime latest-resolution: the
           # releases/latest redirect is abuse-limited on shared runner IPs (curl exit 22).
           TAG="${CHARLY_VERSION:-v2026.251.1947}"
-          D="$HOME/.local/charly"; mkdir -p "$D/bin" "$D/plugins"
+          # PER-RUN dir (runner.temp, wiped between jobs): on self-hosted runners
+          # $HOME persists across jobs and a stale plugin binary there crashes
+          # the gate (live evidence: plugin-review parseReviewArgs panic, exit 2,
+          # while the same tag+tar runs green in a clean dir).
+          D="${{ runner.temp }}/charly-$TAG"; mkdir -p "$D/bin" "$D/plugins"
           # release assets are public — tokenless curl (gh/GITHUB_TOKEN injection
           # is unreliable in workflow_call step envs: live smoke exit-4 evidence).
           curl -fsSL -o "$D/charly-linux-amd64" "https://github.com/opencharly/charly/releases/download/$TAG/charly-linux-amd64"
