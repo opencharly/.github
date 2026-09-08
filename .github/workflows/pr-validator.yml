@@ -29,9 +29,18 @@ on:
         required: true
         type: string
 
+# ONE run per PR at a time: a re-dispatch or a new push on the same PR cancels
+# the in-flight run, so the head never carries duplicate same-name check runs
+# (a duplicate FAILED run made GitHub keep `mergeable_state: blocked` despite a
+# PASS — measured on eval-omarchy #38).
+concurrency:
+  group: pr-validator-${{ github.repository }}-${{ inputs.pr-number || github.event.pull_request.number }}
+  cancel-in-progress: true
+
 permissions:
   contents: write
   pull-requests: write
+  actions: write
 
 jobs:
   validate:
@@ -49,6 +58,18 @@ jobs:
             core.setOutput('head_ref', pr.head.ref);
             core.setOutput('base_ref', pr.base.ref);
             core.setOutput('node_id', pr.node_id);
+
+      # dispatch self-heal: a workflow_dispatch without `--ref` registers its
+      # check on the DEFAULT branch, never the PR head — auto-merge then can never
+      # fire. Re-dispatch on the PR's head ref so the check lands on the head;
+      # the re-dispatched run (ref == head ref) performs the actual validation.
+      - name: Attach dispatch run to the PR head
+        if: github.event_name == 'workflow_dispatch' && github.ref != format('refs/heads/{0}', steps.pr.outputs.head_ref)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run pr-validator.yml --ref "${{ steps.pr.outputs.head_ref }}" -f pr-number="${{ inputs.pr-number }}" --repo "${{ github.repository }}"
+          exit 0
 
       - uses: actions/checkout@v7
         with:
