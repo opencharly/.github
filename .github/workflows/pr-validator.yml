@@ -84,7 +84,7 @@ jobs:
           tar -xzf "$D/charly-plugins-linux-amd64.tar.gz" -C "$D/plugins"
           echo "$D/bin" >> "$GITHUB_PATH"
           echo "CHARLY_PLUGIN_DIR=$D/plugins" >> "$GITHUB_ENV"
-          "$D/bin/charly" review --self-test
+          CHARLY_PLUGIN_DIR="$D/plugins" "$D/bin/charly" review --self-test
 
       - name: Run review plan (steps + runtime plugins declared in action-review review-plan.yml)
         id: review
