@@ -29,14 +29,9 @@ on:
         required: true
         type: string
 
-# ONE run per PR at a time: a re-dispatch or a new push on the same PR cancels
-# the in-flight run, so the head never carries duplicate same-name check runs
-# (a duplicate FAILED run made GitHub keep `mergeable_state: blocked` despite a
-# PASS — measured on eval-omarchy #38).
-concurrency:
-  group: pr-validator-${{ github.repository }}-${{ inputs.pr-number || github.event.pull_request.number }}
-  cancel-in-progress: true
-
+# NO concurrency here: cancel-in-progress requires the caller to hold actions:
+# write, and legacy callers (old dispatchers) lack it — see #163 infra regression.
+# The dedupe lives in the per-repo DISPATCHERS, which declare actions: write.
 permissions:
   contents: write
   pull-requests: write

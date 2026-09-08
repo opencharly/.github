@@ -18,6 +18,9 @@ on:
 
 # ONE run per PR (concurrency dedupe — a re-dispatch/push cancels the in-flight run;
 # duplicated same-name check runs kept mergeability blocked despite PASS — #38 lesson).
+# NOTE: the dispatcher MUST carry actions: write — cancel-in-progress requires it; the
+# reusable workflow itself does NOT carry concurrency (legacy callers without actions:
+# write would fail to expand it — #163 infra regression, reverted).
 concurrency:
   group: pr-validator-${{ github.repository }}-${{ inputs.pr-number || github.event.pull_request.number }}
   cancel-in-progress: true
