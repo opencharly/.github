@@ -100,6 +100,14 @@ jobs:
         run: |
           cd "$GITHUB_WORKSPACE/runner-config"
           charly review --plan review-plan --out /tmp/review.txt
+          # Explicit $GITHUB_OUTPUT contract (the parse step consumes
+          # steps.review.outputs.response/verdict): write them from the saved
+          # file so the step is self-contained and verifiable.
+          response=$(cat /tmp/review.txt)
+          { echo "response<<REV"; printf '%s\n' "$response"; echo "REV"; } >> "$GITHUB_OUTPUT"
+          verdict=$(grep -E '^Verdict: (BLOCK|PASS)[[:space:]]*$' /tmp/review.txt | sed -E 's/^Verdict: (BLOCK|PASS).*/\1/' | sort -u)
+          echo "success=true" >> "$GITHUB_OUTPUT"
+          [ -n "$verdict" ] && echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
 
       - name: Parse verdict
         id: parse
@@ -155,7 +163,7 @@ jobs:
                 echo "attempt $att"
                 sleep 10
                 ;;
-              *"is behind"*|"*head branch is behind"*)
+              *"is behind"*|*"head branch is behind"*)
                 echo "branch behind — syncing"
                 gh pr update-branch "$PR_NUMBER" --repo "$REPO" 2>/dev/null || true
                 sleep 15
