@@ -70,16 +70,16 @@ jobs:
         id: ensure-charly
         env:
           CHARLY_VERSION: ${{ vars.CHARLY_VERSION || '' }}
-          GH_TOKEN: ${{ github.token }}
         run: |
           if command -v charly >/dev/null 2>&1; then
             echo "charly present: $(charly version)"; exit 0
           fi
-          TAG="${CHARLY_VERSION:-$(gh release view --repo opencharly/charly --json tagName --jq .tagName)}"
+          TAG="${CHARLY_VERSION:-$(curl -fsSL https://api.github.com/repos/opencharly/charly/releases/latest | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p')}"
           D="$HOME/.local/charly"; mkdir -p "$D/bin" "$D/plugins"
-          gh release download "$TAG" --repo opencharly/charly \
-            --pattern 'charly-linux-amd64' --pattern 'charly-plugins-linux-amd64.tar.gz' \
-            --dir "$D" --clobber
+          # release assets are public — tokenless curl (gh/GITHUB_TOKEN injection
+          # is unreliable in workflow_call step envs: live smoke exit-4 evidence).
+          curl -fsSL -o "$D/charly-linux-amd64" "https://github.com/opencharly/charly/releases/download/$TAG/charly-linux-amd64"
+          curl -fsSL -o "$D/charly-plugins-linux-amd64.tar.gz" "https://github.com/opencharly/charly/releases/download/$TAG/charly-plugins-linux-amd64.tar.gz"
           mv "$D/charly-linux-amd64" "$D/bin/charly" && chmod +x "$D/bin/charly"
           tar -xzf "$D/charly-plugins-linux-amd64.tar.gz" -C "$D/plugins"
           echo "$D/bin" >> "$GITHUB_PATH"
