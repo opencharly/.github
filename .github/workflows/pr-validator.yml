@@ -163,7 +163,7 @@ jobs:
                 echo "attempt $att"
                 sleep 10
                 ;;
-              *"is behind"*|*"head branch is behind"*)
+              *"is behind"*)
                 echo "branch behind — syncing"
                 gh pr update-branch "$PR_NUMBER" --repo "$REPO" 2>/dev/null || true
                 sleep 15
