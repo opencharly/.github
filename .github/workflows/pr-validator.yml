@@ -74,7 +74,7 @@ jobs:
           if command -v charly >/dev/null 2>&1; then
             echo "charly present: $(charly version)"; exit 0
           fi
-          TAG="${CHARLY_VERSION:-$(curl -fsSL https://api.github.com/repos/opencharly/charly/releases/latest | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p')}"
+          TAG="${CHARLY_VERSION:-$(curl -fsSIL https://github.com/opencharly/charly/releases/latest | sed -n 's/^[Ll]ocation: .*\/tag\//p' | tr -d '\r' | tail -1)}"
           D="$HOME/.local/charly"; mkdir -p "$D/bin" "$D/plugins"
           # release assets are public — tokenless curl (gh/GITHUB_TOKEN injection
           # is unreliable in workflow_call step envs: live smoke exit-4 evidence).
