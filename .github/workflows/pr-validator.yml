@@ -70,6 +70,7 @@ jobs:
         id: ensure-charly
         env:
           CHARLY_VERSION: ${{ vars.CHARLY_VERSION || '' }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           if command -v charly >/dev/null 2>&1; then
             echo "charly present: $(charly version)"; exit 0
