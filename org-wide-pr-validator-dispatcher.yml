@@ -16,6 +16,12 @@ on:
         required: true
         type: string
 
+# ONE run per PR (concurrency dedupe — a re-dispatch/push cancels the in-flight run;
+# duplicated same-name check runs kept mergeability blocked despite PASS — #38 lesson).
+concurrency:
+  group: pr-validator-${{ github.repository }}-${{ inputs.pr-number || github.event.pull_request.number }}
+  cancel-in-progress: true
+
 permissions:
   contents: write
   pull-requests: write
