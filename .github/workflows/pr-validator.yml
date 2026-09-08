@@ -104,20 +104,19 @@ jobs:
         run: |
           cd "$GITHUB_WORKSPACE/runner-config"
           charly review --plan "$REVIEW_PLAN_PATH" --out /tmp/review.txt
-          # Explicit $GITHUB_OUTPUT contract (the parse step consumes
-          # steps.review.outputs.response/verdict): write them from the saved
-          # file so the step is self-contained and verifiable.
-          response=$(cat /tmp/review.txt)
-          { echo "response<<REV"; printf '%s\n' "$response"; echo "REV"; } >> "$GITHUB_OUTPUT"
+          # The review TEXT is markdown and its step sections are ###-led lines
+          # (e.g. "### [step: review]"): GitHub's $GITHUB_OUTPUT heredoc parser
+          # rejects such lines with 'Invalid format' (live distro-omarchy#49
+          # evidence) — so the text is NEVER routed through GITHUB_OUTPUT.
+          # Same-job consumers (Parse verdict / comment) read /tmp/review.txt.
           verdict=$(grep -E '^Verdict: (BLOCK|PASS)[[:space:]]*$' /tmp/review.txt | sed -E 's/^Verdict: (BLOCK|PASS).*/\1/' | sort -u)
           echo "success=true" >> "$GITHUB_OUTPUT"
           [ -n "$verdict" ] && echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
 
       - name: Parse verdict
         id: parse
-        env:
-          REVIEW: ${{ steps.review.outputs.response }}
         run: |
+          REVIEW=$(cat /tmp/review.txt)
           found=$(printf '%s\n' "$REVIEW" | grep -E '^Verdict: (BLOCK|PASS)[[:space:]]*$')
           n=$(printf '%s\n' "$found" | grep -cE '^Verdict:')
           [ "$n" -eq 0 ] && { echo "::error::No verdict in response"; exit 2; }
