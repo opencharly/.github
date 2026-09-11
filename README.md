@@ -20,7 +20,9 @@ copy inherits the files here — so a change lands **once**, not in every repo.
   into the charly release) as the PR validator, always posts a single PR comment,
   and sets the required
   `charly/pr-validator` check from a deterministic `Verdict: PASS|BLOCK`
-  (PASS → exit 0, BLOCK → exit 1, no/mixed verdict → exit 2).
+  (PASS → exit 0, BLOCK → exit 1, no verdict → **INCONCLUSIVE** + exit 3 — the
+  required check stays RED, so a provider that never answered can neither pass
+  unreviewed code nor be mistaken for a code finding — mixed verdict → exit 2).
 - **`org-wide-pr-validator-dispatcher.yml`** — the one-file installer any org repo
   drops in as `.github/workflows/pr-validator.yml` to inherit the same gate via
   `uses: opencharly/.github/.github/workflows/pr-validator.yml@main` (see below).
@@ -79,7 +81,7 @@ gate is charly-native: plugin-review is welded into the charly release, driven b
 `charly review --plan review-plan.yml` (plan + prompt live in
 opencharly/action-review@main — the validator spec's single config source, updated without
 touching the workflow). The gate-mechanism version surface is the pinned charly release
-(`vars.CHARLY_VERSION`; the workflow default `v2026.251.1947` is bumped deliberately per
+(`vars.CHARLY_VERSION`; the workflow default `v2026.254.1902` is bumped deliberately per
 release).
 
 ## Scope & evidence baseline (honest capability statement)
