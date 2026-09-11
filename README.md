@@ -79,7 +79,7 @@ gate is charly-native: plugin-review is welded into the charly release, driven b
 `charly review --plan review-plan.yml` (plan + prompt live in
 opencharly/action-review@main — the validator spec's single config source, updated without
 touching the workflow). The gate-mechanism version surface is the pinned charly release
-(`vars.CHARLY_VERSION`; the workflow default `v2026.251.1947` is bumped deliberately per
+(`vars.CHARLY_VERSION`; the workflow default `v2026.254.1902` is bumped deliberately per
 release).
 
 ## Scope & evidence baseline (honest capability statement)
