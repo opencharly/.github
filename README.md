@@ -16,8 +16,9 @@ copy inherits the files here — so a change lands **once**, not in every repo.
   resulting protection without maintaining per-repository copies or lists.
 - **`.github/workflows/pr-validator.yml`** — the org-wide `charly/pr-validator` gate.
   A **reusable workflow** (`on: workflow_call`) that also self-gates this `.github`
-  repo (`on: pull_request`). It runs the pi coding agent as a fresh, independent PR
-  validator, always posts a single PR comment, and sets the required
+  repo (`on: pull_request`). It runs a fresh, independent charly review (the plugin-review plugin, welded
+  into the charly release) as the PR validator, always posts a single PR comment,
+  and sets the required
   `charly/pr-validator` check from a deterministic `Verdict: PASS|BLOCK`
   (PASS → exit 0, BLOCK → exit 1, no/mixed verdict → exit 2).
 - **`org-wide-pr-validator-dispatcher.yml`** — the one-file installer any org repo
@@ -61,29 +62,33 @@ dispatcher in their cut-over PRs.
 
 Nothing is hardcoded and no credential is committed. The workflow reads
 provider/model/endpoint/key from the GitHub environment and passes them to the
-pi action's native inputs (`provider` / `model` / `base_url` / `api_key`). Set these as **org-level** variables/secret (Settings → Secrets and variables → Actions → New repository secret / New variable, org level, **visibility: all**): (Settings → Secrets and variables → Actions →
-New repository secret / New variable, org level, **visibility: all**):
+charly review step as the `AI_REVIEW_*` env (`provider` / `model` / `base_url` / `api_key`). Set these as **org-level** variables/secret (Settings → Secrets and variables → Actions → New repository secret / New variable, org level, **visibility: all**):
 
 | Name | Kind | Default | Purpose |
 |---|---|---|---|
-| `AI_REVIEW_PROVIDER` | variable | `openrouter` | LLM provider name |
-| `AI_REVIEW_BASE_URL` | variable | `https://openrouter.ai/api/v1` | Provider base URL override (empty = built-in) |
-| `AI_REVIEW_MODEL` | variable | `~deepseek/deepseek-v4-flash-latest` | Exact model ID in the provider's catalog |
+| `AI_REVIEW_PROVIDER` | variable | `ollama` | LLM provider name |
+| `AI_REVIEW_BASE_URL` | variable | `https://ollama.com/v1` | Provider base URL override (empty = built-in) |
+| `AI_REVIEW_MODEL` | variable | `deepseek-v4.1-flash` | Exact model ID in the provider's catalog |
 | `AI_REVIEW_API_KEY` | secret | — | Provider API key (never committed) |
 
 The model id is passed **verbatim** to the provider's chat-completions endpoint
-(`~deepseek/deepseek-v4-flash-latest` is OpenRouter's own latest-alias, listed in its
-public `/models` catalog); `base_url` selects the endpoint; no `models.json` is written and
-no model catalog is embedded. The action (`opencharly/pi-review-action`) is pinned to an
-exact release tag (`@v1.0.2`); bump it deliberately.
+(`deepseek-v4.1-flash` is an Ollama Cloud model id, served at `https://ollama.com/v1` —
+the same catalog as the local ollama `deepseek-v4.1-flash:cloud` pointer); `base_url`
+selects the endpoint; no `models.json` is written and no model catalog is embedded. The
+gate is charly-native: plugin-review is welded into the charly release, driven by
+`charly review --plan review-plan.yml` (plan + prompt live in
+opencharly/action-review@main — the validator spec's single config source, updated without
+touching the workflow). The gate-mechanism version surface is the pinned charly release
+(`vars.CHARLY_VERSION`; the workflow default `v2026.251.1947` is bumped deliberately per
+release).
 
 ## Scope & evidence baseline (honest capability statement)
 
-This gate is a **static diff + thread + CI-status review**. The pi validator runs
-with exactly five read-only tools — `get_pr_diff`, `get_pr_commits`,
-`get_pr_thread` (the CURRENT live body is authoritative + prior comments),
-`get_pr_meta`, and `get_ci_status` — and **no shell**. For every claim
-it verifies it either (a) derives it from the diff/commits/thread/CI state, or (b)
+This gate is a **static diff + thread review** run by a fresh independent validator
+(`charly review`, the plugin-review plugin welded into the charly release). It runs
+read-only GitHub tools — `get_pr_diff`, `get_pr_commits`, `get_pr_thread` (the CURRENT
+live body is authoritative + prior comments), `get_pr_meta` — and **no shell**. For every claim
+it verifies it either (a) derives it from the diff/commits/thread, or (b)
 **cross-checks the author's pasted evidence for internal consistency** and states
 an explicit tool-limited disposition ("could not re-run from this environment")
 where independent re-execution would be required. It never fabricates a run and
