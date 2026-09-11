@@ -10,6 +10,86 @@
 # steps run is declared in opencharly/action-review@main:prompt/validator.md +
 # review-plan.yml (charly review --plan); this workflow never changes for that.
 #
+# VERDICT TAXONOMY — these classes are NEVER conflated (a provider that did not
+# answer is not a code finding, and it is not a pass either):
+#   PASS         -> exit 0, auto-merge armed — ONLY for a review that EXITED 0.
+#                   Fail-closed (T3/T4): a non-zero review exit may carry ONLY a
+#                   real BLOCK finding; any other verdict such a run wrote is
+#                   DISCARDED as untrusted and classified INCONCLUSIVE — a
+#                   crashed or stalled review can never arm auto-merge on a
+#                   stray PASS line it happened to write.
+#   BLOCK        -> exit 1 — a real code finding from the reviewer (a finding is
+#                   a finding, whatever the review exit code was).
+#   INCONCLUSIVE -> exit 3 — no TRUSTWORTHY verdict was produced: provider
+#                   unanswered, a verdict-less review output, or a non-zero
+#                   review exit whose output was discarded. NOT a BLOCK and
+#                   NOT a pass — the check stays RED (unreviewed code can
+#                   never merge).
+#   AMBIGUOUS    -> exit 2 — mixed PASS+BLOCK lines in one review, exit 0.
+#
+# RCA 2026-09-11 (the org-wide red-gate wave).
+# Symptom: validator runs dying with "context deadline exceeded (Client.Timeout
+# exceeded while awaiting headers)", the provider endpoint holding the request
+# with NO response headers until the HTTP client deadline fires.
+#
+# ROOT CAUSE: the provider (ollama.com) THROTTLES/BLOCKS datacenter/shared-runner
+# egress. The org already carries that precedent in THIS workflow — the
+# releases/latest redirect is "abuse-limited on shared runner IPs (curl exit 22)"
+# — and the measurements are one-sided: the same endpoint answered in 0.5s (small
+# payload), 1.55s (95KB body) and under a 12-way burst from a RESIDENTIAL path
+# (all HTTP 200), while the GitHub-hosted runner (runs-on:
+# vars.REVIEW_RUNNER_LABEL || ubuntu-latest; no self-hosted runner is registered)
+# received NO response headers at all.
+#
+# The throttle is INTERMITTENT and LOAD-DEPENDENT — NOT a permanent outage: real
+# verdicts DO occur on this same code path, during the wave itself:
+#   * opencharly/distro-cachyos#81 got a REAL BLOCK verdict from the reviewer at
+#     16:31:51Z (comment on head 1a68c74d, and again at 16:42:33Z on the re-cut
+#     head f7564dc1, whose run concluded "Gate (BLOCK)");
+#   * opencharly/charly#589 produced a REAL PASS verdict on a freshly re-cut head
+#     (run 34635539926 @ 738ac65c, 18:50-19:02Z) after an infra-class no-verdict
+#     run on the previous head;
+#   * a sibling wave PR failed on three consecutive validator runs and passed on
+#     the fourth — same head, same code.
+# Those witnesses prove the REVIEW CODE PATH IS SOUND; they are NOT a remedy —
+# walking the same throttled egress path again cannot change the provider's
+# shared-IP policy.
+#
+# THE DURABLE REMEDY IS A NAMED BATCH — the validator-egress hardening batch
+# (owner: org infra/operator), NOT a retry and NOT a rerun:
+#   (i)   register/point vars.REVIEW_RUNNER_LABEL at a runner whose egress can
+#         reach the provider;
+#   (ii)  evaluate a datacenter-friendly endpoint for vars.AI_REVIEW_BASE_URL /
+#         vars.AI_REVIEW_PROVIDER / vars.AI_REVIEW_MODEL;
+#   (iii) record the provider's shared-IP policy in this workflow header.
+# Neither a longer AI_REVIEW_ATTEMPT_TIMEOUT nor an in-job retry can cure this:
+# extra time cannot un-stall a stalled connection (it only lengthens every doomed
+# attempt), and an in-job retry walks the SAME path into the SAME defect — it is
+# the banned sleep/retry-on-flake, dressed up with unnamed magic numbers (R4).
+# This workflow therefore retries NOTHING: a provider-unanswered run is a class
+# to REPORT, not a flake to paper over.
+#
+# STRUCTURAL ANSWER (this workflow): classify a provider-unanswered run as
+# INCONCLUSIVE, report it plainly on the PR, and keep the required check RED, so
+# a stalled provider can neither silently pass code nor be mistaken for a code
+# finding. The classification consumes plugin-review's explicit terminal marker,
+# carried by the pinned charly release below. The marker is THREE ADJACENT
+# STRING CONSTANTS in the bundled plugin-review binary — `strings` reports
+# each one verbatim, and the exact commands + their full output are in this
+# PR's body:
+#   1. "inconclusive: all %d attempts timed out "
+#   2. " the LLM provider did not respond within the attempt timeout (provider unanswered); this is NOT a review verdict "
+#   3. " re-run the gate"
+# The runtime message is 1 + 2 + 3 (the header states this so the pin's claim is
+# checkable against the published asset, never taken on trust).
+# The review TEXT is still NEVER routed through $GITHUB_OUTPUT (see below).
+#
+# T4 — THIS FILE IS THE ORG-WIDE MERGE GUARDRAIL. A change to it requires
+# MAINTAINER SIGN-OFF recorded on the PR (the operator direction is quoted in the
+# PR body), not an agent-authored rationale alone. FAIL-CLOSED INVARIANT: PASS —
+# and therefore arming auto-merge — requires a review that exited 0; a non-zero
+# review exit may only yield BLOCK or INCONCLUSIVE, never PASS.
+#
 # No CHANGELOG rename — the merge workflow creates CHANGELOG from PR body.
 # No bot tokens needed.
 name: charly/pr-validator
@@ -77,7 +157,18 @@ jobs:
           # PINNED charly release - the gate is deterministic; bump here per release
           # (vars.CHARLY_VERSION overrides). No runtime latest-resolution: the
           # releases/latest redirect is abuse-limited on shared runner IPs (curl exit 22).
-          TAG="${CHARLY_VERSION:-v2026.251.1947}"
+          # v2026.254.1902 is the first release whose plugin bundle carries
+          # plugin-review's timeout-class taxonomy + the INCONCLUSIVE terminal
+          # marker the Gate (inconclusive) step consumes. VERIFIED against the
+          # published asset, never asserted — strings of the bundled plugin-review
+          # extracted from charly-plugins-linux-amd64.tar.gz; the exact commands
+          # and their full output are in this PR's body, section
+          # "How tested — the pin's strings evidence" (pasted verbatim):
+          #   v2026.254.1902: "inconclusive: all %d attempts timed out " -> 1 hit
+          #                   "AI_REVIEW_ATTEMPT_TIMEOUT"                -> 1 hit
+          #                   "NOT a review verdict"                    -> 1 hit
+          #   v2026.251.1947: all three of the above                   -> 0 hits
+          TAG="${CHARLY_VERSION:-v2026.254.1902}"
           # PER-RUN dir (runner.temp, wiped between jobs): on self-hosted runners
           # $HOME persists across jobs and a stale plugin binary there crashes
           # the gate (live evidence: plugin-review parseReviewArgs panic, exit 2,
@@ -113,24 +204,128 @@ jobs:
           GITHUB_TOKEN:        ${{ github.token }}
         run: |
           cd "$GITHUB_WORKSPACE/runner-config"
-          charly review --plan "$REVIEW_PLAN_PATH" --out /tmp/review.txt
+
+          # /tmp/review.txt is written ONLY by a fully successful plan
+          # (plugin-review plan.go writes OutPath on the success path, after every
+          # verdict:required step produced a verdict) — so clear it first: a stale
+          # file must never be parsed as THIS run's verdict.
+          rm -f /tmp/review.txt /tmp/review.log
+
+          # bash -e must NOT abort here: a verdict-less run is a CLASS to report,
+          # not a crash. Capture the exit code instead (plugin-review exits 1 on
+          # the provider-unanswered class, 2 on "verdict: required but no Verdict
+          # line produced"). NO RETRY: see the RCA header — a retry on the same
+          # egress path retries the same defect (R4).
+          rc=0
+          charly review --plan "$REVIEW_PLAN_PATH" --out /tmp/review.txt > /tmp/review.log 2>&1 || rc=$?
+          echo "review rc=$rc"
+          cat /tmp/review.log
+
+          # The plugin names the class explicitly (the INCONCLUSIVE terminal marker
+          # carried by the pinned release).
+          provider_unanswered=false
+          if grep -qiE 'inconclusive:|provider unanswered|Client[.]Timeout exceeded|context deadline exceeded' /tmp/review.log; then
+            provider_unanswered=true
+          fi
+
+          verdict=""
+          if [ -f /tmp/review.txt ]; then
+            verdict=$(grep -E '^Verdict: (BLOCK|PASS)[[:space:]]*$' /tmp/review.txt | sed -E 's/^Verdict: (BLOCK|PASS).*/\1/' | sort -u || true)
+          fi
+
+          # FAIL-CLOSED on the review exit code (T3/T4): capturing rc must
+          # never mean WEAKER than the bash -e it replaced. rc != 0 means the
+          # plan did not complete cleanly, so the ONLY class such a run may
+          # carry is BLOCK (a real finding, written before the failure). Any
+          # other verdict a non-zero run wrote is UNTRUSTWORTHY: a crashed or
+          # stalled reviewer must never arm auto-merge on a stray PASS line.
+          # That file is moved ASIDE, so Parse verdict finds no verdict and
+          # classifies INCONCLUSIVE (exit 3, check RED) — the previous
+          # revision let it pass.
+          discarded=false
+          if [ -n "$verdict" ] && [ "$rc" -ne 0 ] &&
+             [ "$verdict" != "BLOCK" ]; then
+            discarded=true
+            untrusted=$(printf '%s' "$verdict" | tr '\n' '+')
+            echo "::warning::review rc=$rc wrote $untrusted — FAIL-CLOSED"
+            echo "  discarded: a non-zero review exit may only carry BLOCK"
+            mv /tmp/review.txt /tmp/review.untrusted.txt
+            verdict=""
+          fi
+
           # The review TEXT is markdown and its step sections are ###-led lines
           # (e.g. "### [step: review]"): GitHub's $GITHUB_OUTPUT heredoc parser
           # rejects such lines with 'Invalid format' (live distro-omarchy#49
           # evidence) — so the text is NEVER routed through GITHUB_OUTPUT.
-          # Same-job consumers (Parse verdict / comment) read /tmp/review.txt.
-          verdict=$(grep -E '^Verdict: (BLOCK|PASS)[[:space:]]*$' /tmp/review.txt | sed -E 's/^Verdict: (BLOCK|PASS).*/\1/' | sort -u)
-          echo "success=true" >> "$GITHUB_OUTPUT"
-          [ -n "$verdict" ] && echo "verdict=$verdict" >> "$GITHUB_OUTPUT"
+          # Same-job consumers (Parse verdict / Gates) read /tmp/review.txt.
+          # braced group: shellcheck SC2129 (individual appends to one file).
+          {
+            echo "review_rc=$rc"
+            echo "provider_unanswered=$provider_unanswered"
+            echo "discarded_verdict=$discarded"
+          } >> "$GITHUB_OUTPUT"
+          if [ -n "$verdict" ]; then
+            echo "success=true" >> "$GITHUB_OUTPUT"
+            # ONLY the first line: a multi-line value would break the GITHUB_OUTPUT
+            # 'name=value' format. Mixed PASS+BLOCK is classified by Parse verdict.
+            first=$(printf '%s\n' "$verdict" | sed -n '1p')
+            echo "verdict=$first" >> "$GITHUB_OUTPUT"
+            echo "inconclusive=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "success=false" >> "$GITHUB_OUTPUT"
+            echo "inconclusive=true" >> "$GITHUB_OUTPUT"
+            if [ "$rc" -ne 0 ]; then
+              echo "::warning::review rc=$rc exited without a BLOCK verdict"
+              echo "  INCONCLUSIVE — no BLOCK, no pass; the check stays RED"
+            else
+              echo "::warning::review rc=0 produced no Verdict line"
+              echo "  INCONCLUSIVE — no BLOCK, no pass; the check stays RED"
+            fi
+          fi
 
+      # Second fail-closed layer (T3/T4): even if a verdict survived in
+      # review.txt, a non-zero review exit may only yield BLOCK — anything else
+      # this step finds is classified INCONCLUSIVE, never PASS.
       - name: Parse verdict
         id: parse
+        env:
+          REVIEW_RC: ${{ steps.review.outputs.review_rc }}
         run: |
-          REVIEW=$(cat /tmp/review.txt)
-          found=$(printf '%s\n' "$REVIEW" | grep -E '^Verdict: (BLOCK|PASS)[[:space:]]*$')
-          n=$(printf '%s\n' "$found" | grep -cE '^Verdict:')
-          [ "$n" -eq 0 ] && { echo "::error::No verdict in response"; exit 2; }
+          found=""
+          if [ -f /tmp/review.txt ]; then
+            found=$(grep -E '^Verdict: (BLOCK|PASS)[[:space:]]*$' /tmp/review.txt || true)
+          fi
+          n=0
+          if [ -n "$found" ]; then
+            n=$(printf '%s\n' "$found" | grep -cE '^Verdict:')
+          fi
+          if [ "$n" -eq 0 ]; then
+            # NO Verdict line — never exit 2 blindly here: the two classes behind
+            # this (provider unanswered / verdict-less review output) are NOT code
+            # findings. Classify INCONCLUSIVE; the Gate (inconclusive) step reports
+            # it honestly on the PR and keeps the required check RED.
+            echo "verdict=INCONCLUSIVE" >> "$GITHUB_OUTPUT"
+            echo "::warning::no Verdict line in the review output (provider_unanswered=${{ steps.review.outputs.provider_unanswered }}, review_rc=${{ steps.review.outputs.review_rc }}) — INCONCLUSIVE"
+            exit 0
+          fi
           distinct=$(printf '%s\n' "$found" | sed -E 's/^Verdict: (BLOCK|PASS).*/\1/' | sort -u)
+          # FAIL-CLOSED (T3/T4): a non-zero review exit may only carry a real
+          # BLOCK finding. A PASS — or a mixed PASS+BLOCK — read from a file an
+          # rc != 0 run wrote is not a trustworthy pass — INCONCLUSIVE, the
+          # check stays RED.
+          if [ "${REVIEW_RC:-0}" != "0" ] && [ "$distinct" != "BLOCK" ]; then
+            echo "verdict=INCONCLUSIVE" >> "$GITHUB_OUTPUT"
+            echo "::warning::review rc=${REVIEW_RC}, verdict not BLOCK"
+            echo "  FAIL-CLOSED: a non-zero review exit may only carry BLOCK"
+            exit 0
+          fi
+          count=$(printf '%s\n' "$distinct" | wc -l | tr -d ' ')
+          if [ "$count" -gt 1 ]; then
+            # Mixed PASS+BLOCK: a multi-line value would break the GITHUB_OUTPUT
+            # 'name=value' format, so the CLASS is the output.
+            echo "verdict=AMBIGUOUS" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           echo "verdict=$distinct" >> "$GITHUB_OUTPUT"
 
       - name: Gate (BLOCK)
@@ -139,10 +334,62 @@ jobs:
           echo "::error::AI review blocked this PR"
           exit 1
 
-      - name: Gate (ambiguous)
-        if: steps.parse.outputs.verdict != 'PASS' && steps.parse.outputs.verdict != 'BLOCK'
+      # INCONCLUSIVE is NOT a BLOCK: no code finding was produced — the provider
+      # never answered (or the review yielded no Verdict line). Report that plainly
+      # on the PR and keep the required check RED: unreviewed code must never
+      # merge, and turning this into a pass would silently defeat the gate.
+      - name: Gate (inconclusive)
+        if: steps.parse.outputs.verdict == 'INCONCLUSIVE'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr-number }}
+          REPO: ${{ github.repository }}
+          PROVIDER_UNANSWERED: ${{ steps.review.outputs.provider_unanswered }}
+          DISCARDED_VERDICT: ${{ steps.review.outputs.discarded_verdict }}
+          REVIEW_RC: ${{ steps.review.outputs.review_rc }}
         run: |
-          echo "::error::Ambiguous verdict from AI review"
+          class="verdict-less review output"
+          if [ "$PROVIDER_UNANSWERED" = "true" ]; then
+            class="provider unanswered (throttled datacenter/shared-runner egress) — the LLM provider returned no response headers to this runner"
+          elif [ "$DISCARDED_VERDICT" = "true" ]; then
+            class="charly review exited rc=${REVIEW_RC} with a non-BLOCK"
+            class="$class verdict — FAIL-CLOSED: a non-zero review exit may"
+            class="$class only carry a real BLOCK finding, discarded"
+          fi
+          {
+            echo '## validator INCONCLUSIVE — no review verdict was produced (not a BLOCK; no code finding)'
+            echo
+            echo 'The gate could **not** obtain a review verdict on this run, so it produced **no code finding**. This is **not a BLOCK** and the PR is **not** being rejected — but the required check stays **RED on purpose**: unreviewed code must never merge.'
+            echo
+            echo "- class: $class"
+            echo "- review exit code: ${REVIEW_RC:-n/a}"
+            echo "- in-job retries: none — a retry walks the same egress path into the same defect (R4); the gate REPORTS the class instead of papering over it"
+            echo
+            echo '**Root cause.** The provider (ollama.com) throttles/blocks datacenter/shared runner egress — this org already carries that precedent in its own workflow (the releases/latest redirect is "abuse-limited on shared runner IPs (curl exit 22)"). The same endpoint answered in 0.5–1.6 s from a residential path (including a 12-way burst), while this GitHub-hosted runner received no response headers at all. Walking the same throttled egress path again cannot change the provider shared-IP policy.'
+            echo
+            echo '**Durable remedy — the validator-egress hardening batch (owner: org infra/operator):**'
+            echo '1. register/point vars.REVIEW_RUNNER_LABEL at a runner whose egress can reach the provider;'
+            echo '2. evaluate a datacenter-friendly endpoint for vars.AI_REVIEW_BASE_URL / vars.AI_REVIEW_PROVIDER / vars.AI_REVIEW_MODEL;'
+            echo '3. record the provider shared-IP policy in the workflow header.'
+            echo
+            echo 'Until (1) or (2) lands this required check stays **RED**: unreviewed code must never merge.'
+            echo
+            echo '<details><summary>Diagnostics (tail of the review log)</summary>'
+            echo
+            echo '~~~'
+            tail -n 25 /tmp/review.log 2>/dev/null || echo '(no review log captured)'
+            echo '~~~'
+            echo
+            echo '</details>'
+          } > /tmp/inconclusive-comment.md
+          gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file /tmp/inconclusive-comment.md || echo "::warning::could not post the INCONCLUSIVE comment (non-fatal)"
+          echo "::error::validator INCONCLUSIVE — no review verdict was produced (not a BLOCK; no code finding) — durable remedy: the validator-egress hardening batch (owner: org infra/operator); see the PR comment"
+          exit 3
+
+      - name: Gate (ambiguous)
+        if: steps.parse.outputs.verdict != 'PASS' && steps.parse.outputs.verdict != 'BLOCK' && steps.parse.outputs.verdict != 'INCONCLUSIVE'
+        run: |
+          echo "::error::Ambiguous verdict from AI review (mixed PASS+BLOCK, or an unparsable verdict output)"
           exit 2
 
       # Enable auto-merge — RESILIENTLY. GitHub rejects the mutation with

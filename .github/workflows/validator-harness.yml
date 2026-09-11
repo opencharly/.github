@@ -1,0 +1,28 @@
+# R10 COVERAGE FOR THE GATE ITSELF.
+#
+# .github/tests/validator-gate-harness.py asserts the decision chain of
+# pr-validator.yml (PASS / BLOCK / INCONCLUSIVE / AMBIGUOUS, the exit codes,
+# the INCONCLUSIVE PR comment, and the fail-closed rule that only a review
+# exiting 0 may PASS) against fakes for charly and gh. Coverage that never
+# runs enforces nothing — this workflow IS the wiring: the harness runs on
+# every pull request (and on demand), and its non-zero exit reddens the check.
+#
+# Offline and dependency-free by construction: python3 stdlib only, no
+# network, no PyYAML, no third-party dependency.
+name: validator-harness
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  harness:
+    name: validator-harness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Run the validator-gate harness (offline, python3 stdlib)
+        run: python3 .github/tests/validator-gate-harness.py

@@ -20,7 +20,20 @@ copy inherits the files here — so a change lands **once**, not in every repo.
   into the charly release) as the PR validator, always posts a single PR comment,
   and sets the required
   `charly/pr-validator` check from a deterministic `Verdict: PASS|BLOCK`
-  (PASS → exit 0, BLOCK → exit 1, no/mixed verdict → exit 2).
+  (PASS → exit 0 — **only for a review that exited 0**: a non-zero review exit
+  may carry only a real BLOCK finding, so any other verdict it wrote is
+  discarded (fail-closed) — BLOCK → exit 1, no trustworthy verdict →
+  **INCONCLUSIVE** + exit 3 — the required check stays RED, so a provider that
+  never answered can neither pass unreviewed code nor be mistaken for a code
+  finding — mixed verdict → exit 2).
+- **`.github/workflows/validator-harness.yml`** +
+  **`.github/tests/validator-gate-harness.py`** — the gate's own R10 coverage.
+  The harness (python3 stdlib only, offline, fakes for charly and gh) drives the
+  REAL `run:` bodies of the decision chain above and asserts each exit code, the
+  classification, the INCONCLUSIVE comment and whether auto-merge was armed; the
+  workflow runs it on every `pull_request` and on `workflow_dispatch`, so a
+  non-zero harness exit reddens the check. Coverage that never runs enforces
+  nothing.
 - **`org-wide-pr-validator-dispatcher.yml`** — the one-file installer any org repo
   drops in as `.github/workflows/pr-validator.yml` to inherit the same gate via
   `uses: opencharly/.github/.github/workflows/pr-validator.yml@main` (see below).
@@ -79,7 +92,7 @@ gate is charly-native: plugin-review is welded into the charly release, driven b
 `charly review --plan review-plan.yml` (plan + prompt live in
 opencharly/action-review@main — the validator spec's single config source, updated without
 touching the workflow). The gate-mechanism version surface is the pinned charly release
-(`vars.CHARLY_VERSION`; the workflow default `v2026.251.1947` is bumped deliberately per
+(`vars.CHARLY_VERSION`; the workflow default `v2026.254.1902` is bumped deliberately per
 release).
 
 ## Scope & evidence baseline (honest capability statement)
