@@ -612,7 +612,11 @@ jobs:
         if: always()
         # Same reason as the bundle above: an artifact-service hiccup must not fail a PASS run.
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        # Pinned to the v4 tag's commit, the tightest form this org already uses elsewhere
+        # (actions/create-github-app-token in tag-on-merge.yml is SHA-pinned). No new secret,
+        # no new permission: the artifact service uses the job's own runtime token, and
+        # if-no-files-found: ignore keeps a missing bundle from failing the step.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: validator-evidence
           path: ${{ runner.temp }}/validator-evidence
