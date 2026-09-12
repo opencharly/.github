@@ -87,6 +87,18 @@
 # and therefore arming auto-merge — requires a review that exited 0; a non-zero
 # review exit may only yield BLOCK or INCONCLUSIVE, never PASS.
 #
+# T13 — THE ENGINE-CHANGE EXCEPTION (opencharly/.github#97). A change to the
+# review engine ITSELF (opencharly/plugin-review) cannot be independently reviewed
+# BY that engine: the engine is served from a fixed ref, so such a PR would be
+# graded by the PRE-change code (observed: the engine's own timeout fix returned the
+# very failure it fixed). Such a PR therefore requires the MAINTAINER'S SIGN-OFF
+# recorded on the PR and an operator-performed merge — the same posture as T4.
+# This is deliberately NOT a bootstrap: serving the engine from the PR head would
+# let a PR rewrite the gate so that it approves itself, destroying the independence
+# the fresh validator exists to provide. NEVER `gh pr merge --admin`; never an
+# agent-performed bypass. The class `engine-defective` below names this condition
+# when it occurs, so a defective engine is diagnosed instead of reported as a
+# generic verdict-less run.
 # No CHANGELOG rename — the merge workflow creates CHANGELOG from PR body.
 # No bot tokens needed.
 name: charly/pr-validator
@@ -257,9 +269,20 @@ jobs:
           # evidence) — so the text is NEVER routed through GITHUB_OUTPUT.
           # Same-job consumers (Parse verdict / Gates) read /tmp/review.txt.
           # braced group: shellcheck SC2129 (individual appends to one file).
+          # engine-defective (opencharly/.github#97): the engine COMPLETED a first turn
+          # (the endpoint answered) and failed a LATER turn / produced empty content —
+          # the context-dependent class a provider-egress story cannot explain. Naming
+          # it keeps a defective engine from being reported as a generic
+          # provider-unanswered run (and points at the T13 exception above).
+          engine_defective=false
+          if [ "$provider_unanswered" = "true" ] &&
+             grep -qE 'turn 1: [0-9]+ tool call' /tmp/review.log; then
+            engine_defective=true
+          fi
           {
             echo "review_rc=$rc"
             echo "provider_unanswered=$provider_unanswered"
+            echo "engine_defective=$engine_defective"
             echo "discarded_verdict=$discarded"
           } >> "$GITHUB_OUTPUT"
           if [ -n "$verdict" ]; then
@@ -343,11 +366,14 @@ jobs:
           PR_NUMBER: ${{ inputs.pr-number }}
           REPO: ${{ github.repository }}
           PROVIDER_UNANSWERED: ${{ steps.review.outputs.provider_unanswered }}
+          ENGINE_DEFECTIVE: ${{ steps.review.outputs.engine_defective }}
           DISCARDED_VERDICT: ${{ steps.review.outputs.discarded_verdict }}
           REVIEW_RC: ${{ steps.review.outputs.review_rc }}
         run: |
           class="verdict-less review output"
-          if [ "$PROVIDER_UNANSWERED" = "true" ]; then
+          if [ "$ENGINE_DEFECTIVE" = "true" ]; then
+            class="engine-defective (the review engine completed turn 1 and failed a later turn — the context-dependent timeout/empty-content class; opencharly/.github#97, see the T13 engine-change exception)"
+          elif [ "$PROVIDER_UNANSWERED" = "true" ]; then
             class="provider unanswered (the provider returned no response headers within the attempt timeout)"
           elif [ "$DISCARDED_VERDICT" = "true" ]; then
             class="charly review exited rc=${REVIEW_RC} with a non-BLOCK"
