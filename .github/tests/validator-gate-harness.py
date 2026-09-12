@@ -322,6 +322,15 @@ FAKE_CHARLY = NL.join([
     "    echo \"LLM 400: provider rejected the request (MissingSessionID: x-opencode-session required)\" >&2",
     "    exit 1",
     "    ;;",
+    "  mixed-signals)",
+    "    # BOTH markers: a completed turn 1 (engine_defective, once a provider marker is present)",
+    "    # AND an explicit HTTP rejection. The COMPOSED class must win — narrating the plain",
+    "    # protocol fault here would deny that the engine ever ran a turn, contradicting the log.",
+    "    echo \"turn 1: 4 tool call(s)\" >&2",
+    "    echo \"attempt 2 failed: Post \\\"https://provider.invalid/chat/completions\\\": context deadline exceeded (Client.Timeout exceeded while awaiting headers)\" >&2",
+    "    echo \"attempt 3 failed: LLM 400: the enlarged context was refused by the endpoint\" >&2",
+    "    exit 1",
+    "    ;;",
     "  non-error-status)",
     "    # A verdict-less log that ALSO carries a NON-ERROR status line. The extractor must not",
     "    # read it as a provider rejection: a 2xx is not a refusal, and reporting it as one would",
@@ -530,6 +539,31 @@ SCENARIOS = [
             "| class inputs |",
             "| provider / model / base_url |",
         ],
+    },
+    {
+        # BOTH signals in one log — the case the extractor's precedence must get right. Before
+        # the composed branch, the provider branch won and asserted "the engine never got to run
+        # a turn" while the log showed turn 1 COMPLETED: the same misattribution class this PR
+        # removes, inverted.
+        "name": "mixed-signals",
+        "fake": "mixed-signals",
+        "expect_exit": 3,
+        "expect_steps": ["review", "parse", "Gate (inconclusive)", "evidence"],
+        "expect_verdict": "INCONCLUSIVE",
+        "expect_comment": True,
+        "expect_auto_merge": False,
+        "expect_comment_contains": [
+            "validator INCONCLUSIVE",
+            "provider rejected a LATER request (HTTP 400) after turn 1 completed",
+            "the enlarged-context class",
+        ],
+        "expect_comment_excludes": [
+            "No COMPLETED turn precedes it in this log",
+            "the engine never got to run a turn",
+        ],
+        "expect_review_outputs": {"provider_error": "400", "provider_unanswered": "true",
+                                  "engine_defective": "true", "review_rc": "1",
+                                  "discarded_verdict": "false"},
     },
     {
         # The BOUNDARY the extractor must respect. Before the pattern was narrowed to [45]xx,

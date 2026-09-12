@@ -424,9 +424,19 @@ jobs:
           rootcause='**Root cause.** A NON-STREAMING request under a WHOLE-GENERATION deadline: plugin-review POSTs with no `stream:true` (candy/plugin-review/llm.go:92), so response headers arrive only when the ENTIRE generation finishes, all under one `http.Client{Timeout}` (llm.go:80) whose built-in default is 5 minutes (review.go:28). The review runs in a 20-turn tool loop that APPENDS the tool results of every turn (the PR diff/files) to the context and retries the whole loop up to AI_REVIEW_MAX_ATTEMPTS times (3 in the pinned bundle; 1 once the fail-fast wiring activates): turn 1 completes, and turn 2 — carrying the enlarged context — fails in ONE OF TWO OBSERVED ways: it returns EMPTY content (`turn 2: final content len=0`, observed on 2 of the 3 attempts in run 34682776608) or it exceeds the 5-minute cap (observed on the third). Both are one defect class — an unbounded, non-streaming request whose context grew. The endpoint answered 405 in 0.18s in the same window — there is no throttled egress.'
           remedy1='1. this workflow now PASSES the cap through — `AI_REVIEW_ATTEMPT_TIMEOUT` (org-settable, 300s default) — raise it if a large context still exceeds it;'
           remedy2='2. plugin-review: stream the completion, set an explicit `http.Transport`, bound the tool-result payloads, and retry the FAILED TURN rather than the whole loop (owner: plugin-review).'
-          if [ -n "$PROVIDER_ERROR" ]; then
+          # BOTH signals first. A log that shows a COMPLETED turn 1 AND an HTTP rejection is not a
+          # plain protocol fault: the refusal lands on a LATER request whose context each turn
+          # enlarged — the engine-defective class (opencharly/.github#97) with a specific status,
+          # not a denial that the engine ever ran. Ordering this ahead is what makes the
+          # single-signal branch's claim below true rather than merely convenient.
+          if [ "$ENGINE_DEFECTIVE" = "true" ] && [ -n "$PROVIDER_ERROR" ]; then
+            class="provider rejected a LATER request (HTTP ${PROVIDER_ERROR}) after turn 1 completed — the enlarged-context class (opencharly/.github#97, see the T13 engine-change exception)"
+            rootcause="**Root cause.** The engine COMPLETED turn 1 (the endpoint answered) and the provider then REFUSED a later request with **HTTP ${PROVIDER_ERROR}**: each turn appends its tool results to the context, and past a size or rate limit the endpoint rejects the request outright. Both facts are in the diagnostics below. This is therefore NOT reported as a plain protocol fault — the rejection is a SYMPTOM of the unbounded context growth, and the durable fix is the engine's bound on tool-result payloads (owner: plugin-review)."
+            remedy1="1. read the provider message in the diagnostics — it names the limit it enforced;"
+            remedy2="2. treat it as the context-growth class: raising a cap or retrying does not shrink the request (R4)."
+          elif [ -n "$PROVIDER_ERROR" ]; then
             class="provider rejected the request (HTTP ${PROVIDER_ERROR}) — a provider/protocol/config matter, not an engine verdict"
-            rootcause="**Root cause.** The model endpoint answered **HTTP ${PROVIDER_ERROR}** — an explicit REJECTION, not a stall: the provider parsed the request and refused it, and its own message is in the diagnostics below. A 4xx/5xx here is a provider, protocol or configuration matter: the engine never got to run a turn, so the streaming and no-headers classes do NOT apply."
+            rootcause="**Root cause.** The model endpoint answered **HTTP ${PROVIDER_ERROR}** — an explicit REJECTION, not a stall: the provider parsed the request and refused it, and its own message is in the diagnostics below. No COMPLETED turn precedes it in this log (the engine logs \`turn N: …\` for every turn it finishes), so the streaming and no-headers classes do NOT apply to this run."
             remedy1="1. read the provider message in the diagnostics below — it names the missing or wrong element;"
             remedy2="2. fix it at the review client or in the org AI_REVIEW_* variables, then re-run. An HTTP rejection is deterministic — do NOT retry blindly (R4)."
           elif [ "$ENGINE_DEFECTIVE" = "true" ]; then
