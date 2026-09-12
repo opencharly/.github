@@ -1,0 +1,5 @@
+# Python bytecode produced by running the offline harness (python3 -m py_compile /
+# plain execution). It is a build artifact, never source: committing it shipped 40KB of
+# machine-specific bytecode in this branch's history and had to be reverted (R8).
+__pycache__/
+*.pyc
