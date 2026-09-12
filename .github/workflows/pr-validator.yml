@@ -515,3 +515,86 @@ jobs:
             esac
           done
           echo "::warning::auto-merge arming did not settle — verdict is PASS, merge manually"
+
+      # ---------------------------------------------------------------------------
+      # FAILURE EVIDENCE (always). The INCONCLUSIVE notice carries only the last 25
+      # lines of the review log, and a run log is transient — so a failure deep in a
+      # long review (turn 7 of a 20-turn loop; a provider rejection mid-plan) is only
+      # findable by scrolling an expiring log. This step preserves the FULL evidence as
+      # a downloadable artifact AND puts the class + the effective configuration on the
+      # run own Summary page, so a reader never has to guess WHICH log to open — the gap
+      # that made the 2026-09-12 org-wide outage (an HTTP 400 the model endpoint named
+      # explicitly) take longer to diagnose than the evidence warranted.
+      # ---------------------------------------------------------------------------
+      - name: Evidence bundle (always)
+        id: evidence
+        if: always()
+        env:
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ inputs.pr-number || github.event.pull_request.number }}
+          REVIEW_RC: ${{ steps.review.outputs.review_rc }}
+          PROVIDER_ERROR: ${{ steps.review.outputs.provider_error }}
+          PROVIDER_UNANSWERED: ${{ steps.review.outputs.provider_unanswered }}
+          ENGINE_DEFECTIVE: ${{ steps.review.outputs.engine_defective }}
+          DISCARDED_VERDICT: ${{ steps.review.outputs.discarded_verdict }}
+          CHARLY_VERSION: ${{ vars.CHARLY_VERSION }}
+          AI_REVIEW_PROVIDER: ${{ vars.AI_REVIEW_PROVIDER }}
+          AI_REVIEW_MODEL: ${{ vars.AI_REVIEW_MODEL }}
+          AI_REVIEW_BASE_URL: ${{ vars.AI_REVIEW_BASE_URL }}
+          ATTEMPT_TIMEOUT: ${{ vars.AI_REVIEW_ATTEMPT_TIMEOUT }}
+        run: |
+          D="${RUNNER_TEMP}/validator-evidence"
+          mkdir -p "$D"
+          # The manifest is the machine-readable answer to "what happened": the class
+          # inputs, the exit code, the provider/model/base_url ACTUALLY in force, and the
+          # file inventory. Written even when a log is missing — an absent file is itself
+          # evidence (a 3-line review log means the review never started; 500 lines mean it
+          # ran and failed partway).
+          {
+            echo "repo=${REPO}"
+            echo "pr=${PR_NUMBER}"
+            echo "review_rc=${REVIEW_RC:-}"
+            echo "provider_error=${PROVIDER_ERROR:-}"
+            echo "provider_unanswered=${PROVIDER_UNANSWERED:-}"
+            echo "engine_defective=${ENGINE_DEFECTIVE:-}"
+            echo "discarded_verdict=${DISCARDED_VERDICT:-}"
+            echo "vars_charly_version=${CHARLY_VERSION:-<unset>}"
+            echo "vars_ai_review_provider=${AI_REVIEW_PROVIDER:-<unset>}"
+            echo "vars_ai_review_model=${AI_REVIEW_MODEL:-<unset>}"
+            echo "vars_ai_review_base_url=${AI_REVIEW_BASE_URL:-<unset>}"
+            echo "vars_ai_review_attempt_timeout=${ATTEMPT_TIMEOUT:-<unset>}"
+          } > "$D/manifest.txt"
+          for f in /tmp/review.log /tmp/review.txt /tmp/review.untrusted.txt; do
+            b=$(basename "$f")
+            if [ -f "$f" ]; then cp "$f" "$D/$b"; else echo "(absent)" > "$D/$b.absent"; fi
+          done
+          wc -l /tmp/review.log 2>/dev/null > "$D/review.log.lines" || echo "0" > "$D/review.log.lines"
+          echo "evidence dir:"; ls -la "$D"
+          if [ -n "$GITHUB_STEP_SUMMARY" ]; then
+            {
+              echo "## Validator evidence"
+              echo
+              echo "| field | value |"
+              echo "|---|---|"
+              # Backticks are markdown code spans here, NOT command substitution: inside a
+              # double-quoted echo they must be ESCAPED, or bash tries to run the markdown
+              # as commands (the offline harness caught exactly that: "line 34: 0: command
+              # not found"). Single quotes cannot be used because these lines expand ${VAR}.
+              echo "| review exit code | \`${REVIEW_RC:-n/a}\` |"
+              echo "| provider HTTP error | \`${PROVIDER_ERROR:-none}\` |"
+              echo "| class inputs | provider_unanswered=\`${PROVIDER_UNANSWERED:-}\` engine_defective=\`${ENGINE_DEFECTIVE:-}\` discarded=\`${DISCARDED_VERDICT:-}\` |"
+              echo "| provider / model / base_url | \`${AI_REVIEW_PROVIDER:-<unset>}\` / \`${AI_REVIEW_MODEL:-<unset>}\` / \`${AI_REVIEW_BASE_URL:-<unset>}\` |"
+              echo "| attempt-cap var | \`${ATTEMPT_TIMEOUT:-<unset>}\` |"
+              echo
+              echo "**Evidence:** the artifact named \`validator-evidence\` holds the FULL review log and the verdict files; the PR comment carries the class and the last 25 log lines."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: validator-evidence
+          path: ${{ runner.temp }}/validator-evidence
+          if-no-files-found: ignore
+          retention-days: 14

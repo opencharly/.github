@@ -413,6 +413,10 @@ TARGETS = [
     ("name", "Gate (inconclusive)"),
     ("name", "Gate (ambiguous)"),
     ("name", "Enable auto-merge"),
+    # The evidence step runs on `if: always()`, so it is exercised on every scenario —
+    # including the failing ones (which is the whole point: the evidence exists when the
+    # run WENT WRONG). Its content is asserted per scenario via expect_summary_contains.
+    ("id", "evidence"),
 ]
 
 SCENARIOS = [
@@ -420,7 +424,12 @@ SCENARIOS = [
         "name": "pass",
         "fake": "pass",
         "expect_exit": 0,
-        "expect_steps": ["review", "parse", "Enable auto-merge"],
+        "expect_steps": ["review", "parse", "Enable auto-merge", "evidence"],
+        "expect_summary_contains": [
+            "## Validator evidence",
+            "| review exit code |",
+            "| class inputs |",
+        ],
         "expect_verdict": "PASS",
         "expect_comment": False,
         "expect_auto_merge": True,
@@ -431,7 +440,7 @@ SCENARIOS = [
         "name": "block",
         "fake": "block",
         "expect_exit": 1,
-        "expect_steps": ["review", "parse", "Gate (BLOCK)"],
+        "expect_steps": ["review", "parse", "Gate (BLOCK)", "evidence"],
         "expect_verdict": "BLOCK",
         "expect_comment": False,
         "expect_auto_merge": False,
@@ -441,7 +450,7 @@ SCENARIOS = [
         "name": "provider-unanswered",
         "fake": "provider-unanswered",
         "expect_exit": 3,
-        "expect_steps": ["review", "parse", "Gate (inconclusive)"],
+        "expect_steps": ["review", "parse", "Gate (inconclusive)", "evidence"],
         "expect_verdict": "INCONCLUSIVE",
         "expect_comment": True,
         "expect_auto_merge": False,
@@ -465,7 +474,7 @@ SCENARIOS = [
         "name": "engine-defective",
         "fake": "engine-defective",
         "expect_exit": 3,
-        "expect_steps": ["review", "parse", "Gate (inconclusive)"],
+        "expect_steps": ["review", "parse", "Gate (inconclusive)", "evidence"],
         "expect_verdict": "INCONCLUSIVE",
         "expect_comment": True,
         "expect_auto_merge": False,
@@ -486,7 +495,7 @@ SCENARIOS = [
         "name": "provider-error",
         "fake": "provider-error",
         "expect_exit": 3,
-        "expect_steps": ["review", "parse", "Gate (inconclusive)"],
+        "expect_steps": ["review", "parse", "Gate (inconclusive)", "evidence"],
         "expect_verdict": "INCONCLUSIVE",
         "expect_comment": True,
         "expect_auto_merge": False,
@@ -504,12 +513,22 @@ SCENARIOS = [
         "expect_review_outputs": {"provider_error": "400", "provider_unanswered": "false",
                                   "engine_defective": "false", "review_rc": "1",
                                   "discarded_verdict": "false"},
+        # The ALWAYS-present surface: a reader opening the failed run finds the class and the
+        # effective configuration on the Summary page — no PR-comment round trip, no log hunt.
+        "expect_summary_contains": [
+            "## Validator evidence",
+            "| review exit code |",
+            "| provider HTTP error |",
+            "400",
+            "| class inputs |",
+            "| provider / model / base_url |",
+        ],
     },
     {
         "name": "verdict-less",
         "fake": "verdict-less",
         "expect_exit": 3,
-        "expect_steps": ["review", "parse", "Gate (inconclusive)"],
+        "expect_steps": ["review", "parse", "Gate (inconclusive)", "evidence"],
         "expect_verdict": "INCONCLUSIVE",
         "expect_comment": True,
         "expect_auto_merge": False,
@@ -526,7 +545,7 @@ SCENARIOS = [
         "name": "mixed",
         "fake": "mixed",
         "expect_exit": 2,
-        "expect_steps": ["review", "parse", "Gate (ambiguous)"],
+        "expect_steps": ["review", "parse", "Gate (ambiguous)", "evidence"],
         "expect_verdict": "AMBIGUOUS",
         "expect_comment": False,
         "expect_auto_merge": False,
@@ -540,7 +559,7 @@ SCENARIOS = [
         "name": "pass-with-error",
         "fake": "pass-with-error",
         "expect_exit": 3,
-        "expect_steps": ["review", "parse", "Gate (inconclusive)"],
+        "expect_steps": ["review", "parse", "Gate (inconclusive)", "evidence"],
         "expect_verdict": "INCONCLUSIVE",
         "expect_comment": True,
         "expect_auto_merge": False,
@@ -561,7 +580,7 @@ SCENARIOS = [
         "name": "block-with-error",
         "fake": "block-with-error",
         "expect_exit": 1,
-        "expect_steps": ["review", "parse", "Gate (BLOCK)"],
+        "expect_steps": ["review", "parse", "Gate (BLOCK)", "evidence"],
         "expect_verdict": "BLOCK",
         "expect_comment": False,
         "expect_auto_merge": False,
@@ -584,15 +603,34 @@ def run_scenario(spec, ordered, tmpdir, fakedir, workspace):
     outputs = {}
     ns = build_ns(outputs, workspace, tmpdir)
     executed = []
+    skipped = []
     transcript = []
     job_exit = 0
+    job_failed = False
     step_outputs = {}
+    summary_path = ""
 
     for _, step in ordered:
         name = step["label"]
         condition = step["if"]
-        if condition is not None and not eval_gh(condition, ns):
-            transcript.append("  [" + name + "] skipped (if: " + condition + ")")
+        # GitHub semantics, modelled correctly. A failed step does NOT end the job: a later
+        # step runs when its `if:` is a STATUS function (always()), and both a step with no
+        # `if:` and a step with a plain expression carry an IMPLICIT success() — so they are
+        # SKIPPED once a step has failed. The previous model broke out of the loop on the
+        # first failure ("the job stops here, exactly as GitHub would" — it does not), which
+        # is precisely why an `if: always()` evidence step could never be exercised here.
+        if condition is None:
+            run = not job_failed
+        elif "always()" in condition:
+            run = True
+        elif job_failed:
+            run = False
+        else:
+            run = eval_gh(condition, ns)
+        if not run:
+            skipped.append(name)
+            reason = ("if: " + condition) if condition else "a failed earlier step (implicit success())"
+            transcript.append("  [" + name + "] skipped (" + reason + ")")
             continue
         env = dict(os.environ)
         env["PATH"] = fakedir + os.pathsep + env.get("PATH", "")
@@ -605,6 +643,13 @@ def run_scenario(spec, ordered, tmpdir, fakedir, workspace):
         out_file = os.path.join(tmpdir, stem + ".github_output")
         open(out_file, "w").close()
         env["GITHUB_OUTPUT"] = out_file
+        # The evidence step writes the run Summary and a manifest under RUNNER_TEMP. Both
+        # are real files in CI, so the harness supplies REAL paths and asserts their
+        # CONTENT — a debugging-output claim is only proven by reading what it wrote.
+        summary_path = os.path.join(tmpdir, stem + ".step_summary")
+        open(summary_path, "w").close()
+        env["RUNNER_TEMP"] = tmpdir
+        env["GITHUB_STEP_SUMMARY"] = summary_path
         for key, value in step["env"].items():
             env[key] = subst(value, ns)
         script_path = os.path.join(tmpdir, stem + ".sh")
@@ -628,9 +673,11 @@ def run_scenario(spec, ordered, tmpdir, fakedir, workspace):
             outputs[step["id"]] = step_outputs[step["id"]]
             ns = build_ns(outputs, workspace, tmpdir)
         if proc.returncode != 0:
-            job_exit = proc.returncode
-            transcript.append("  -> the job stops here, exactly as GitHub would")
-            break
+            if job_exit == 0:
+                job_exit = proc.returncode
+            job_failed = True
+            transcript.append("  -> step failed (exit " + str(proc.returncode) +
+                              "); later steps run only when they declare always()")
 
     with open(comment_path, "r", encoding="utf-8") as fh:
         comment = fh.read()
@@ -639,13 +686,19 @@ def run_scenario(spec, ordered, tmpdir, fakedir, workspace):
     for path in RUNNER_PATHS:
         if os.path.exists(path):
             os.remove(path)
+    summary = ""
+    if summary_path and os.path.exists(summary_path):
+        with open(summary_path, "r", encoding="utf-8") as fh:
+            summary = fh.read()
     return {
         "transcript": transcript,
         "job_exit": job_exit,
         "executed": executed,
+        "skipped": skipped,
         "outputs": step_outputs,
         "comment": comment,
         "calls": calls,
+        "summary": summary,
     }
 
 
@@ -789,6 +842,11 @@ def run_harness():
         for needle in spec.get("expect_comment_excludes", []):
             note(needle not in result["comment"],
                  prefix + "comment body does NOT contain " + repr(needle))
+        # The run Summary is the second, ALWAYS-present surface: a reader who opens the
+        # failed run must find the class inputs and the effective configuration there.
+        for needle in spec.get("expect_summary_contains", []):
+            note(needle in result["summary"],
+                 prefix + "run Summary contains " + repr(needle))
 
     print(NL.join(log))
     failed = [message for ok, message in checks if not ok]
