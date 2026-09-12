@@ -302,6 +302,18 @@ FAKE_CHARLY = NL.join([
     "    echo \"inconclusive: all 3 attempts timed out - the LLM provider did not respond within the attempt timeout (provider unanswered); this is NOT a review verdict - re-run the gate\" >&2",
     "    exit 1",
     "    ;;",
+    "  engine-defective)",
+    "    # The class the `engine_defective` branch exists for: the engine COMPLETED turn 1 (the",
+    "    # endpoint answered) and a LATER turn failed (here: the whole-generation deadline). The",
+    "    # log carries BOTH markers the workflow keys on - a completed `turn 1: N tool call(s)` AND",
+    "    # a provider marker - which is exactly the context-dependent signature that a",
+    "    # provider-egress story cannot explain. Pre-fix the workflow has no engine_defective",
+    "    # branch, so this run is labelled a generic provider-unanswered run and the INCONCLUSIVE",
+    "    # notice omits the class.",
+    "    echo \"turn 1: 4 tool call(s)\" >&2",
+    "    echo \"attempt 3 failed: Post \\\"https://provider.invalid/chat/completions\\\": context deadline exceeded (Client.Timeout exceeded while awaiting headers)\" >&2",
+    "    exit 1",
+    "    ;;",
     "  verdict-less)",
     "    echo \"verdict: required but no Verdict line produced\" >&2",
     "    echo \"## Review - markdown with no Verdict line\" > \"$out\"",
@@ -435,6 +447,27 @@ SCENARIOS = [
         ],
         "expect_review_outputs": {"provider_unanswered": "true", "review_rc": "1",
                                   "discarded_verdict": "false"},
+    },
+    {
+        # The engine-defective class must be SELECTED from the run's own signature, not merely
+        # mentioned in the workflow's text: this scenario's fake log carries a completed turn 1
+        # plus a provider marker, so the true branch of the classification fires and the
+        # INCONCLUSIVE notice must name the class. Pre-fix (no engine_defective branch) the
+        # notice cannot contain it, so these assertions FAIL on the pre-fix workflow.
+        "name": "engine-defective",
+        "fake": "engine-defective",
+        "expect_exit": 3,
+        "expect_steps": ["review", "parse", "Gate (inconclusive)"],
+        "expect_verdict": "INCONCLUSIVE",
+        "expect_comment": True,
+        "expect_auto_merge": False,
+        "expect_comment_contains": [
+            "validator INCONCLUSIVE",
+            "engine-defective (the review engine",
+            "T13 engine-change exception",
+        ],
+        "expect_review_outputs": {"provider_unanswered": "true", "engine_defective": "true",
+                                  "review_rc": "1", "discarded_verdict": "false"},
     },
     {
         "name": "verdict-less",
@@ -629,12 +662,14 @@ def run_harness():
         note(subst(raw, ns_set) == "120",
              "functional: with the org var SET the cap RESOLVES to the set value")
     note("engine_defective=false" in text and "'turn 1: [0-9]+ tool call'" in text,
-         "functional: the engine-defective classification is DERIVED from the run's own "
+         "structural: the engine-defective classification is DERIVED from the run's own "
          "signature (a completed turn 1) - pre-fix: absent, so every verdict-less run was "
          "labelled provider-unanswered")
-    note("ENGINE_DEFECTIVE" in text and "engine-defective (the review engine" in text,
-         "functional: the engine-defective class reaches the INCONCLUSIVE notice and is "
-         "selected ahead of the provider-unanswered branch")
+    # NOTE: the SELECTION of the class is asserted FUNCTIONALLY by the `engine-defective`
+    # scenario below - its fake log carries a completed turn 1 + a provider marker, and its
+    # expect_comment_contains requires the class in the posted INCONCLUSIVE notice. It is
+    # deliberately NOT asserted by a text check (a source-text match is structural, not
+    # functional, and must not be labelled the other way).
     note("${CHARLY_VERSION:-v2026.254.1902}" in text,
          "structural: the pinned charly default is the taxonomy-marker release v2026.254.1902")
     note("${CHARLY_VERSION:-v2026.251.1947}" not in text,
