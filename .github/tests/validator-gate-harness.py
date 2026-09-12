@@ -55,8 +55,10 @@ SCENARIOS ASSERTED END TO END (exit code + classification output + PR comment)
   Plus structural guards: the review step contains NO in-job retry (no sleep, no
   for-attempt loop) - the R4 regression guard for the dropped retry band-aid - the
   workflow pins a charly release WITH the taxonomy marker, never the old one, and
-  the header routes the egress stall to its ACTUAL root cause + the NAMED
-  validator-egress hardening batch (owner: org infra/operator), with no
+  the header names the CORRECTED root cause (a NON-STREAMING request under a
+  whole-generation HTTP deadline that a too-short attempt cap cut off -
+  opencharly/.github#91), asserts the superseded throttled-egress RCA is GONE,
+  documents the org-settable AI_REVIEW_ATTEMPT_TIMEOUT lever, and carries no
   re-run-and-see remedy anywhere.
 
 HOW TO RUN
@@ -67,7 +69,8 @@ ENVIRONMENT NOTES
   The workflow bodies address the runner absolute paths (/tmp/review.txt,
   /tmp/review.untrusted.txt, /tmp/review.log, /tmp/inconclusive-comment.md)
   literally. This harness removes those files before and after every scenario;
-  everything else it writes lives in a temp dir.
+  everything else it writes lives in a temp dir. Because those paths are shared,
+  NEVER run two harness instances concurrently - they race on /tmp/review.log.
 """
 
 import os
@@ -419,10 +422,9 @@ SCENARIOS = [
             "validator INCONCLUSIVE",
             "provider unanswered",
             "in-job retries: none",
-            "vars.REVIEW_RUNNER_LABEL",
-            "throttles/blocks datacenter/shared runner egress",
-            "validator-egress hardening batch",
-            "org infra/operator",
+            "NON-STREAMING",
+            "900s default",
+            "FAILED TURN",
         ],
         "expect_review_outputs": {"provider_unanswered": "true", "review_rc": "1",
                                   "discarded_verdict": "false"},
@@ -438,9 +440,8 @@ SCENARIOS = [
         "expect_comment_contains": [
             "validator INCONCLUSIVE",
             "verdict-less review output",
-            "throttles/blocks datacenter/shared runner egress",
-            "validator-egress hardening batch",
-            "org infra/operator",
+            "NON-STREAMING",
+            "900s default",
         ],
         "expect_review_outputs": {"provider_unanswered": "false", "review_rc": "2",
                                   "discarded_verdict": "false"},
@@ -471,8 +472,7 @@ SCENARIOS = [
             "validator INCONCLUSIVE",
             "FAIL-CLOSED",
             "may only carry a real BLOCK finding",
-            "validator-egress hardening batch",
-            "org infra/operator",
+            "NON-STREAMING",
         ],
         "expect_review_outputs": {"provider_unanswered": "false", "review_rc": "1",
                                   "success": "false", "inconclusive": "true",
@@ -593,16 +593,19 @@ def run_harness():
          "structural: header records the T4 maintainer sign-off requirement")
     note("vars.REVIEW_RUNNER_LABEL" in text,
          "structural: header names the operator lever vars.REVIEW_RUNNER_LABEL")
-    note("INTERMITTENT and LOAD-DEPENDENT" in text,
-         "structural: header states the stall is intermittent / load-dependent")
-    note("throttles/blocks datacenter/shared runner egress" in text,
-         "structural: header names the actual root cause (provider throttling of datacenter/shared-runner egress)")
-    note("validator-egress hardening batch" in text and "org infra/operator" in text,
-         "structural: header routes the durable remedy to the named batch + owner")
+    note("NON-STREAMING request under a WHOLE-GENERATION deadline" in text,
+         "structural: header names the CORRECTED root cause (a non-streaming, "
+         "whole-generation HTTP deadline)")
+    note("throttles/blocks datacenter/shared runner egress" not in text,
+         "structural: the superseded throttled-egress RCA is GONE from the workflow "
+         "(corrected 2026-09-12 by opencharly/.github#91)")
+    note("retry the FAILED TURN" in text and "owner: plugin-review" in text,
+         "structural: header routes the durable per-turn fix to its owner (plugin-review)")
     note("remedies: re-run" not in text,
          "structural: no re-run-and-see remedy anywhere in the workflow text")
-    note("Neither a longer AI_REVIEW_ATTEMPT_TIMEOUT nor an in-job retry" in text,
-         "structural: header states that a longer timeout and an in-job retry cannot cure it")
+    note("AI_REVIEW_ATTEMPT_TIMEOUT, org-settable, default 900s" in text,
+         "structural: header documents the org-settable cap lever this workflow "
+         "passes through")
     note("${CHARLY_VERSION:-v2026.254.1902}" in text,
          "structural: the pinned charly default is the taxonomy-marker release v2026.254.1902")
     note("${CHARLY_VERSION:-v2026.251.1947}" not in text,

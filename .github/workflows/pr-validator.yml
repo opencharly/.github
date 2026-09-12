@@ -27,52 +27,49 @@
 #                   never merge).
 #   AMBIGUOUS    -> exit 2 — mixed PASS+BLOCK lines in one review, exit 0.
 #
-# RCA 2026-09-11 (the org-wide red-gate wave).
+# RCA 2026-09-12 (CORRECTED — supersedes the 2026-09-11 "throttled datacenter
+# egress" diagnosis, which was WRONG; opencharly/.github#91 carries the corrected
+# RCA and the endpoint probe that refutes it).
 # Symptom: validator runs dying with "context deadline exceeded (Client.Timeout
-# exceeded while awaiting headers)", the provider endpoint holding the request
-# with NO response headers until the HTTP client deadline fires.
+# exceeded while awaiting headers)" — no verdict, the required check RED.
 #
-# ROOT CAUSE: the provider (ollama.com) THROTTLES/BLOCKS datacenter/shared-runner
-# egress. The org already carries that precedent in THIS workflow — the
-# releases/latest redirect is "abuse-limited on shared runner IPs (curl exit 22)"
-# — and the measurements are one-sided: the same endpoint answered in 0.5s (small
-# payload), 1.55s (95KB body) and under a 12-way burst from a RESIDENTIAL path
-# (all HTTP 200), while the GitHub-hosted runner (runs-on:
-# vars.REVIEW_RUNNER_LABEL || ubuntu-latest; no self-hosted runner is registered)
-# received NO response headers at all.
+# ROOT CAUSE: a NON-STREAMING request under a WHOLE-GENERATION deadline.
+# plugin-review POSTs to the provider's /chat/completions with no `stream:true`
+# (candy/plugin-review/llm.go:92), so the client receives response headers only
+# after the ENTIRE generation has finished — all under ONE http.Client{Timeout}
+# (llm.go:80) whose built-in default is 5 minutes (review.go:28,
+# defaultAttemptTimeout). The review runs inside a 20-turn tool loop (review.go,
+# defaultMaxTurns = 20) in which every turn APPENDS its tool results (the PR
+# diff/files) to the context, and the WHOLE loop is retried as 3 attempts
+# (review.go). Turn 1 therefore succeeds quickly ("turn 1: 4 tool call(s)") and
+# turn 2 carries the ENLARGED context, whose non-streaming generation exceeds the
+# 5-minute cap — identically on all 3 attempts. That is the observed signature: a
+# completed turn 1 followed by "attempt N failed: context deadline exceeded ...
+# while awaiting headers".
 #
-# The throttle is INTERMITTENT and LOAD-DEPENDENT — NOT a permanent outage: real
-# verdicts DO occur on this same code path, during the wave itself:
-#   * opencharly/distro-cachyos#81 got a REAL BLOCK verdict from the reviewer at
-#     16:31:51Z (comment on head 1a68c74d, and again at 16:42:33Z on the re-cut
-#     head f7564dc1, whose run concluded "Gate (BLOCK)");
-#   * opencharly/charly#589 produced a REAL PASS verdict on a freshly re-cut head
-#     (run 34635539926 @ 738ac65c, 18:50-19:02Z) after an infra-class no-verdict
-#     run on the previous head;
-#   * a sibling wave PR failed on three consecutive validator runs and passed on
-#     the fourth — same head, same code.
-# Those witnesses prove the REVIEW CODE PATH IS SOUND; they are NOT a remedy —
-# walking the same throttled egress path again cannot change the provider's
-# shared-IP policy.
+# The endpoint was NEVER the problem: it answered 405 in 0.18s from a residential
+# path in the same window, and this runner DID receive a complete turn-1
+# response. There is no such thing as a "throttled egress" here. The contributing
+# defects are client-side: no explicit http.Transport (a stale keep-alive POST can
+# hang to the deadline), UNBOUNDED tool-result payloads, and a retry that re-runs
+# the WHOLE loop instead of the failed turn.
 #
-# THE DURABLE REMEDY IS A NAMED BATCH — the validator-egress hardening batch
-# (owner: org infra/operator), NOT a retry and NOT a rerun:
-#   (i)   register/point vars.REVIEW_RUNNER_LABEL at a runner whose egress can
-#         reach the provider;
-#   (ii)  evaluate a datacenter-friendly endpoint for vars.AI_REVIEW_BASE_URL /
-#         vars.AI_REVIEW_PROVIDER / vars.AI_REVIEW_MODEL;
-#   (iii) record the provider's shared-IP policy in this workflow header.
-# Neither a longer AI_REVIEW_ATTEMPT_TIMEOUT nor an in-job retry can cure this:
-# extra time cannot un-stall a stalled connection (it only lengthens every doomed
-# attempt), and an in-job retry walks the SAME path into the SAME defect — it is
-# the banned sleep/retry-on-flake, dressed up with unnamed magic numbers (R4).
-# This workflow therefore retries NOTHING: a provider-unanswered run is a class
-# to REPORT, not a flake to paper over.
+# THE FIX, TWO HALVES. (i) THIS workflow now PASSES the cap through —
+# AI_REVIEW_ATTEMPT_TIMEOUT, org-settable, default 900s — an env plugin-review has
+# always read (review.go:102) but the workflow never supplied, so no operator
+# could raise it; an enlarged context now gets room to finish. (ii) The durable
+# per-turn fixes — STREAM the completion, set an explicit http.Transport, BOUND
+# the tool-result payloads, and retry the FAILED TURN rather than the whole loop
+# — belong to plugin-review (owner: plugin-review).
+#
+# This workflow still retries NOTHING in-job (R4): a run that produced no verdict
+# is a class to REPORT, not a flake to paper over. The runner image stays
+# operator-selectable via vars.REVIEW_RUNNER_LABEL (runs-on: below).
 #
 # STRUCTURAL ANSWER (this workflow): classify a provider-unanswered run as
 # INCONCLUSIVE, report it plainly on the PR, and keep the required check RED, so
-# a stalled provider can neither silently pass code nor be mistaken for a code
-# finding. The classification consumes plugin-review's explicit terminal marker,
+# a run that produced no verdict can neither silently pass code nor be mistaken
+# for a code finding. The classification consumes plugin-review's explicit terminal marker,
 # carried by the pinned charly release below. The marker is THREE ADJACENT
 # STRING CONSTANTS in the bundled plugin-review binary — `strings` reports
 # each one verbatim, and the exact commands + their full output are in this
@@ -198,6 +195,7 @@ jobs:
           AI_REVIEW_MODEL:     ${{ inputs.ai_review_model || vars.AI_REVIEW_MODEL }}
           AI_REVIEW_BASE_URL:  ${{ inputs.ai_review_base_url || vars.AI_REVIEW_BASE_URL }}
           AI_REVIEW_MAX_TURNS: ${{ vars.AI_REVIEW_MAX_TURNS || '20' }}
+          AI_REVIEW_ATTEMPT_TIMEOUT: ${{ vars.AI_REVIEW_ATTEMPT_TIMEOUT || '900' }}
           AI_REVIEW_API_KEY:   ${{ secrets.AI_REVIEW_API_KEY }}
           REVIEW_PROMPT_PATH:  ${{ github.workspace }}/runner-config/prompt/validator.md
           REVIEW_PLAN_PATH:    ${{ github.workspace }}/runner-config/review-plan.yml
@@ -214,8 +212,8 @@ jobs:
           # bash -e must NOT abort here: a verdict-less run is a CLASS to report,
           # not a crash. Capture the exit code instead (plugin-review exits 1 on
           # the provider-unanswered class, 2 on "verdict: required but no Verdict
-          # line produced"). NO RETRY: see the RCA header — a retry on the same
-          # egress path retries the same defect (R4).
+          # line produced"). NO RETRY: see the RCA header — a retry re-runs the
+          # same doomed generation (R4).
           rc=0
           charly review --plan "$REVIEW_PLAN_PATH" --out /tmp/review.txt > /tmp/review.log 2>&1 || rc=$?
           echo "review rc=$rc"
@@ -350,7 +348,7 @@ jobs:
         run: |
           class="verdict-less review output"
           if [ "$PROVIDER_UNANSWERED" = "true" ]; then
-            class="provider unanswered (throttled datacenter/shared-runner egress) — the LLM provider returned no response headers to this runner"
+            class="provider unanswered (the provider returned no response headers within the attempt timeout)"
           elif [ "$DISCARDED_VERDICT" = "true" ]; then
             class="charly review exited rc=${REVIEW_RC} with a non-BLOCK"
             class="$class verdict — FAIL-CLOSED: a non-zero review exit may"
@@ -363,16 +361,15 @@ jobs:
             echo
             echo "- class: $class"
             echo "- review exit code: ${REVIEW_RC:-n/a}"
-            echo "- in-job retries: none — a retry walks the same egress path into the same defect (R4); the gate REPORTS the class instead of papering over it"
+            echo "- in-job retries: none — the gate REPORTS the class instead of papering over it (R4)"
             echo
-            echo '**Root cause.** The provider (ollama.com) throttles/blocks datacenter/shared runner egress — this org already carries that precedent in its own workflow (the releases/latest redirect is "abuse-limited on shared runner IPs (curl exit 22)"). The same endpoint answered in 0.5–1.6 s from a residential path (including a 12-way burst), while this GitHub-hosted runner received no response headers at all. Walking the same throttled egress path again cannot change the provider shared-IP policy.'
+            echo '**Root cause.** A NON-STREAMING request under a WHOLE-GENERATION deadline: plugin-review POSTs with no `stream:true` (candy/plugin-review/llm.go:92), so response headers arrive only when the ENTIRE generation finishes, all under one `http.Client{Timeout}` (llm.go:80) whose built-in default is 5 minutes (review.go:28). The review runs in a 20-turn tool loop that APPENDS the tool results of every turn (the PR diff/files) to the context and retries the whole loop 3 times: turn 1 completes, turn 2 carries the enlarged context and exceeds the cap. The endpoint answered 405 in 0.18s in the same window — there is no throttled egress.'
             echo
-            echo '**Durable remedy — the validator-egress hardening batch (owner: org infra/operator):**'
-            echo '1. register/point vars.REVIEW_RUNNER_LABEL at a runner whose egress can reach the provider;'
-            echo '2. evaluate a datacenter-friendly endpoint for vars.AI_REVIEW_BASE_URL / vars.AI_REVIEW_PROVIDER / vars.AI_REVIEW_MODEL;'
-            echo '3. record the provider shared-IP policy in the workflow header.'
+            echo '**Durable remedy.**'
+            echo '1. this workflow now PASSES the cap through — `AI_REVIEW_ATTEMPT_TIMEOUT` (org-settable, 900s default) — raise it if a large context still exceeds it;'
+            echo '2. plugin-review: stream the completion, set an explicit `http.Transport`, bound the tool-result payloads, and retry the FAILED TURN rather than the whole loop (owner: plugin-review).'
             echo
-            echo 'Until (1) or (2) lands this required check stays **RED**: unreviewed code must never merge.'
+            echo 'A run that produced no verdict keeps this required check **RED**: unreviewed code must never merge.'
             echo
             echo '<details><summary>Diagnostics (tail of the review log)</summary>'
             echo
@@ -383,7 +380,7 @@ jobs:
             echo '</details>'
           } > /tmp/inconclusive-comment.md
           gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file /tmp/inconclusive-comment.md || echo "::warning::could not post the INCONCLUSIVE comment (non-fatal)"
-          echo "::error::validator INCONCLUSIVE — no review verdict was produced (not a BLOCK; no code finding) — durable remedy: the validator-egress hardening batch (owner: org infra/operator); see the PR comment"
+          echo "::error::validator INCONCLUSIVE — no review verdict was produced (not a BLOCK; no code finding) — see the PR comment"
           exit 3
 
       - name: Gate (ambiguous)
