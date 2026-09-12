@@ -629,7 +629,7 @@ SCENARIOS = [
         ],
         "expect_comment_excludes": [
             "provider rejected the request",
-            "explicit REJECTION, not a stall",
+            "an explicit REJECTION",
         ],
         "expect_review_outputs": {"provider_error": "", "provider_unanswered": "false",
                                   "engine_defective": "false", "review_rc": "1",
