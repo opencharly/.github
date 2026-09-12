@@ -314,6 +314,14 @@ FAKE_CHARLY = NL.join([
     "    echo \"attempt 3 failed: Post \\\"https://provider.invalid/chat/completions\\\": context deadline exceeded (Client.Timeout exceeded while awaiting headers)\" >&2",
     "    exit 1",
     "    ;;",
+    "  provider-error)",
+    "    # The provider PARSED the request and REFUSED it (HTTP 4xx/5xx) — the class that must",
+    "    # NOT be reported under the engine streaming narrative, because the engine never ran a",
+    "    # turn. Live evidence: opencode Go answers 400 MissingSessionID for every request",
+    "    # lacking an x-opencode-session header (2026-09-12, the org-wide verdict outage).",
+    "    echo \"LLM 400: provider rejected the request (MissingSessionID: x-opencode-session required)\" >&2",
+    "    exit 1",
+    "    ;;",
     "  verdict-less)",
     "    echo \"verdict: required but no Verdict line produced\" >&2",
     "    echo \"## Review - markdown with no Verdict line\" > \"$out\"",
@@ -468,6 +476,34 @@ SCENARIOS = [
         ],
         "expect_review_outputs": {"provider_unanswered": "true", "engine_defective": "true",
                                   "review_rc": "1", "discarded_verdict": "false"},
+    },
+    {
+        # A provider HTTP rejection is its OWN class with its OWN narrative. Before this
+        # scenario existed the notice printed ONE fixed root cause for every class, so a
+        # `LLM 400 ... MissingSessionID` log was reported under the engine streaming story —
+        # a misattribution that was live org-wide on 2026-09-12. The excludes below are the
+        # point of the scenario: the RIGHT class AND the ABSENCE of the wrong narrative.
+        "name": "provider-error",
+        "fake": "provider-error",
+        "expect_exit": 3,
+        "expect_steps": ["review", "parse", "Gate (inconclusive)"],
+        "expect_verdict": "INCONCLUSIVE",
+        "expect_comment": True,
+        "expect_auto_merge": False,
+        "expect_comment_contains": [
+            "validator INCONCLUSIVE",
+            "provider rejected the request (HTTP 400)",
+            "explicit REJECTION, not a stall",
+            "read the provider message in the diagnostics",
+            "do NOT retry blindly",
+        ],
+        "expect_comment_excludes": [
+            "NON-STREAMING request under a WHOLE-GENERATION deadline",
+            "verdict-less review output",
+        ],
+        "expect_review_outputs": {"provider_error": "400", "provider_unanswered": "false",
+                                  "engine_defective": "false", "review_rc": "1",
+                                  "discarded_verdict": "false"},
     },
     {
         "name": "verdict-less",
@@ -747,6 +783,12 @@ def run_harness():
         for needle in spec.get("expect_comment_contains", []):
             note(needle in result["comment"],
                  prefix + "comment body contains " + repr(needle))
+        # A MISATTRIBUTED root cause is invisible to a positive assertion: a notice can name
+        # the right class and still carry the wrong narrative (exactly what happened on
+        # 2026-09-12, org-wide). This lets a scenario assert what must NOT appear.
+        for needle in spec.get("expect_comment_excludes", []):
+            note(needle not in result["comment"],
+                 prefix + "comment body does NOT contain " + repr(needle))
 
     print(NL.join(log))
     failed = [message for ok, message in checks if not ok]
