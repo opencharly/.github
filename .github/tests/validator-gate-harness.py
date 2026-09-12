@@ -218,7 +218,7 @@ def read_block(block_lines, start):
 
 
 def parse_step(block_lines):
-    step = {"name": None, "id": None, "if": None, "env": {}, "run": None}
+    step = {"name": None, "id": None, "if": None, "continue-on-error": None, "env": {}, "run": None}
     lines = [" " * KEY_INDENT + block_lines[0][len(STEP_PREFIX):]] + block_lines[1:]
     i = 0
     while i < len(lines):
@@ -234,7 +234,7 @@ def parse_step(block_lines):
         key, _, value = stripped.partition(":")
         key = key.strip()
         value = value.strip()
-        if key in ("name", "id", "if"):
+        if key in ("name", "id", "if", "continue-on-error"):
             step[key] = unquote(value)
             i += 1
         elif key == "run":
@@ -320,6 +320,14 @@ FAKE_CHARLY = NL.join([
     "    # turn. Live evidence: opencode Go answers 400 MissingSessionID for every request",
     "    # lacking an x-opencode-session header (2026-09-12, the org-wide verdict outage).",
     "    echo \"LLM 400: provider rejected the request (MissingSessionID: x-opencode-session required)\" >&2",
+    "    exit 1",
+    "    ;;",
+    "  unanswered-plus-error)",
+    "    # PROVIDER_UNANSWERED (a stall marker) + PROVIDER_ERROR (an HTTP refusal) with NO",
+    "    # completed turn 1. The plain provider branch used to deny that the no-headers class",
+    "    # applied here, contradicting its own inputs; the composite branch describes both.",
+    "    echo \"attempt 1 failed: LLM 400: the endpoint refused the request\" >&2",
+    "    echo \"attempt 2 failed: Post \\\"https://provider.invalid/chat/completions\\\": context deadline exceeded (Client.Timeout exceeded while awaiting headers)\" >&2",
     "    exit 1",
     "    ;;",
     "  mixed-signals)",
@@ -518,7 +526,7 @@ SCENARIOS = [
         "expect_comment_contains": [
             "validator INCONCLUSIVE",
             "provider rejected the request (HTTP 400)",
-            "explicit REJECTION, not a stall",
+            "an explicit REJECTION",
             "read the provider message in the diagnostics",
             "do NOT retry blindly",
         ],
@@ -541,6 +549,44 @@ SCENARIOS = [
         ],
     },
     {
+        # PROVIDER_ERROR + PROVIDER_UNANSWERED with NO completed turn 1: the case where the
+        # plain provider branch used to print a denial its own class inputs contradicted.
+        "name": "unanswered-plus-error",
+        "fake": "unanswered-plus-error",
+        "expect_exit": 3,
+        "expect_steps": ["review", "parse", "Gate (inconclusive)", "evidence"],
+        "expect_verdict": "INCONCLUSIVE",
+        "expect_comment": True,
+        "expect_auto_merge": False,
+        "expect_comment_contains": [
+            "validator INCONCLUSIVE",
+            "provider rejected the request (HTTP 400) and another attempt stalled without headers",
+            "This log carries BOTH signatures",
+        ],
+        "expect_comment_excludes": [
+            "neither of those classes describes",
+            "the engine never got to run a turn",
+        ],
+        "expect_review_outputs": {"provider_error": "400", "provider_unanswered": "true",
+                                  "engine_defective": "false", "review_rc": "1",
+                                  "discarded_verdict": "false"},
+    },
+    {
+        # continue-on-error on the reporting steps: the evidence step FAILS (its RUNNER_TEMP is
+        # unwritable) and the job must STILL keep the verdict it produced — exit 0 and the
+        # armed auto-merge, not a red check on a PASS run.
+        "name": "pass-with-unwritable-evidence",
+        "fake": "pass",
+        "unwritable_evidence": True,
+        "expect_exit": 0,
+        "expect_steps": ["review", "parse", "Enable auto-merge", "evidence"],
+        "expect_verdict": "PASS",
+        "expect_comment": False,
+        "expect_auto_merge": True,
+        "expect_review_outputs": {"provider_unanswered": "false", "review_rc": "0",
+                                  "discarded_verdict": "false"},
+    },
+    {
         # BOTH signals in one log — the case the extractor's precedence must get right. Before
         # the composed branch, the provider branch won and asserted "the engine never got to run
         # a turn" while the log showed turn 1 COMPLETED: the same misattribution class this PR
@@ -558,8 +604,8 @@ SCENARIOS = [
             "the enlarged-context class",
         ],
         "expect_comment_excludes": [
-            "No COMPLETED turn precedes it in this log",
             "the engine never got to run a turn",
+            "neither of those classes describes",
         ],
         "expect_review_outputs": {"provider_error": "400", "provider_unanswered": "true",
                                   "engine_defective": "true", "review_rc": "1",
@@ -597,11 +643,15 @@ SCENARIOS = [
         "expect_verdict": "INCONCLUSIVE",
         "expect_comment": True,
         "expect_auto_merge": False,
+        # The DEFAULT narrative is evidence-bounded: a log with none of the recognised
+        # signatures must NOT be told the streaming story as fact (the review's block 3).
         "expect_comment_contains": [
             "validator INCONCLUSIVE",
             "verdict-less review output",
-            "NON-STREAMING",
-            "300s default",
+            "carries NONE of the recognised signatures",
+        ],
+        "expect_comment_excludes": [
+            "NON-STREAMING request under a WHOLE-GENERATION deadline",
         ],
         "expect_review_outputs": {"provider_unanswered": "false", "review_rc": "2",
                                   "discarded_verdict": "false"},
@@ -632,7 +682,7 @@ SCENARIOS = [
             "validator INCONCLUSIVE",
             "FAIL-CLOSED",
             "may only carry a real BLOCK finding",
-            "NON-STREAMING",
+            "untrustworthy by construction",
         ],
         "expect_review_outputs": {"provider_unanswered": "false", "review_rc": "1",
                                   "success": "false", "inconclusive": "true",
@@ -713,8 +763,14 @@ def run_scenario(spec, ordered, tmpdir, fakedir, workspace):
         # CONTENT — a debugging-output claim is only proven by reading what it wrote.
         summary_path = os.path.join(tmpdir, stem + ".step_summary")
         open(summary_path, "w").close()
-        env["RUNNER_TEMP"] = tmpdir
-        env["GITHUB_STEP_SUMMARY"] = summary_path
+        if spec.get("unwritable_evidence"):
+            # A REPORTING failure must not change the verdict (continue-on-error). Point the
+            # evidence step at paths it cannot write and assert the job keeps its exit code.
+            env["RUNNER_TEMP"] = "/proc/validator-evidence-unwritable"
+            env["GITHUB_STEP_SUMMARY"] = "/proc/validator-evidence-unwritable/summary"
+        else:
+            env["RUNNER_TEMP"] = tmpdir
+            env["GITHUB_STEP_SUMMARY"] = summary_path
         for key, value in step["env"].items():
             env[key] = subst(value, ns)
         script_path = os.path.join(tmpdir, stem + ".sh")
@@ -738,11 +794,18 @@ def run_scenario(spec, ordered, tmpdir, fakedir, workspace):
             outputs[step["id"]] = step_outputs[step["id"]]
             ns = build_ns(outputs, workspace, tmpdir)
         if proc.returncode != 0:
-            if job_exit == 0:
-                job_exit = proc.returncode
-            job_failed = True
-            transcript.append("  -> step failed (exit " + str(proc.returncode) +
-                              "); later steps run only when they declare always()")
+            # continue-on-error: GitHub does NOT fail the job for this step. Modelled here
+            # because a declaration nobody can exercise is not a contract — the evidence steps
+            # rely on it so a reporting failure can never turn a PASS run RED.
+            if step.get("continue-on-error") == "true":
+                transcript.append("  -> step failed (exit " + str(proc.returncode) +
+                                  "), continue-on-error: the job keeps its verdict")
+            else:
+                if job_exit == 0:
+                    job_exit = proc.returncode
+                job_failed = True
+                transcript.append("  -> step failed (exit " + str(proc.returncode) +
+                                  "); later steps run only when they declare always()")
 
     with open(comment_path, "r", encoding="utf-8") as fh:
         comment = fh.read()

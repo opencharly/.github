@@ -417,13 +417,14 @@ jobs:
           REVIEW_RC: ${{ steps.review.outputs.review_rc }}
         run: |
           class="verdict-less review output"
-          # The root-cause narrative is CLASS-AWARE. Printing ONE fixed cause for every class
-          # is how a provider HTTP rejection came to be reported under the engine streaming
-          # story (2026-09-12, every org run): the class and its narrative must agree, so each
-          # branch names the cause ITS OWN evidence supports.
-          rootcause='**Root cause.** A NON-STREAMING request under a WHOLE-GENERATION deadline: plugin-review POSTs with no `stream:true` (candy/plugin-review/llm.go:92), so response headers arrive only when the ENTIRE generation finishes, all under one `http.Client{Timeout}` (llm.go:80) whose built-in default is 5 minutes (review.go:28). The review runs in a 20-turn tool loop that APPENDS the tool results of every turn (the PR diff/files) to the context and retries the whole loop up to AI_REVIEW_MAX_ATTEMPTS times (3 in the pinned bundle; 1 once the fail-fast wiring activates): turn 1 completes, and turn 2 — carrying the enlarged context — fails in ONE OF TWO OBSERVED ways: it returns EMPTY content (`turn 2: final content len=0`, observed on 2 of the 3 attempts in run 34682776608) or it exceeds the 5-minute cap (observed on the third). Both are one defect class — an unbounded, non-streaming request whose context grew. The endpoint answered 405 in 0.18s in the same window — there is no throttled egress.'
-          remedy1='1. this workflow now PASSES the cap through — `AI_REVIEW_ATTEMPT_TIMEOUT` (org-settable, 300s default) — raise it if a large context still exceeds it;'
-          remedy2='2. plugin-review: stream the completion, set an explicit `http.Transport`, bound the tool-result payloads, and retry the FAILED TURN rather than the whole loop (owner: plugin-review).'
+          # The narrative is CLASS-AWARE and the DEFAULT is EVIDENCE-BOUNDED. The shared
+          # streaming narrative is assigned ONLY to the classes whose signature it describes
+          # (narrative=streaming, below) — never as a fall-through, because a fall-through
+          # asserts a cause the log does not support, which is the misattribution this removes.
+          rootcause="**Root cause.** The review plan produced no Verdict line, and this log carries NONE of the recognised signatures: no completed turn 1, no stall marker, and no HTTP rejection. The gate therefore REPORTS the class instead of inventing a cause."
+          remedy1="1. open the diagnostics tail below — it names the failing step;"
+          remedy2="2. classify from THAT evidence (a provider status, a stall, a timeout, a crashed plan) rather than from this template."
+          narrative=""
           # BOTH signals first. A log that shows a COMPLETED turn 1 AND an HTTP rejection is not a
           # plain protocol fault: the refusal lands on a LATER request whose context each turn
           # enlarged — the engine-defective class (opencharly/.github#97) with a specific status,
@@ -434,19 +435,37 @@ jobs:
             rootcause="**Root cause.** The engine COMPLETED turn 1 (the endpoint answered) and the provider then REFUSED a later request with **HTTP ${PROVIDER_ERROR}**: each turn appends its tool results to the context, and past a size or rate limit the endpoint rejects the request outright. Both facts are in the diagnostics below. This is therefore NOT reported as a plain protocol fault — the rejection is a SYMPTOM of the unbounded context growth, and the durable fix is the engine's bound on tool-result payloads (owner: plugin-review)."
             remedy1="1. read the provider message in the diagnostics — it names the limit it enforced;"
             remedy2="2. treat it as the context-growth class: raising a cap or retrying does not shrink the request (R4)."
+          elif [ -n "$PROVIDER_ERROR" ] && [ "$PROVIDER_UNANSWERED" = "true" ]; then
+            class="provider rejected the request (HTTP ${PROVIDER_ERROR}) and another attempt stalled without headers — the unbounded-context class (opencharly/.github#97)"
+            rootcause="**Root cause.** This log carries BOTH signatures: the endpoint REFUSED a request with **HTTP ${PROVIDER_ERROR}**, and another attempt stalled without response headers. Neither is asserted alone, because both are the unbounded-context class — each turn appends its tool results, and past a size or rate limit the request is either refused outright or is too large to answer. This is neither a credentials fault nor a blind-retry case."
+            remedy1="1. read the provider message in the diagnostics — it names the limit it enforced;"
+            remedy2="2. treat it as the context-growth class: raising a cap or retrying does not shrink the request (R4)."
           elif [ -n "$PROVIDER_ERROR" ]; then
             class="provider rejected the request (HTTP ${PROVIDER_ERROR}) — a provider/protocol/config matter, not an engine verdict"
-            rootcause="**Root cause.** The model endpoint answered **HTTP ${PROVIDER_ERROR}** — an explicit REJECTION, not a stall: the provider parsed the request and refused it, and its own message is in the diagnostics below. No COMPLETED turn precedes it in this log (the engine logs \`turn N: …\` for every turn it finishes), so the streaming and no-headers classes do NOT apply to this run."
+            rootcause="**Root cause.** The model endpoint answered **HTTP ${PROVIDER_ERROR}** — an explicit REJECTION: the provider parsed the request and refused it, and its own message is in the diagnostics below. This log carries NO stall marker (which is what the no-headers class requires) and no completed-turn-1-then-stall pair (which is the engine-defective signature), so neither of those classes describes this run: the rejection itself is the cause."
             remedy1="1. read the provider message in the diagnostics below — it names the missing or wrong element;"
             remedy2="2. fix it at the review client or in the org AI_REVIEW_* variables, then re-run. An HTTP rejection is deterministic — do NOT retry blindly (R4)."
           elif [ "$ENGINE_DEFECTIVE" = "true" ]; then
             class="engine-defective (the review engine completed turn 1 and failed a later turn — the context-dependent timeout/empty-content class; opencharly/.github#97, see the T13 engine-change exception)"
+            narrative="streaming"
           elif [ "$PROVIDER_UNANSWERED" = "true" ]; then
             class="provider unanswered (the provider returned no response headers within the attempt timeout)"
+            narrative="streaming"
           elif [ "$DISCARDED_VERDICT" = "true" ]; then
             class="charly review exited rc=${REVIEW_RC} with a non-BLOCK"
             class="$class verdict — FAIL-CLOSED: a non-zero review exit may"
             class="$class only carry a real BLOCK finding, discarded"
+            rootcause='**Root cause.** The review exited non-zero and had written a verdict that is NOT BLOCK. That verdict is untrustworthy by construction (T3/T4): a crashed or non-clean run may only carry a real BLOCK finding, so the file was moved aside and the run is INCONCLUSIVE rather than a pass.'
+            remedy1="1. re-run once the engine is healthy;"
+            remedy2="2. never treat a non-zero run PASS as a verdict — fail-closed is by design (T3/T4)."
+          fi
+          # The streaming narrative is assigned ONLY here, to the classes whose signature it
+          # describes. No branch above falls through to it (see the bounded default), so a log
+          # without that signature cannot receive it.
+          if [ "$narrative" = "streaming" ]; then
+            rootcause='**Root cause.** A NON-STREAMING request under a WHOLE-GENERATION deadline: plugin-review POSTs with no `stream:true` (candy/plugin-review/llm.go:92), so response headers arrive only when the ENTIRE generation finishes, all under one `http.Client{Timeout}` (llm.go:80) whose built-in default is 5 minutes (review.go:28). The review runs in a 20-turn tool loop that APPENDS the tool results of every turn (the PR diff/files) to the context and retries the whole loop up to AI_REVIEW_MAX_ATTEMPTS times (3 in the pinned bundle; 1 once the fail-fast wiring activates): turn 1 completes, and turn 2 — carrying the enlarged context — fails in ONE OF TWO OBSERVED ways: it returns EMPTY content (`turn 2: final content len=0`, observed on 2 of the 3 attempts in run 34682776608) or it exceeds the 5-minute cap (observed on the third). Both are one defect class — an unbounded, non-streaming request whose context grew. The endpoint answered 405 in 0.18s in the same window — there is no throttled egress.'
+            remedy1='1. this workflow now PASSES the cap through — `AI_REVIEW_ATTEMPT_TIMEOUT` (org-settable, 300s default) — raise it if a large context still exceeds it;'
+            remedy2='2. plugin-review: stream the completion, set an explicit `http.Transport`, bound the tool-result payloads, and retry the FAILED TURN rather than the whole loop (owner: plugin-review).'
           fi
           {
             echo '## validator INCONCLUSIVE — no review verdict was produced (not a BLOCK; no code finding)'
