@@ -218,7 +218,7 @@ def read_block(block_lines, start):
 
 
 def parse_step(block_lines):
-    step = {"name": None, "id": None, "if": None, "env": {}, "run": None}
+    step = {"name": None, "id": None, "if": None, "continue-on-error": None, "env": {}, "run": None}
     lines = [" " * KEY_INDENT + block_lines[0][len(STEP_PREFIX):]] + block_lines[1:]
     i = 0
     while i < len(lines):
@@ -234,7 +234,7 @@ def parse_step(block_lines):
         key, _, value = stripped.partition(":")
         key = key.strip()
         value = value.strip()
-        if key in ("name", "id", "if"):
+        if key in ("name", "id", "if", "continue-on-error"):
             step[key] = unquote(value)
             i += 1
         elif key == "run":
@@ -312,6 +312,38 @@ FAKE_CHARLY = NL.join([
     "    # notice omits the class.",
     "    echo \"turn 1: 4 tool call(s)\" >&2",
     "    echo \"attempt 3 failed: Post \\\"https://provider.invalid/chat/completions\\\": context deadline exceeded (Client.Timeout exceeded while awaiting headers)\" >&2",
+    "    exit 1",
+    "    ;;",
+    "  provider-error)",
+    "    # The provider PARSED the request and REFUSED it (HTTP 4xx/5xx) — the class that must",
+    "    # NOT be reported under the engine streaming narrative, because the engine never ran a",
+    "    # turn. Live evidence: opencode Go answers 400 MissingSessionID for every request",
+    "    # lacking an x-opencode-session header (2026-09-12, the org-wide verdict outage).",
+    "    echo \"LLM 400: provider rejected the request (MissingSessionID: x-opencode-session required)\" >&2",
+    "    exit 1",
+    "    ;;",
+    "  unanswered-plus-error)",
+    "    # PROVIDER_UNANSWERED (a stall marker) + PROVIDER_ERROR (an HTTP refusal) with NO",
+    "    # completed turn 1. The plain provider branch used to deny that the no-headers class",
+    "    # applied here, contradicting its own inputs; the composite branch describes both.",
+    "    echo \"attempt 1 failed: LLM 400: the endpoint refused the request\" >&2",
+    "    echo \"attempt 2 failed: Post \\\"https://provider.invalid/chat/completions\\\": context deadline exceeded (Client.Timeout exceeded while awaiting headers)\" >&2",
+    "    exit 1",
+    "    ;;",
+    "  mixed-signals)",
+    "    # BOTH markers: a completed turn 1 (engine_defective, once a provider marker is present)",
+    "    # AND an explicit HTTP rejection. The COMPOSED class must win — narrating the plain",
+    "    # protocol fault here would deny that the engine ever ran a turn, contradicting the log.",
+    "    echo \"turn 1: 4 tool call(s)\" >&2",
+    "    echo \"attempt 2 failed: Post \\\"https://provider.invalid/chat/completions\\\": context deadline exceeded (Client.Timeout exceeded while awaiting headers)\" >&2",
+    "    echo \"attempt 3 failed: LLM 400: the enlarged context was refused by the endpoint\" >&2",
+    "    exit 1",
+    "    ;;",
+    "  non-error-status)",
+    "    # A verdict-less log that ALSO carries a NON-ERROR status line. The extractor must not",
+    "    # read it as a provider rejection: a 2xx is not a refusal, and reporting it as one would",
+    "    # preempt the engine-defective class — the same misattribution this change fixes, inverted.",
+    "    echo \"LLM 200: an empty-but-successful response body\" >&2",
     "    exit 1",
     "    ;;",
     "  verdict-less)",
@@ -405,6 +437,10 @@ TARGETS = [
     ("name", "Gate (inconclusive)"),
     ("name", "Gate (ambiguous)"),
     ("name", "Enable auto-merge"),
+    # The evidence step runs on `if: always()`, so it is exercised on every scenario —
+    # including the failing ones (which is the whole point: the evidence exists when the
+    # run WENT WRONG). Its content is asserted per scenario via expect_summary_contains.
+    ("id", "evidence"),
 ]
 
 SCENARIOS = [
@@ -412,7 +448,12 @@ SCENARIOS = [
         "name": "pass",
         "fake": "pass",
         "expect_exit": 0,
-        "expect_steps": ["review", "parse", "Enable auto-merge"],
+        "expect_steps": ["review", "parse", "Enable auto-merge", "evidence"],
+        "expect_summary_contains": [
+            "## Validator evidence",
+            "| review exit code |",
+            "| class inputs |",
+        ],
         "expect_verdict": "PASS",
         "expect_comment": False,
         "expect_auto_merge": True,
@@ -423,7 +464,7 @@ SCENARIOS = [
         "name": "block",
         "fake": "block",
         "expect_exit": 1,
-        "expect_steps": ["review", "parse", "Gate (BLOCK)"],
+        "expect_steps": ["review", "parse", "Gate (BLOCK)", "evidence"],
         "expect_verdict": "BLOCK",
         "expect_comment": False,
         "expect_auto_merge": False,
@@ -433,7 +474,7 @@ SCENARIOS = [
         "name": "provider-unanswered",
         "fake": "provider-unanswered",
         "expect_exit": 3,
-        "expect_steps": ["review", "parse", "Gate (inconclusive)"],
+        "expect_steps": ["review", "parse", "Gate (inconclusive)", "evidence"],
         "expect_verdict": "INCONCLUSIVE",
         "expect_comment": True,
         "expect_auto_merge": False,
@@ -457,7 +498,7 @@ SCENARIOS = [
         "name": "engine-defective",
         "fake": "engine-defective",
         "expect_exit": 3,
-        "expect_steps": ["review", "parse", "Gate (inconclusive)"],
+        "expect_steps": ["review", "parse", "Gate (inconclusive)", "evidence"],
         "expect_verdict": "INCONCLUSIVE",
         "expect_comment": True,
         "expect_auto_merge": False,
@@ -470,18 +511,147 @@ SCENARIOS = [
                                   "review_rc": "1", "discarded_verdict": "false"},
     },
     {
-        "name": "verdict-less",
-        "fake": "verdict-less",
+        # A provider HTTP rejection is its OWN class with its OWN narrative. Before this
+        # scenario existed the notice printed ONE fixed root cause for every class, so a
+        # `LLM 400 ... MissingSessionID` log was reported under the engine streaming story —
+        # a misattribution that was live org-wide on 2026-09-12. The excludes below are the
+        # point of the scenario: the RIGHT class AND the ABSENCE of the wrong narrative.
+        "name": "provider-error",
+        "fake": "provider-error",
         "expect_exit": 3,
-        "expect_steps": ["review", "parse", "Gate (inconclusive)"],
+        "expect_steps": ["review", "parse", "Gate (inconclusive)", "evidence"],
+        "expect_verdict": "INCONCLUSIVE",
+        "expect_comment": True,
+        "expect_auto_merge": False,
+        "expect_comment_contains": [
+            "validator INCONCLUSIVE",
+            "provider rejected the request (HTTP 400)",
+            "an explicit REJECTION",
+            "read the provider message in the diagnostics",
+            "do NOT retry blindly",
+        ],
+        "expect_comment_excludes": [
+            "NON-STREAMING request under a WHOLE-GENERATION deadline",
+            "verdict-less review output",
+        ],
+        "expect_review_outputs": {"provider_error": "400", "provider_unanswered": "false",
+                                  "engine_defective": "false", "review_rc": "1",
+                                  "discarded_verdict": "false"},
+        # The ALWAYS-present surface: a reader opening the failed run finds the class and the
+        # effective configuration on the Summary page — no PR-comment round trip, no log hunt.
+        "expect_summary_contains": [
+            "## Validator evidence",
+            "| review exit code |",
+            "| provider HTTP error |",
+            "400",
+            "| class inputs |",
+            "| provider / model / base_url |",
+        ],
+    },
+    {
+        # PROVIDER_ERROR + PROVIDER_UNANSWERED with NO completed turn 1: the case where the
+        # plain provider branch used to print a denial its own class inputs contradicted.
+        "name": "unanswered-plus-error",
+        "fake": "unanswered-plus-error",
+        "expect_exit": 3,
+        "expect_steps": ["review", "parse", "Gate (inconclusive)", "evidence"],
+        "expect_verdict": "INCONCLUSIVE",
+        "expect_comment": True,
+        "expect_auto_merge": False,
+        "expect_comment_contains": [
+            "validator INCONCLUSIVE",
+            "provider rejected the request (HTTP 400) and another attempt stalled without headers",
+            "This log carries BOTH signatures",
+        ],
+        "expect_comment_excludes": [
+            "neither of those classes describes",
+            "the engine never got to run a turn",
+        ],
+        "expect_review_outputs": {"provider_error": "400", "provider_unanswered": "true",
+                                  "engine_defective": "false", "review_rc": "1",
+                                  "discarded_verdict": "false"},
+    },
+    {
+        # continue-on-error on the reporting steps: the evidence step FAILS (its RUNNER_TEMP is
+        # unwritable) and the job must STILL keep the verdict it produced — exit 0 and the
+        # armed auto-merge, not a red check on a PASS run.
+        "name": "pass-with-unwritable-evidence",
+        "fake": "pass",
+        "unwritable_evidence": True,
+        "expect_exit": 0,
+        "expect_steps": ["review", "parse", "Enable auto-merge", "evidence"],
+        "expect_verdict": "PASS",
+        "expect_comment": False,
+        "expect_auto_merge": True,
+        "expect_review_outputs": {"provider_unanswered": "false", "review_rc": "0",
+                                  "discarded_verdict": "false"},
+    },
+    {
+        # BOTH signals in one log — the case the extractor's precedence must get right. Before
+        # the composed branch, the provider branch won and asserted "the engine never got to run
+        # a turn" while the log showed turn 1 COMPLETED: the same misattribution class this PR
+        # removes, inverted.
+        "name": "mixed-signals",
+        "fake": "mixed-signals",
+        "expect_exit": 3,
+        "expect_steps": ["review", "parse", "Gate (inconclusive)", "evidence"],
+        "expect_verdict": "INCONCLUSIVE",
+        "expect_comment": True,
+        "expect_auto_merge": False,
+        "expect_comment_contains": [
+            "validator INCONCLUSIVE",
+            "provider rejected a LATER request (HTTP 400) after turn 1 completed",
+            "the enlarged-context class",
+        ],
+        "expect_comment_excludes": [
+            "the engine never got to run a turn",
+            "neither of those classes describes",
+        ],
+        "expect_review_outputs": {"provider_error": "400", "provider_unanswered": "true",
+                                  "engine_defective": "true", "review_rc": "1",
+                                  "discarded_verdict": "false"},
+    },
+    {
+        # The BOUNDARY the extractor must respect. Before the pattern was narrowed to [45]xx,
+        # this log produced a confident "provider rejected the request" class AND preempted the
+        # engine-defective branch — a misattribution manufactured by the fix itself. R10: a
+        # test that fails on a non-error status.
+        "name": "non-error-status",
+        "fake": "non-error-status",
+        "expect_exit": 3,
+        "expect_steps": ["review", "parse", "Gate (inconclusive)", "evidence"],
         "expect_verdict": "INCONCLUSIVE",
         "expect_comment": True,
         "expect_auto_merge": False,
         "expect_comment_contains": [
             "validator INCONCLUSIVE",
             "verdict-less review output",
-            "NON-STREAMING",
-            "300s default",
+        ],
+        "expect_comment_excludes": [
+            "provider rejected the request",
+            "an explicit REJECTION",
+        ],
+        "expect_review_outputs": {"provider_error": "", "provider_unanswered": "false",
+                                  "engine_defective": "false", "review_rc": "1",
+                                  "discarded_verdict": "false"},
+    },
+    {
+        "name": "verdict-less",
+        "fake": "verdict-less",
+        "expect_exit": 3,
+        "expect_steps": ["review", "parse", "Gate (inconclusive)", "evidence"],
+        "expect_verdict": "INCONCLUSIVE",
+        "expect_comment": True,
+        "expect_auto_merge": False,
+        # The DEFAULT narrative is evidence-bounded: a log with none of the recognised
+        # signatures must NOT be told the streaming story as fact (the review's block 3).
+        "expect_comment_contains": [
+            "validator INCONCLUSIVE",
+            "verdict-less review output",
+            "carries NONE of the recognised signatures",
+        ],
+        "expect_comment_excludes": [
+            "NON-STREAMING request under a WHOLE-GENERATION deadline",
         ],
         "expect_review_outputs": {"provider_unanswered": "false", "review_rc": "2",
                                   "discarded_verdict": "false"},
@@ -490,7 +660,7 @@ SCENARIOS = [
         "name": "mixed",
         "fake": "mixed",
         "expect_exit": 2,
-        "expect_steps": ["review", "parse", "Gate (ambiguous)"],
+        "expect_steps": ["review", "parse", "Gate (ambiguous)", "evidence"],
         "expect_verdict": "AMBIGUOUS",
         "expect_comment": False,
         "expect_auto_merge": False,
@@ -504,7 +674,7 @@ SCENARIOS = [
         "name": "pass-with-error",
         "fake": "pass-with-error",
         "expect_exit": 3,
-        "expect_steps": ["review", "parse", "Gate (inconclusive)"],
+        "expect_steps": ["review", "parse", "Gate (inconclusive)", "evidence"],
         "expect_verdict": "INCONCLUSIVE",
         "expect_comment": True,
         "expect_auto_merge": False,
@@ -512,7 +682,7 @@ SCENARIOS = [
             "validator INCONCLUSIVE",
             "FAIL-CLOSED",
             "may only carry a real BLOCK finding",
-            "NON-STREAMING",
+            "untrustworthy by construction",
         ],
         "expect_review_outputs": {"provider_unanswered": "false", "review_rc": "1",
                                   "success": "false", "inconclusive": "true",
@@ -525,7 +695,7 @@ SCENARIOS = [
         "name": "block-with-error",
         "fake": "block-with-error",
         "expect_exit": 1,
-        "expect_steps": ["review", "parse", "Gate (BLOCK)"],
+        "expect_steps": ["review", "parse", "Gate (BLOCK)", "evidence"],
         "expect_verdict": "BLOCK",
         "expect_comment": False,
         "expect_auto_merge": False,
@@ -548,15 +718,34 @@ def run_scenario(spec, ordered, tmpdir, fakedir, workspace):
     outputs = {}
     ns = build_ns(outputs, workspace, tmpdir)
     executed = []
+    skipped = []
     transcript = []
     job_exit = 0
+    job_failed = False
     step_outputs = {}
+    summary_path = ""
 
     for _, step in ordered:
         name = step["label"]
         condition = step["if"]
-        if condition is not None and not eval_gh(condition, ns):
-            transcript.append("  [" + name + "] skipped (if: " + condition + ")")
+        # GitHub semantics, modelled correctly. A failed step does NOT end the job: a later
+        # step runs when its `if:` is a STATUS function (always()), and both a step with no
+        # `if:` and a step with a plain expression carry an IMPLICIT success() — so they are
+        # SKIPPED once a step has failed. The previous model broke out of the loop on the
+        # first failure ("the job stops here, exactly as GitHub would" — it does not), which
+        # is precisely why an `if: always()` evidence step could never be exercised here.
+        if condition is None:
+            run = not job_failed
+        elif "always()" in condition:
+            run = True
+        elif job_failed:
+            run = False
+        else:
+            run = eval_gh(condition, ns)
+        if not run:
+            skipped.append(name)
+            reason = ("if: " + condition) if condition else "a failed earlier step (implicit success())"
+            transcript.append("  [" + name + "] skipped (" + reason + ")")
             continue
         env = dict(os.environ)
         env["PATH"] = fakedir + os.pathsep + env.get("PATH", "")
@@ -569,6 +758,19 @@ def run_scenario(spec, ordered, tmpdir, fakedir, workspace):
         out_file = os.path.join(tmpdir, stem + ".github_output")
         open(out_file, "w").close()
         env["GITHUB_OUTPUT"] = out_file
+        # The evidence step writes the run Summary and a manifest under RUNNER_TEMP. Both
+        # are real files in CI, so the harness supplies REAL paths and asserts their
+        # CONTENT — a debugging-output claim is only proven by reading what it wrote.
+        summary_path = os.path.join(tmpdir, stem + ".step_summary")
+        open(summary_path, "w").close()
+        if spec.get("unwritable_evidence"):
+            # A REPORTING failure must not change the verdict (continue-on-error). Point the
+            # evidence step at paths it cannot write and assert the job keeps its exit code.
+            env["RUNNER_TEMP"] = "/proc/validator-evidence-unwritable"
+            env["GITHUB_STEP_SUMMARY"] = "/proc/validator-evidence-unwritable/summary"
+        else:
+            env["RUNNER_TEMP"] = tmpdir
+            env["GITHUB_STEP_SUMMARY"] = summary_path
         for key, value in step["env"].items():
             env[key] = subst(value, ns)
         script_path = os.path.join(tmpdir, stem + ".sh")
@@ -592,9 +794,18 @@ def run_scenario(spec, ordered, tmpdir, fakedir, workspace):
             outputs[step["id"]] = step_outputs[step["id"]]
             ns = build_ns(outputs, workspace, tmpdir)
         if proc.returncode != 0:
-            job_exit = proc.returncode
-            transcript.append("  -> the job stops here, exactly as GitHub would")
-            break
+            # continue-on-error: GitHub does NOT fail the job for this step. Modelled here
+            # because a declaration nobody can exercise is not a contract — the evidence steps
+            # rely on it so a reporting failure can never turn a PASS run RED.
+            if step.get("continue-on-error") == "true":
+                transcript.append("  -> step failed (exit " + str(proc.returncode) +
+                                  "), continue-on-error: the job keeps its verdict")
+            else:
+                if job_exit == 0:
+                    job_exit = proc.returncode
+                job_failed = True
+                transcript.append("  -> step failed (exit " + str(proc.returncode) +
+                                  "); later steps run only when they declare always()")
 
     with open(comment_path, "r", encoding="utf-8") as fh:
         comment = fh.read()
@@ -603,13 +814,19 @@ def run_scenario(spec, ordered, tmpdir, fakedir, workspace):
     for path in RUNNER_PATHS:
         if os.path.exists(path):
             os.remove(path)
+    summary = ""
+    if summary_path and os.path.exists(summary_path):
+        with open(summary_path, "r", encoding="utf-8") as fh:
+            summary = fh.read()
     return {
         "transcript": transcript,
         "job_exit": job_exit,
         "executed": executed,
+        "skipped": skipped,
         "outputs": step_outputs,
         "comment": comment,
         "calls": calls,
+        "summary": summary,
     }
 
 
@@ -747,6 +964,17 @@ def run_harness():
         for needle in spec.get("expect_comment_contains", []):
             note(needle in result["comment"],
                  prefix + "comment body contains " + repr(needle))
+        # A MISATTRIBUTED root cause is invisible to a positive assertion: a notice can name
+        # the right class and still carry the wrong narrative (exactly what happened on
+        # 2026-09-12, org-wide). This lets a scenario assert what must NOT appear.
+        for needle in spec.get("expect_comment_excludes", []):
+            note(needle not in result["comment"],
+                 prefix + "comment body does NOT contain " + repr(needle))
+        # The run Summary is the second, ALWAYS-present surface: a reader who opens the
+        # failed run must find the class inputs and the effective configuration there.
+        for needle in spec.get("expect_summary_contains", []):
+            note(needle in result["summary"],
+                 prefix + "run Summary contains " + repr(needle))
 
     print(NL.join(log))
     failed = [message for ok, message in checks if not ok]

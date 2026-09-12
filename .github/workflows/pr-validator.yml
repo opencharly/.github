@@ -307,10 +307,27 @@ jobs:
              grep -qE 'turn 1: [0-9]+ tool call' /tmp/review.log; then
             engine_defective=true
           fi
+
+          # Provider HTTP rejection (the class a 4xx/5xx actually belongs to): the review
+          # client logs `LLM <status>: <body>` when the ENDPOINT parsed the request and
+          # REFUSED it — e.g. opencode Go answering 400 MissingSessionID. That is a
+          # provider/protocol/configuration matter, NOT the engine streaming class, and the
+          # notice below must not assert the streaming story for it (observed 2026-09-12:
+          # every org run was reported under a narrative that blamed an already-fixed engine
+          # defect while the log carried an explicit HTTP 400).
+          provider_error=""
+          # [45][0-9][0-9] — 4xx/5xx ONLY. A broader pattern (1xx-5xx) reports a non-refusal
+          # status line as a confident provider REJECTION and, because this branch is checked
+          # FIRST, preempts the engine-defective class — the same misattribution this notice
+          # exists to remove, inverted. The `non-error-status` scenario pins that boundary.
+          if pe=$(grep -m1 -oE 'LLM [45][0-9][0-9]' /tmp/review.log); then
+            provider_error="${pe#LLM }"
+          fi
           {
             echo "review_rc=$rc"
             echo "provider_unanswered=$provider_unanswered"
             echo "engine_defective=$engine_defective"
+            echo "provider_error=$provider_error"
             echo "discarded_verdict=$discarded"
           } >> "$GITHUB_OUTPUT"
           if [ -n "$verdict" ]; then
@@ -394,19 +411,61 @@ jobs:
           PR_NUMBER: ${{ inputs.pr-number }}
           REPO: ${{ github.repository }}
           PROVIDER_UNANSWERED: ${{ steps.review.outputs.provider_unanswered }}
+          PROVIDER_ERROR: ${{ steps.review.outputs.provider_error }}
           ENGINE_DEFECTIVE: ${{ steps.review.outputs.engine_defective }}
           DISCARDED_VERDICT: ${{ steps.review.outputs.discarded_verdict }}
           REVIEW_RC: ${{ steps.review.outputs.review_rc }}
         run: |
           class="verdict-less review output"
-          if [ "$ENGINE_DEFECTIVE" = "true" ]; then
+          # The narrative is CLASS-AWARE and the DEFAULT is EVIDENCE-BOUNDED. The shared
+          # streaming narrative is assigned ONLY to the classes whose signature it describes
+          # (narrative=streaming, below) — never as a fall-through, because a fall-through
+          # asserts a cause the log does not support, which is the misattribution this removes.
+          rootcause="**Root cause.** The review plan produced no Verdict line, and this log carries NONE of the recognised signatures: no completed turn 1, no stall marker, and no HTTP rejection. The gate therefore REPORTS the class instead of inventing a cause."
+          remedy1="1. open the diagnostics tail below — it names the failing step;"
+          remedy2="2. classify from THAT evidence (a provider status, a stall, a timeout, a crashed plan) rather than from this template."
+          narrative=""
+          # BOTH signals first. A log that shows a COMPLETED turn 1 AND an HTTP rejection is not a
+          # plain protocol fault: the refusal lands on a LATER request whose context each turn
+          # enlarged — the engine-defective class (opencharly/.github#97) with a specific status,
+          # not a denial that the engine ever ran. Ordering this ahead is what makes the
+          # single-signal branch's claim below true rather than merely convenient.
+          if [ "$ENGINE_DEFECTIVE" = "true" ] && [ -n "$PROVIDER_ERROR" ]; then
+            class="provider rejected a LATER request (HTTP ${PROVIDER_ERROR}) after turn 1 completed — the enlarged-context class (opencharly/.github#97, see the T13 engine-change exception)"
+            rootcause="**Root cause.** The engine COMPLETED turn 1 (the endpoint answered) and the provider then REFUSED a later request with **HTTP ${PROVIDER_ERROR}**: each turn appends its tool results to the context, and past a size or rate limit the endpoint rejects the request outright. Both facts are in the diagnostics below. This is therefore NOT reported as a plain protocol fault — the rejection is a SYMPTOM of the unbounded context growth, and the durable fix is the engine's bound on tool-result payloads (owner: plugin-review)."
+            remedy1="1. read the provider message in the diagnostics — it names the limit it enforced;"
+            remedy2="2. treat it as the context-growth class: raising a cap or retrying does not shrink the request (R4)."
+          elif [ -n "$PROVIDER_ERROR" ] && [ "$PROVIDER_UNANSWERED" = "true" ]; then
+            class="provider rejected the request (HTTP ${PROVIDER_ERROR}) and another attempt stalled without headers — the unbounded-context class (opencharly/.github#97)"
+            rootcause="**Root cause.** This log carries BOTH signatures: the endpoint REFUSED a request with **HTTP ${PROVIDER_ERROR}**, and another attempt stalled without response headers. Neither is asserted alone, because both are the unbounded-context class — each turn appends its tool results, and past a size or rate limit the request is either refused outright or is too large to answer. This is neither a credentials fault nor a blind-retry case."
+            remedy1="1. read the provider message in the diagnostics — it names the limit it enforced;"
+            remedy2="2. treat it as the context-growth class: raising a cap or retrying does not shrink the request (R4)."
+          elif [ -n "$PROVIDER_ERROR" ]; then
+            class="provider rejected the request (HTTP ${PROVIDER_ERROR}) — a provider/protocol/config matter, not an engine verdict"
+            rootcause="**Root cause.** The model endpoint answered **HTTP ${PROVIDER_ERROR}** — an explicit REJECTION: the provider parsed the request and refused it, and its own message is in the diagnostics below. This log carries NO stall marker (which is what the no-headers class requires) and no completed-turn-1-then-stall pair (which is the engine-defective signature), so neither of those classes describes this run: the rejection itself is the cause."
+            remedy1="1. read the provider message in the diagnostics below — it names the missing or wrong element;"
+            remedy2="2. fix it at the review client or in the org AI_REVIEW_* variables, then re-run. An HTTP rejection is deterministic — do NOT retry blindly (R4)."
+          elif [ "$ENGINE_DEFECTIVE" = "true" ]; then
             class="engine-defective (the review engine completed turn 1 and failed a later turn — the context-dependent timeout/empty-content class; opencharly/.github#97, see the T13 engine-change exception)"
+            narrative="streaming"
           elif [ "$PROVIDER_UNANSWERED" = "true" ]; then
             class="provider unanswered (the provider returned no response headers within the attempt timeout)"
+            narrative="streaming"
           elif [ "$DISCARDED_VERDICT" = "true" ]; then
             class="charly review exited rc=${REVIEW_RC} with a non-BLOCK"
             class="$class verdict — FAIL-CLOSED: a non-zero review exit may"
             class="$class only carry a real BLOCK finding, discarded"
+            rootcause='**Root cause.** The review exited non-zero and had written a verdict that is NOT BLOCK. That verdict is untrustworthy by construction (T3/T4): a crashed or non-clean run may only carry a real BLOCK finding, so the file was moved aside and the run is INCONCLUSIVE rather than a pass.'
+            remedy1="1. re-run once the engine is healthy;"
+            remedy2="2. never treat a non-zero run PASS as a verdict — fail-closed is by design (T3/T4)."
+          fi
+          # The streaming narrative is assigned ONLY here, to the classes whose signature it
+          # describes. No branch above falls through to it (see the bounded default), so a log
+          # without that signature cannot receive it.
+          if [ "$narrative" = "streaming" ]; then
+            rootcause='**Root cause.** A NON-STREAMING request under a WHOLE-GENERATION deadline: plugin-review POSTs with no `stream:true` (candy/plugin-review/llm.go:92), so response headers arrive only when the ENTIRE generation finishes, all under one `http.Client{Timeout}` (llm.go:80) whose built-in default is 5 minutes (review.go:28). The review runs in a 20-turn tool loop that APPENDS the tool results of every turn (the PR diff/files) to the context and retries the whole loop up to AI_REVIEW_MAX_ATTEMPTS times (3 in the pinned bundle; 1 once the fail-fast wiring activates): turn 1 completes, and turn 2 — carrying the enlarged context — fails in ONE OF TWO OBSERVED ways: it returns EMPTY content (`turn 2: final content len=0`, observed on 2 of the 3 attempts in run 34682776608) or it exceeds the 5-minute cap (observed on the third). Both are one defect class — an unbounded, non-streaming request whose context grew. The endpoint answered 405 in 0.18s in the same window — there is no throttled egress.'
+            remedy1='1. this workflow now PASSES the cap through — `AI_REVIEW_ATTEMPT_TIMEOUT` (org-settable, 300s default) — raise it if a large context still exceeds it;'
+            remedy2='2. plugin-review: stream the completion, set an explicit `http.Transport`, bound the tool-result payloads, and retry the FAILED TURN rather than the whole loop (owner: plugin-review).'
           fi
           {
             echo '## validator INCONCLUSIVE — no review verdict was produced (not a BLOCK; no code finding)'
@@ -417,11 +476,11 @@ jobs:
             echo "- review exit code: ${REVIEW_RC:-n/a}"
             echo "- in-job retries: none — the gate REPORTS the class instead of papering over it (R4)"
             echo
-            echo '**Root cause.** A NON-STREAMING request under a WHOLE-GENERATION deadline: plugin-review POSTs with no `stream:true` (candy/plugin-review/llm.go:92), so response headers arrive only when the ENTIRE generation finishes, all under one `http.Client{Timeout}` (llm.go:80) whose built-in default is 5 minutes (review.go:28). The review runs in a 20-turn tool loop that APPENDS the tool results of every turn (the PR diff/files) to the context and retries the whole loop up to AI_REVIEW_MAX_ATTEMPTS times (3 in the pinned bundle; 1 once the fail-fast wiring activates): turn 1 completes, and turn 2 — carrying the enlarged context — fails in ONE OF TWO OBSERVED ways: it returns EMPTY content (`turn 2: final content len=0`, observed on 2 of the 3 attempts in run 34682776608) or it exceeds the 5-minute cap (observed on the third). Both are one defect class — an unbounded, non-streaming request whose context grew. The endpoint answered 405 in 0.18s in the same window — there is no throttled egress.'
+            echo "$rootcause"
             echo
             echo '**Durable remedy.**'
-            echo '1. this workflow now PASSES the cap through — `AI_REVIEW_ATTEMPT_TIMEOUT` (org-settable, 300s default) — raise it if a large context still exceeds it;'
-            echo '2. plugin-review: stream the completion, set an explicit `http.Transport`, bound the tool-result payloads, and retry the FAILED TURN rather than the whole loop (owner: plugin-review).'
+            echo "$remedy1"
+            echo "$remedy2"
             echo
             echo 'A run that produced no verdict keeps this required check **RED**: unreviewed code must never merge.'
             echo
@@ -489,3 +548,96 @@ jobs:
             esac
           done
           echo "::warning::auto-merge arming did not settle — verdict is PASS, merge manually"
+
+      # ---------------------------------------------------------------------------
+      # FAILURE EVIDENCE (always). The INCONCLUSIVE notice carries only the last 25
+      # lines of the review log, and a run log is transient — so a failure deep in a
+      # long review (turn 7 of a 20-turn loop; a provider rejection mid-plan) is only
+      # findable by scrolling an expiring log. This step preserves the FULL evidence as
+      # a downloadable artifact AND puts the class + the effective configuration on the
+      # run own Summary page, so a reader never has to guess WHICH log to open — the gap
+      # that made the 2026-09-12 org-wide outage (an HTTP 400 the model endpoint named
+      # explicitly) take longer to diagnose than the evidence warranted.
+      # ---------------------------------------------------------------------------
+      - name: Evidence bundle (always)
+        id: evidence
+        if: always()
+        # A REPORTING path must never change the verdict: without this, a failure inside the
+        # evidence step would fail the job and turn a PASS run RED. The workflow contract is
+        # explicit — a run that produced a verdict keeps its required check green.
+        continue-on-error: true
+        env:
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ inputs.pr-number || github.event.pull_request.number }}
+          REVIEW_RC: ${{ steps.review.outputs.review_rc }}
+          PROVIDER_ERROR: ${{ steps.review.outputs.provider_error }}
+          PROVIDER_UNANSWERED: ${{ steps.review.outputs.provider_unanswered }}
+          ENGINE_DEFECTIVE: ${{ steps.review.outputs.engine_defective }}
+          DISCARDED_VERDICT: ${{ steps.review.outputs.discarded_verdict }}
+          CHARLY_VERSION: ${{ vars.CHARLY_VERSION }}
+          AI_REVIEW_PROVIDER: ${{ vars.AI_REVIEW_PROVIDER }}
+          AI_REVIEW_MODEL: ${{ vars.AI_REVIEW_MODEL }}
+          AI_REVIEW_BASE_URL: ${{ vars.AI_REVIEW_BASE_URL }}
+          ATTEMPT_TIMEOUT: ${{ vars.AI_REVIEW_ATTEMPT_TIMEOUT }}
+        run: |
+          D="${RUNNER_TEMP}/validator-evidence"
+          mkdir -p "$D"
+          # The manifest is the machine-readable answer to "what happened": the class
+          # inputs, the exit code, the provider/model/base_url ACTUALLY in force, and the
+          # file inventory. Written even when a log is missing — an absent file is itself
+          # evidence (a 3-line review log means the review never started; 500 lines mean it
+          # ran and failed partway).
+          {
+            echo "repo=${REPO}"
+            echo "pr=${PR_NUMBER}"
+            echo "review_rc=${REVIEW_RC:-}"
+            echo "provider_error=${PROVIDER_ERROR:-}"
+            echo "provider_unanswered=${PROVIDER_UNANSWERED:-}"
+            echo "engine_defective=${ENGINE_DEFECTIVE:-}"
+            echo "discarded_verdict=${DISCARDED_VERDICT:-}"
+            echo "vars_charly_version=${CHARLY_VERSION:-<unset>}"
+            echo "vars_ai_review_provider=${AI_REVIEW_PROVIDER:-<unset>}"
+            echo "vars_ai_review_model=${AI_REVIEW_MODEL:-<unset>}"
+            echo "vars_ai_review_base_url=${AI_REVIEW_BASE_URL:-<unset>}"
+            echo "vars_ai_review_attempt_timeout=${ATTEMPT_TIMEOUT:-<unset>}"
+          } > "$D/manifest.txt"
+          for f in /tmp/review.log /tmp/review.txt /tmp/review.untrusted.txt; do
+            b=$(basename "$f")
+            if [ -f "$f" ]; then cp "$f" "$D/$b"; else echo "(absent)" > "$D/$b.absent"; fi
+          done
+          wc -l /tmp/review.log 2>/dev/null > "$D/review.log.lines" || echo "0" > "$D/review.log.lines"
+          echo "evidence dir:"; ls -la "$D"
+          if [ -n "$GITHUB_STEP_SUMMARY" ]; then
+            {
+              echo "## Validator evidence"
+              echo
+              echo "| field | value |"
+              echo "|---|---|"
+              # Backticks are markdown code spans here, NOT command substitution: inside a
+              # double-quoted echo they must be ESCAPED, or bash tries to run the markdown
+              # as commands (the offline harness caught exactly that: "line 34: 0: command
+              # not found"). Single quotes cannot be used because these lines expand ${VAR}.
+              echo "| review exit code | \`${REVIEW_RC:-n/a}\` |"
+              echo "| provider HTTP error | \`${PROVIDER_ERROR:-none}\` |"
+              echo "| class inputs | provider_unanswered=\`${PROVIDER_UNANSWERED:-}\` engine_defective=\`${ENGINE_DEFECTIVE:-}\` discarded=\`${DISCARDED_VERDICT:-}\` |"
+              echo "| provider / model / base_url | \`${AI_REVIEW_PROVIDER:-<unset>}\` / \`${AI_REVIEW_MODEL:-<unset>}\` / \`${AI_REVIEW_BASE_URL:-<unset>}\` |"
+              echo "| attempt-cap var | \`${ATTEMPT_TIMEOUT:-<unset>}\` |"
+              echo
+              echo "**Evidence:** the artifact named \`validator-evidence\` holds the FULL review log and the verdict files; the PR comment carries the class and the last 25 log lines."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload evidence
+        if: always()
+        # Same reason as the bundle above: an artifact-service hiccup must not fail a PASS run.
+        continue-on-error: true
+        # Pinned to the v4 tag's commit, the tightest form this org already uses elsewhere
+        # (actions/create-github-app-token in tag-on-merge.yml is SHA-pinned). No new secret,
+        # no new permission: the artifact service uses the job's own runtime token, and
+        # if-no-files-found: ignore keeps a missing bundle from failing the step.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: validator-evidence
+          path: ${{ runner.temp }}/validator-evidence
+          if-no-files-found: ignore
+          retention-days: 14
