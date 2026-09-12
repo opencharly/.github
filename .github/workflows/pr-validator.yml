@@ -316,7 +316,11 @@ jobs:
           # every org run was reported under a narrative that blamed an already-fixed engine
           # defect while the log carried an explicit HTTP 400).
           provider_error=""
-          if pe=$(grep -m1 -oE 'LLM [1-5][0-9][0-9]' /tmp/review.log); then
+          # [45][0-9][0-9] — 4xx/5xx ONLY. A broader pattern (1xx-5xx) reports a non-refusal
+          # status line as a confident provider REJECTION and, because this branch is checked
+          # FIRST, preempts the engine-defective class — the same misattribution this notice
+          # exists to remove, inverted. The `non-error-status` scenario pins that boundary.
+          if pe=$(grep -m1 -oE 'LLM [45][0-9][0-9]' /tmp/review.log); then
             provider_error="${pe#LLM }"
           fi
           {
@@ -529,6 +533,10 @@ jobs:
       - name: Evidence bundle (always)
         id: evidence
         if: always()
+        # A REPORTING path must never change the verdict: without this, a failure inside the
+        # evidence step would fail the job and turn a PASS run RED. The workflow contract is
+        # explicit — a run that produced a verdict keeps its required check green.
+        continue-on-error: true
         env:
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ inputs.pr-number || github.event.pull_request.number }}
@@ -592,6 +600,8 @@ jobs:
 
       - name: Upload evidence
         if: always()
+        # Same reason as the bundle above: an artifact-service hiccup must not fail a PASS run.
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: validator-evidence

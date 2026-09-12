@@ -322,6 +322,13 @@ FAKE_CHARLY = NL.join([
     "    echo \"LLM 400: provider rejected the request (MissingSessionID: x-opencode-session required)\" >&2",
     "    exit 1",
     "    ;;",
+    "  non-error-status)",
+    "    # A verdict-less log that ALSO carries a NON-ERROR status line. The extractor must not",
+    "    # read it as a provider rejection: a 2xx is not a refusal, and reporting it as one would",
+    "    # preempt the engine-defective class — the same misattribution this change fixes, inverted.",
+    "    echo \"LLM 200: an empty-but-successful response body\" >&2",
+    "    exit 1",
+    "    ;;",
     "  verdict-less)",
     "    echo \"verdict: required but no Verdict line produced\" >&2",
     "    echo \"## Review - markdown with no Verdict line\" > \"$out\"",
@@ -523,6 +530,30 @@ SCENARIOS = [
             "| class inputs |",
             "| provider / model / base_url |",
         ],
+    },
+    {
+        # The BOUNDARY the extractor must respect. Before the pattern was narrowed to [45]xx,
+        # this log produced a confident "provider rejected the request" class AND preempted the
+        # engine-defective branch — a misattribution manufactured by the fix itself. R10: a
+        # test that fails on a non-error status.
+        "name": "non-error-status",
+        "fake": "non-error-status",
+        "expect_exit": 3,
+        "expect_steps": ["review", "parse", "Gate (inconclusive)", "evidence"],
+        "expect_verdict": "INCONCLUSIVE",
+        "expect_comment": True,
+        "expect_auto_merge": False,
+        "expect_comment_contains": [
+            "validator INCONCLUSIVE",
+            "verdict-less review output",
+        ],
+        "expect_comment_excludes": [
+            "provider rejected the request",
+            "explicit REJECTION, not a stall",
+        ],
+        "expect_review_outputs": {"provider_error": "", "provider_unanswered": "false",
+                                  "engine_defective": "false", "review_rc": "1",
+                                  "discarded_verdict": "false"},
     },
     {
         "name": "verdict-less",
