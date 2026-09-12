@@ -61,10 +61,12 @@
 # hang to the deadline), UNBOUNDED tool-result payloads, and a retry that re-runs
 # the WHOLE loop instead of the failed turn.
 #
-# THE FIX, TWO HALVES. (i) THIS workflow now PASSES the cap through —
-# AI_REVIEW_ATTEMPT_TIMEOUT, org-settable, default 900s — an env plugin-review has
-# always read (review.go:102) but the workflow never supplied, so no operator
-# could raise it; an enlarged context now gets room to finish. (ii) The durable
+# THE FIX, TWO HALVES. (i) THIS workflow PASSES the cap through as
+# AI_REVIEW_ATTEMPT_TIMEOUT (org-settable, default 300s = the plugin's own
+# built-in default, review.go:28): a single generation needing more than 5
+# minutes has never been observed to succeed — the recorded failures are
+# generations that NEVER answer — so the cap is a deadline, not a budget.
+# (ii) The durable
 # per-turn fixes — STREAM the completion, set an explicit http.Transport, BOUND
 # the tool-result payloads, and retry the FAILED TURN rather than the whole loop
 # — belong to plugin-review (owner: plugin-review).
@@ -144,9 +146,8 @@ jobs:
     runs-on: ${{ vars.REVIEW_RUNNER_LABEL || 'ubuntu-latest' }}
     # FAIL-HARD wall clock (opencharly/opencharly#199 RCA, 2026-09-12): without
     # this, a provider-unanswered review burns the full plugin-review attempt
-    # budget (3 x AI_REVIEW_ATTEMPT_TIMEOUT, 45+ min at the 900s default) with
-    # zero interim output before classifying INCONCLUSIVE — and the GitHub
-    # default of 360 would let a doomed run occupy a runner for 6 hours.
+    # budget with zero interim output before classifying INCONCLUSIVE — and the
+    # GitHub default of 360 would let a doomed run occupy a runner for 6 hours.
     # Observed healthy runs conclude in 38s-13m19s, so 20 minutes is ~1.5x the
     # slowest real review ever measured: anything past it is by definition not
     # reviewing anymore. GitHub cancels the job at the cap; the required check
@@ -226,7 +227,13 @@ jobs:
           AI_REVIEW_MODEL:     ${{ inputs.ai_review_model || vars.AI_REVIEW_MODEL }}
           AI_REVIEW_BASE_URL:  ${{ inputs.ai_review_base_url || vars.AI_REVIEW_BASE_URL }}
           AI_REVIEW_MAX_TURNS: ${{ vars.AI_REVIEW_MAX_TURNS || '20' }}
-          AI_REVIEW_ATTEMPT_TIMEOUT: ${{ vars.AI_REVIEW_ATTEMPT_TIMEOUT || '900' }}
+          AI_REVIEW_ATTEMPT_TIMEOUT: ${{ vars.AI_REVIEW_ATTEMPT_TIMEOUT || '300' }}
+          # Zero retries (opencharly/plugin-review#5, engine PR #6): a failed
+          # first attempt is terminal — no repeat cycle. INERT until the engine
+          # release carrying the knob is welded and TAG below is bumped; the
+          # pinned bundle ignores unknown env. Default 1 org-wide; any repo may
+          # opt back to retries via its own AI_REVIEW_MAX_ATTEMPTS var.
+          AI_REVIEW_MAX_ATTEMPTS: ${{ vars.AI_REVIEW_MAX_ATTEMPTS || '1' }}
           AI_REVIEW_API_KEY:   ${{ secrets.AI_REVIEW_API_KEY }}
           REVIEW_PROMPT_PATH:  ${{ github.workspace }}/runner-config/prompt/validator.md
           REVIEW_PLAN_PATH:    ${{ github.workspace }}/runner-config/review-plan.yml
@@ -411,7 +418,7 @@ jobs:
             echo '**Root cause.** A NON-STREAMING request under a WHOLE-GENERATION deadline: plugin-review POSTs with no `stream:true` (candy/plugin-review/llm.go:92), so response headers arrive only when the ENTIRE generation finishes, all under one `http.Client{Timeout}` (llm.go:80) whose built-in default is 5 minutes (review.go:28). The review runs in a 20-turn tool loop that APPENDS the tool results of every turn (the PR diff/files) to the context and retries the whole loop 3 times: turn 1 completes, and turn 2 — carrying the enlarged context — fails in ONE OF TWO OBSERVED ways: it returns EMPTY content (`turn 2: final content len=0`, observed on 2 of the 3 attempts in run 34682776608) or it exceeds the 5-minute cap (observed on the third). Both are one defect class — an unbounded, non-streaming request whose context grew. The endpoint answered 405 in 0.18s in the same window — there is no throttled egress.'
             echo
             echo '**Durable remedy.**'
-            echo '1. this workflow now PASSES the cap through — `AI_REVIEW_ATTEMPT_TIMEOUT` (org-settable, 900s default) — raise it if a large context still exceeds it;'
+            echo '1. this workflow now PASSES the cap through — `AI_REVIEW_ATTEMPT_TIMEOUT` (org-settable, 300s default) — raise it if a large context still exceeds it;'
             echo '2. plugin-review: stream the completion, set an explicit `http.Transport`, bound the tool-result payloads, and retry the FAILED TURN rather than the whole loop (owner: plugin-review).'
             echo
             echo 'A run that produced no verdict keeps this required check **RED**: unreviewed code must never merge.'
