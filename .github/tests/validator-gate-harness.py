@@ -669,9 +669,10 @@ def run_harness():
          "(pre-knob tree exported nothing, so every review retried twice)")
     if "AI_REVIEW_MAX_ATTEMPTS" in review_env:
         raw_a = review_env["AI_REVIEW_MAX_ATTEMPTS"]
+        ns_unset_a = Ctx({"vars": Ctx({}), "inputs": Ctx({}), "secrets": Ctx({})})
         ns_set_a = Ctx({"vars": Ctx({"AI_REVIEW_MAX_ATTEMPTS": "3"}),
                         "inputs": Ctx({}), "secrets": Ctx({})})
-        note(subst(raw_a, ns_unset) == "1",
+        note(subst(raw_a, ns_unset_a) == "1",
              "functional: with the org var UNSET attempts RESOLVE to single-attempt "
              "(fail hard)")
         note(subst(raw_a, ns_set_a) == "3",
