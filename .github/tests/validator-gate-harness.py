@@ -442,7 +442,7 @@ SCENARIOS = [
             "provider unanswered",
             "in-job retries: none",
             "NON-STREAMING",
-            "900s default",
+            "300s default",
             "FAILED TURN",
         ],
         "expect_review_outputs": {"provider_unanswered": "true", "review_rc": "1",
@@ -481,7 +481,7 @@ SCENARIOS = [
             "validator INCONCLUSIVE",
             "verdict-less review output",
             "NON-STREAMING",
-            "900s default",
+            "300s default",
         ],
         "expect_review_outputs": {"provider_unanswered": "false", "review_rc": "2",
                                   "discarded_verdict": "false"},
@@ -643,9 +643,12 @@ def run_harness():
          "structural: header routes the durable per-turn fix to its owner (plugin-review)")
     note("remedies: re-run" not in text,
          "structural: no re-run-and-see remedy anywhere in the workflow text")
-    note("AI_REVIEW_ATTEMPT_TIMEOUT, org-settable, default 900s" in text,
+    note("AI_REVIEW_ATTEMPT_TIMEOUT, org-settable, default 300s" in text,
          "structural: header documents the org-settable cap lever this workflow "
          "passes through")
+    note("timeout-minutes: 20" in text,
+         "structural: the validate job carries a fail-hard wall clock "
+         "(timeout-minutes: 20 caps a provider-unanswered burn)")
     # FUNCTIONAL coverage (the review's R10 finding: the env entry and the engine-defective
     # classification shipped with NO assertion that fails without them).
     review_env = find_step(steps, "id", "review")["env"]
@@ -657,10 +660,22 @@ def run_harness():
         ns_unset = Ctx({"vars": Ctx({}), "inputs": Ctx({}), "secrets": Ctx({})})
         ns_set = Ctx({"vars": Ctx({"AI_REVIEW_ATTEMPT_TIMEOUT": "120"}),
                       "inputs": Ctx({}), "secrets": Ctx({})})
-        note(subst(raw, ns_unset) == "900",
-             "functional: with the org var UNSET the cap RESOLVES to the 900s default")
+        note(subst(raw, ns_unset) == "300",
+             "functional: with the org var UNSET the cap RESOLVES to the 300s default")
         note(subst(raw, ns_set) == "120",
              "functional: with the org var SET the cap RESOLVES to the set value")
+    note("AI_REVIEW_MAX_ATTEMPTS" in review_env,
+         "functional: the review step EXPORTS AI_REVIEW_MAX_ATTEMPTS for the plugin "
+         "(pre-knob tree exported nothing, so every review retried twice)")
+    if "AI_REVIEW_MAX_ATTEMPTS" in review_env:
+        raw_a = review_env["AI_REVIEW_MAX_ATTEMPTS"]
+        ns_set_a = Ctx({"vars": Ctx({"AI_REVIEW_MAX_ATTEMPTS": "3"}),
+                        "inputs": Ctx({}), "secrets": Ctx({})})
+        note(subst(raw_a, ns_unset) == "1",
+             "functional: with the org var UNSET attempts RESOLVE to single-attempt "
+             "(fail hard)")
+        note(subst(raw_a, ns_set_a) == "3",
+             "functional: with the org var SET attempts RESOLVE to the set value")
     note("engine_defective=false" in text and "'turn 1: [0-9]+ tool call'" in text,
          "structural: the engine-defective classification is DERIVED from the run's own "
          "signature (a completed turn 1) - pre-fix: absent, so every verdict-less run was "
