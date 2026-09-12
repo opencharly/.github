@@ -41,11 +41,18 @@
 # defaultAttemptTimeout). The review runs inside a 20-turn tool loop (review.go,
 # defaultMaxTurns = 20) in which every turn APPENDS its tool results (the PR
 # diff/files) to the context, and the WHOLE loop is retried as 3 attempts
-# (review.go). Turn 1 therefore succeeds quickly ("turn 1: 4 tool call(s)") and
-# turn 2 carries the ENLARGED context, whose non-streaming generation exceeds the
-# 5-minute cap — identically on all 3 attempts. That is the observed signature: a
-# completed turn 1 followed by "attempt N failed: context deadline exceeded ...
-# while awaiting headers".
+# (review.go). Turn 1 therefore succeeds quickly ("turn 1: 4 tool call(s)"), and
+# turn 2 — carrying the ENLARGED context — fails in ONE OF TWO OBSERVED ways, both
+# rooted in the same non-streaming whole-generation design:
+#   (a) the generation returns EMPTY content ("turn 2: final content len=0",
+#       review_len=0) — observed on 2 of the 3 attempts in run 34682776608; or
+#   (b) it exceeds the 5-minute cap ("Client.Timeout ... while awaiting headers")
+#       — observed on the third attempt of that run.
+# The observed signature is therefore a COMPLETED turn 1 followed by a turn-2
+# failure of EITHER kind. Both are one defect class — an unbounded, non-streaming
+# request whose context grew — and the fix covers both: streaming bounds the idle
+# gap instead of the whole generation, and bounded tool-result payloads keep turn
+# 2's context small enough to answer at all.
 #
 # The endpoint was NEVER the problem: it answered 405 in 0.18s from a residential
 # path in the same window, and this runner DID receive a complete turn-1

@@ -70,14 +70,21 @@ ENVIRONMENT NOTES
   /tmp/review.untrusted.txt, /tmp/review.log, /tmp/inconclusive-comment.md)
   literally. This harness removes those files before and after every scenario;
   everything else it writes lives in a temp dir. Because those paths are shared,
-  NEVER run two harness instances concurrently - they race on /tmp/review.log.
+  the harness holds an EXCLUSIVE LOCK (LOCK_WAIT_SECONDS) for the whole run: a
+  second instance WAITS instead of racing on /tmp/review.log, and fails fast with
+  the reason if the holder never releases. Running two instances concurrently is
+  therefore safe (serialized), not merely discouraged.
 """
 
+import fcntl
 import os
 import re
 import subprocess
 import sys
 import tempfile
+import time
+
+LOCK_WAIT_SECONDS = 600
 
 NL = chr(10)
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
@@ -606,6 +613,28 @@ def run_harness():
     note("AI_REVIEW_ATTEMPT_TIMEOUT, org-settable, default 900s" in text,
          "structural: header documents the org-settable cap lever this workflow "
          "passes through")
+    # FUNCTIONAL coverage (the review's R10 finding: the env entry and the engine-defective
+    # classification shipped with NO assertion that fails without them).
+    review_env = find_step(steps, "id", "review")["env"]
+    note("AI_REVIEW_ATTEMPT_TIMEOUT" in review_env,
+         "functional: the review step EXPORTS AI_REVIEW_ATTEMPT_TIMEOUT for the plugin "
+         "(pre-fix tree exported nothing, so no cap could ever be raised)")
+    if "AI_REVIEW_ATTEMPT_TIMEOUT" in review_env:
+        raw = review_env["AI_REVIEW_ATTEMPT_TIMEOUT"]
+        ns_unset = Ctx({"vars": Ctx({}), "inputs": Ctx({}), "secrets": Ctx({})})
+        ns_set = Ctx({"vars": Ctx({"AI_REVIEW_ATTEMPT_TIMEOUT": "120"}),
+                      "inputs": Ctx({}), "secrets": Ctx({})})
+        note(subst(raw, ns_unset) == "900",
+             "functional: with the org var UNSET the cap RESOLVES to the 900s default")
+        note(subst(raw, ns_set) == "120",
+             "functional: with the org var SET the cap RESOLVES to the set value")
+    note("engine_defective=false" in text and "'turn 1: [0-9]+ tool call'" in text,
+         "functional: the engine-defective classification is DERIVED from the run's own "
+         "signature (a completed turn 1) - pre-fix: absent, so every verdict-less run was "
+         "labelled provider-unanswered")
+    note("ENGINE_DEFECTIVE" in text and "engine-defective (the review engine" in text,
+         "functional: the engine-defective class reaches the INCONCLUSIVE notice and is "
+         "selected ahead of the provider-unanswered branch")
     note("${CHARLY_VERSION:-v2026.254.1902}" in text,
          "structural: the pinned charly default is the taxonomy-marker release v2026.254.1902")
     note("${CHARLY_VERSION:-v2026.251.1947}" not in text,
@@ -685,11 +714,33 @@ def run_harness():
 
 
 def main():
+    # ROOT FIX for the shared-/tmp race (R1: the hazard was documented, not fixed). The
+    # workflow bodies address the runner's absolute paths literally, so two instances WOULD
+    # clobber each other's /tmp/review.log. Hold an exclusive lock for the whole run: a second
+    # instance waits (bounded) rather than racing, and fails fast with the reason if the first
+    # never releases. Same class as the gate's other fail-closed layers - never a silent race.
+    lock_path = os.path.join(tempfile.gettempdir(), "pr-validator-harness.lock")
+    lock_fh = open(lock_path, "w")
+    deadline = time.time() + LOCK_WAIT_SECONDS
+    while True:
+        try:
+            fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except OSError:
+            if time.time() >= deadline:
+                print("HARNESS ERROR: another instance holds " + lock_path + " for more than " +
+                      str(LOCK_WAIT_SECONDS) + "s (the workflow bodies share the runner's /tmp "
+                      "paths); refusing to race.")
+                return 1
+            time.sleep(0.5)
     try:
         return run_harness()
     except HarnessError as exc:
         print("HARNESS ERROR: " + str(exc))
         return 1
+    finally:
+        fcntl.flock(lock_fh, fcntl.LOCK_UN)
+        lock_fh.close()
 
 
 if __name__ == "__main__":
