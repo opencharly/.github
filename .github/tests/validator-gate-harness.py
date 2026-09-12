@@ -55,8 +55,10 @@ SCENARIOS ASSERTED END TO END (exit code + classification output + PR comment)
   Plus structural guards: the review step contains NO in-job retry (no sleep, no
   for-attempt loop) - the R4 regression guard for the dropped retry band-aid - the
   workflow pins a charly release WITH the taxonomy marker, never the old one, and
-  the header routes the egress stall to its ACTUAL root cause + the NAMED
-  validator-egress hardening batch (owner: org infra/operator), with no
+  the header names the CORRECTED root cause (a NON-STREAMING request under a
+  whole-generation HTTP deadline that a too-short attempt cap cut off -
+  opencharly/.github#91), asserts the superseded throttled-egress RCA is GONE,
+  documents the org-settable AI_REVIEW_ATTEMPT_TIMEOUT lever, and carries no
   re-run-and-see remedy anywhere.
 
 HOW TO RUN
@@ -67,14 +69,22 @@ ENVIRONMENT NOTES
   The workflow bodies address the runner absolute paths (/tmp/review.txt,
   /tmp/review.untrusted.txt, /tmp/review.log, /tmp/inconclusive-comment.md)
   literally. This harness removes those files before and after every scenario;
-  everything else it writes lives in a temp dir.
+  everything else it writes lives in a temp dir. Because those paths are shared,
+  the harness holds an EXCLUSIVE LOCK (LOCK_WAIT_SECONDS) for the whole run: a
+  second instance WAITS instead of racing on /tmp/review.log, and fails fast with
+  the reason if the holder never releases. Running two instances concurrently is
+  therefore safe (serialized), not merely discouraged.
 """
 
+import fcntl
 import os
 import re
 import subprocess
 import sys
 import tempfile
+import time
+
+LOCK_WAIT_SECONDS = 600
 
 NL = chr(10)
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
@@ -292,6 +302,18 @@ FAKE_CHARLY = NL.join([
     "    echo \"inconclusive: all 3 attempts timed out - the LLM provider did not respond within the attempt timeout (provider unanswered); this is NOT a review verdict - re-run the gate\" >&2",
     "    exit 1",
     "    ;;",
+    "  engine-defective)",
+    "    # The class the `engine_defective` branch exists for: the engine COMPLETED turn 1 (the",
+    "    # endpoint answered) and a LATER turn failed (here: the whole-generation deadline). The",
+    "    # log carries BOTH markers the workflow keys on - a completed `turn 1: N tool call(s)` AND",
+    "    # a provider marker - which is exactly the context-dependent signature that a",
+    "    # provider-egress story cannot explain. Pre-fix the workflow has no engine_defective",
+    "    # branch, so this run is labelled a generic provider-unanswered run and the INCONCLUSIVE",
+    "    # notice omits the class.",
+    "    echo \"turn 1: 4 tool call(s)\" >&2",
+    "    echo \"attempt 3 failed: Post \\\"https://provider.invalid/chat/completions\\\": context deadline exceeded (Client.Timeout exceeded while awaiting headers)\" >&2",
+    "    exit 1",
+    "    ;;",
     "  verdict-less)",
     "    echo \"verdict: required but no Verdict line produced\" >&2",
     "    echo \"## Review - markdown with no Verdict line\" > \"$out\"",
@@ -419,13 +441,33 @@ SCENARIOS = [
             "validator INCONCLUSIVE",
             "provider unanswered",
             "in-job retries: none",
-            "vars.REVIEW_RUNNER_LABEL",
-            "throttles/blocks datacenter/shared runner egress",
-            "validator-egress hardening batch",
-            "org infra/operator",
+            "NON-STREAMING",
+            "900s default",
+            "FAILED TURN",
         ],
         "expect_review_outputs": {"provider_unanswered": "true", "review_rc": "1",
                                   "discarded_verdict": "false"},
+    },
+    {
+        # The engine-defective class must be SELECTED from the run's own signature, not merely
+        # mentioned in the workflow's text: this scenario's fake log carries a completed turn 1
+        # plus a provider marker, so the true branch of the classification fires and the
+        # INCONCLUSIVE notice must name the class. Pre-fix (no engine_defective branch) the
+        # notice cannot contain it, so these assertions FAIL on the pre-fix workflow.
+        "name": "engine-defective",
+        "fake": "engine-defective",
+        "expect_exit": 3,
+        "expect_steps": ["review", "parse", "Gate (inconclusive)"],
+        "expect_verdict": "INCONCLUSIVE",
+        "expect_comment": True,
+        "expect_auto_merge": False,
+        "expect_comment_contains": [
+            "validator INCONCLUSIVE",
+            "engine-defective (the review engine",
+            "T13 engine-change exception",
+        ],
+        "expect_review_outputs": {"provider_unanswered": "true", "engine_defective": "true",
+                                  "review_rc": "1", "discarded_verdict": "false"},
     },
     {
         "name": "verdict-less",
@@ -438,9 +480,8 @@ SCENARIOS = [
         "expect_comment_contains": [
             "validator INCONCLUSIVE",
             "verdict-less review output",
-            "throttles/blocks datacenter/shared runner egress",
-            "validator-egress hardening batch",
-            "org infra/operator",
+            "NON-STREAMING",
+            "900s default",
         ],
         "expect_review_outputs": {"provider_unanswered": "false", "review_rc": "2",
                                   "discarded_verdict": "false"},
@@ -471,8 +512,7 @@ SCENARIOS = [
             "validator INCONCLUSIVE",
             "FAIL-CLOSED",
             "may only carry a real BLOCK finding",
-            "validator-egress hardening batch",
-            "org infra/operator",
+            "NON-STREAMING",
         ],
         "expect_review_outputs": {"provider_unanswered": "false", "review_rc": "1",
                                   "success": "false", "inconclusive": "true",
@@ -593,16 +633,43 @@ def run_harness():
          "structural: header records the T4 maintainer sign-off requirement")
     note("vars.REVIEW_RUNNER_LABEL" in text,
          "structural: header names the operator lever vars.REVIEW_RUNNER_LABEL")
-    note("INTERMITTENT and LOAD-DEPENDENT" in text,
-         "structural: header states the stall is intermittent / load-dependent")
-    note("throttles/blocks datacenter/shared runner egress" in text,
-         "structural: header names the actual root cause (provider throttling of datacenter/shared-runner egress)")
-    note("validator-egress hardening batch" in text and "org infra/operator" in text,
-         "structural: header routes the durable remedy to the named batch + owner")
+    note("NON-STREAMING request under a WHOLE-GENERATION deadline" in text,
+         "structural: header names the CORRECTED root cause (a non-streaming, "
+         "whole-generation HTTP deadline)")
+    note("throttles/blocks datacenter/shared runner egress" not in text,
+         "structural: the superseded throttled-egress RCA is GONE from the workflow "
+         "(corrected 2026-09-12 by opencharly/.github#91)")
+    note("retry the FAILED TURN" in text and "owner: plugin-review" in text,
+         "structural: header routes the durable per-turn fix to its owner (plugin-review)")
     note("remedies: re-run" not in text,
          "structural: no re-run-and-see remedy anywhere in the workflow text")
-    note("Neither a longer AI_REVIEW_ATTEMPT_TIMEOUT nor an in-job retry" in text,
-         "structural: header states that a longer timeout and an in-job retry cannot cure it")
+    note("AI_REVIEW_ATTEMPT_TIMEOUT, org-settable, default 900s" in text,
+         "structural: header documents the org-settable cap lever this workflow "
+         "passes through")
+    # FUNCTIONAL coverage (the review's R10 finding: the env entry and the engine-defective
+    # classification shipped with NO assertion that fails without them).
+    review_env = find_step(steps, "id", "review")["env"]
+    note("AI_REVIEW_ATTEMPT_TIMEOUT" in review_env,
+         "functional: the review step EXPORTS AI_REVIEW_ATTEMPT_TIMEOUT for the plugin "
+         "(pre-fix tree exported nothing, so no cap could ever be raised)")
+    if "AI_REVIEW_ATTEMPT_TIMEOUT" in review_env:
+        raw = review_env["AI_REVIEW_ATTEMPT_TIMEOUT"]
+        ns_unset = Ctx({"vars": Ctx({}), "inputs": Ctx({}), "secrets": Ctx({})})
+        ns_set = Ctx({"vars": Ctx({"AI_REVIEW_ATTEMPT_TIMEOUT": "120"}),
+                      "inputs": Ctx({}), "secrets": Ctx({})})
+        note(subst(raw, ns_unset) == "900",
+             "functional: with the org var UNSET the cap RESOLVES to the 900s default")
+        note(subst(raw, ns_set) == "120",
+             "functional: with the org var SET the cap RESOLVES to the set value")
+    note("engine_defective=false" in text and "'turn 1: [0-9]+ tool call'" in text,
+         "structural: the engine-defective classification is DERIVED from the run's own "
+         "signature (a completed turn 1) - pre-fix: absent, so every verdict-less run was "
+         "labelled provider-unanswered")
+    # NOTE: the SELECTION of the class is asserted FUNCTIONALLY by the `engine-defective`
+    # scenario below - its fake log carries a completed turn 1 + a provider marker, and its
+    # expect_comment_contains requires the class in the posted INCONCLUSIVE notice. It is
+    # deliberately NOT asserted by a text check (a source-text match is structural, not
+    # functional, and must not be labelled the other way).
     note("${CHARLY_VERSION:-v2026.254.1902}" in text,
          "structural: the pinned charly default is the taxonomy-marker release v2026.254.1902")
     note("${CHARLY_VERSION:-v2026.251.1947}" not in text,
@@ -682,11 +749,33 @@ def run_harness():
 
 
 def main():
+    # ROOT FIX for the shared-/tmp race (R1: the hazard was documented, not fixed). The
+    # workflow bodies address the runner's absolute paths literally, so two instances WOULD
+    # clobber each other's /tmp/review.log. Hold an exclusive lock for the whole run: a second
+    # instance waits (bounded) rather than racing, and fails fast with the reason if the first
+    # never releases. Same class as the gate's other fail-closed layers - never a silent race.
+    lock_path = os.path.join(tempfile.gettempdir(), "pr-validator-harness.lock")
+    lock_fh = open(lock_path, "w")
+    deadline = time.time() + LOCK_WAIT_SECONDS
+    while True:
+        try:
+            fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except OSError:
+            if time.time() >= deadline:
+                print("HARNESS ERROR: another instance holds " + lock_path + " for more than " +
+                      str(LOCK_WAIT_SECONDS) + "s (the workflow bodies share the runner's /tmp "
+                      "paths); refusing to race.")
+                return 1
+            time.sleep(0.5)
     try:
         return run_harness()
     except HarnessError as exc:
         print("HARNESS ERROR: " + str(exc))
         return 1
+    finally:
+        fcntl.flock(lock_fh, fcntl.LOCK_UN)
+        lock_fh.close()
 
 
 if __name__ == "__main__":
