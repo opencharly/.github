@@ -236,7 +236,12 @@ jobs:
           # pinned bundle ignores unknown env. Default 1 org-wide; any repo may
           # opt back to retries via its own AI_REVIEW_MAX_ATTEMPTS var.
           AI_REVIEW_MAX_ATTEMPTS: ${{ vars.AI_REVIEW_MAX_ATTEMPTS || '1' }}
-          AI_REVIEW_API_KEY:   ${{ secrets.AI_REVIEW_API_KEY }}
+          # Backend-switchable key: select the provider-scoped secret for the
+          # configured backend, falling back to the generic AI_REVIEW_API_KEY.
+          # Switching backends is then vars.AI_REVIEW_PROVIDER +
+          # vars.AI_REVIEW_BASE_URL + vars.AI_REVIEW_MODEL alone — no code or
+          # release change. Store one secret per backend.
+          AI_REVIEW_API_KEY: ${{ (((inputs.ai_review_provider || vars.AI_REVIEW_PROVIDER) == 'opencode') && secrets.AI_REVIEW_API_KEY_OPENCODE) || (((inputs.ai_review_provider || vars.AI_REVIEW_PROVIDER) == 'ollama') && secrets.AI_REVIEW_API_KEY_OLLAMA) || secrets.AI_REVIEW_API_KEY }}
           REVIEW_PROMPT_PATH:  ${{ github.workspace }}/runner-config/prompt/validator.md
           REVIEW_PLAN_PATH:    ${{ github.workspace }}/runner-config/review-plan.yml
           GITHUB_TOKEN:        ${{ github.token }}
