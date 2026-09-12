@@ -148,10 +148,11 @@ jobs:
     # this, a provider-unanswered review burns the full plugin-review attempt
     # budget with zero interim output before classifying INCONCLUSIVE — and the
     # GitHub default of 360 would let a doomed run occupy a runner for 6 hours.
-    # Observed runs conclude in 38s-13m19s (the 13m19s run failed — even the
-    # slowest observed run, failure included, fits inside 20 with margin), so
-    # 20 minutes is ~1.5x the slowest review ever measured: anything past it
-    # is by definition not reviewing anymore. GitHub cancels the job at the cap; the required check
+    # Observed REVIEWS conclude in 38s-13m19s (the 13m19s run failed — even the
+    # slowest observed review, failure included, fits inside 20 with margin).
+    # The single 43m54s run (34688719317) was the provider-unanswered burn this
+    # cap exists to kill, classified INCONCLUSIVE, not a review. GitHub cancels
+    # the job at the cap; the required check
     # goes RED fast instead of hanging pending, and the gate is re-run
     # explicitly (gh workflow run pr-validator.yml -f pr-number=<N>), never
     # retried in-job (R4).
