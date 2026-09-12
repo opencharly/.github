@@ -142,6 +142,18 @@ jobs:
   validate:
     name: validate
     runs-on: ${{ vars.REVIEW_RUNNER_LABEL || 'ubuntu-latest' }}
+    # FAIL-HARD wall clock (opencharly/opencharly#199 RCA, 2026-09-12): without
+    # this, a provider-unanswered review burns the full plugin-review attempt
+    # budget (3 x AI_REVIEW_ATTEMPT_TIMEOUT, 45+ min at the 900s default) with
+    # zero interim output before classifying INCONCLUSIVE — and the GitHub
+    # default of 360 would let a doomed run occupy a runner for 6 hours.
+    # Observed healthy runs conclude in 38s-13m19s, so 20 minutes is ~1.5x the
+    # slowest real review ever measured: anything past it is by definition not
+    # reviewing anymore. GitHub cancels the job at the cap; the required check
+    # goes RED fast instead of hanging pending, and the gate is re-run
+    # explicitly (gh workflow run pr-validator.yml -f pr-number=<N>), never
+    # retried in-job (R4).
+    timeout-minutes: 20
     steps:
       - id: pr
         uses: actions/github-script@v7
