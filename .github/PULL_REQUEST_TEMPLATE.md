@@ -69,7 +69,11 @@ FAILS** — applicable or not, an empty block is never a valid answer.
      An AI-authored commit carries the matching
      `Assisted-by: <Harness> <Provider Full Model Name> (<confidence>)` trailer,
      replacing each placeholder with the authoring runtime's exact identity. A 100% human-authored
-     commit carries no `Assisted-by:` trailer. -->
+     commit carries no `Assisted-by:` trailer. A body emitted by a fixed, model-free CI generator
+     (a committed `printf/echo` block with no LLM in the loop) has no AI provider or model: it
+     carries `*Assisted-by: <Harness> <Runtime> (<confidence>)*` (automation + runner identity,
+     e.g. `GitHub Actions ubuntu-latest`), never a fabricated model name and never an `N/A`
+     placeholder. -->
 
 ## Harness rulebook compliance — state HOW each is satisfied (or `N/A — <reason>`)
 
