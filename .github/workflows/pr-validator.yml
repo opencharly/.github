@@ -54,9 +54,23 @@
 #     applies unless an org deliberately overrides it. The engine owns the
 #     bound; this workflow no longer hardcodes one.
 #
-# Historical note (2026-09-12, retained): a pre-streaming request under a
-# whole-generation deadline failed with "awaiting headers"; streaming + bounded
-# tool results (plugin-review) superseded that class.
+# ACTIVE vs INERT (verified against the pinned bundle, never asserted — the
+# `strings` evidence is in this PR's body):
+#   * ACTIVE NOW (carried by the pinned engine v2026.255.1803):
+#     AI_REVIEW_STREAM_IDLE_TIMEOUT, AI_REVIEW_TOOL_RESULT_MAX_BYTES and
+#     AI_REVIEW_ATTEMPT_TIMEOUT. Dropping the hardcoded 300s cap takes effect
+#     immediately on the current pin.
+#   * INERT until the engine release carrying them is welded AND the pinned
+#     TAG below is bumped: AI_REVIEW_REASONING_EFFORT and AI_REVIEW_MAX_TOKENS.
+#     The pinned bundle has ZERO hits for both (the engine's generation bound
+#     lands in opencharly/plugin-review#10). Until then these two env entries
+#     are passed through and IGNORED — the generation stays unbounded on the
+#     current engine, and the whole-request timeout default remains the only
+#     ceiling. This caveat is retained DELIBERATELY: a `|| ''` entry whose knob
+#     the pinned engine ignores is inert, not active.
+#
+# No non-streaming / whole-generation RCA survives in this workflow (R5): the
+# superseded 2026-09-12 narrative is deleted, not retained as history.
 #
 
 # This workflow still retries NOTHING in-job (R4): a run that produced no verdict
@@ -227,13 +241,17 @@ jobs:
           # needed more than 5m, the cap killed it, and the per-turn retry re-sent
           # the same request. A progressing generation must never be cut off;
           # only a SILENT one should fail — which is what the idle bound is for.
+          # ACTIVE on the pinned engine v2026.255.1803 (all three knobs have
+          # `strings` hits in the bundled plugin-review — evidence in the body).
           AI_REVIEW_STREAM_IDLE_TIMEOUT: ${{ vars.AI_REVIEW_STREAM_IDLE_TIMEOUT || '' }}
           AI_REVIEW_ATTEMPT_TIMEOUT: ${{ vars.AI_REVIEW_ATTEMPT_TIMEOUT || '' }}
           AI_REVIEW_TOOL_RESULT_MAX_BYTES: ${{ vars.AI_REVIEW_TOOL_RESULT_MAX_BYTES || '' }}
           # The GENERATION bounds (the measured root-cause fix, owned by the
-          # engine). Empty means "use the engine default" (reasoning_effort=low,
-          # max_tokens=65536), which is what keeps a review from generating
-          # megabytes of reasoning and blowing the time budget.
+          # engine). INERT on the current pin: the released plugin-review has
+          # ZERO `strings` hits for both (the bound lands in
+          # opencharly/plugin-review#10). Passed through now so the wiring is in
+          # place; empty means "use the engine default" once the engine release
+          # carrying the knob is welded and the TAG below is bumped.
           AI_REVIEW_REASONING_EFFORT: ${{ vars.AI_REVIEW_REASONING_EFFORT || '' }}
           AI_REVIEW_MAX_TOKENS: ${{ vars.AI_REVIEW_MAX_TOKENS || '' }}
           # Zero retries: a failed first attempt is terminal — no repeat cycle.

@@ -859,6 +859,12 @@ def run_harness():
          "structural: no throttled-egress RCA anywhere in the workflow")
     note("non-streaming request under a whole-generation deadline" not in text.lower(),
          "structural: the retired non-streaming RCA is GONE (case-insensitive)")
+    note("opencharly/plugin-review#10" in text,
+         "structural: header routes the durable generation bound to its owner "
+         "(the engine, opencharly/plugin-review#10)")
+    note("INERT until the engine release carrying them is welded" in text,
+         "structural: header states the generation knobs are INERT on the current "
+         "pin until the engine release is welded and the TAG bumped")
     note("remedies: re-run" not in text,
          "structural: no re-run-and-see remedy anywhere in the workflow text")
     note("AI_REVIEW_STREAM_IDLE_TIMEOUT" in text,
