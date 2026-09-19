@@ -882,6 +882,18 @@ def run_harness():
              "(the engine default applies; no hardcoded 5m)")
         note(subst(raw, ns_set) == "120",
              "functional: with the org var SET the cap RESOLVES to the set value")
+    note("AI_REVIEW_TOOL_RESULT_MAX_BYTES" in review_env,
+         "functional: the review step EXPORTS AI_REVIEW_TOOL_RESULT_MAX_BYTES (the "
+         "context-growth cap the streaming engine applies)")
+    if "AI_REVIEW_TOOL_RESULT_MAX_BYTES" in review_env:
+        raw_t = review_env["AI_REVIEW_TOOL_RESULT_MAX_BYTES"]
+        ns_unset_t = Ctx({"vars": Ctx({}), "inputs": Ctx({}), "secrets": Ctx({})})
+        note(subst(raw_t, ns_unset_t) == "",
+             "functional: with the org var UNSET the tool-result cap is EMPTY "
+             "(the engine default applies)")
+    note("AI_REVIEW_STREAM_IDLE_TIMEOUT" in review_env,
+         "functional: the review step EXPORTS AI_REVIEW_STREAM_IDLE_TIMEOUT (the "
+         "streaming engine's silence bound)")
     note("AI_REVIEW_MAX_ATTEMPTS" in review_env,
          "functional: the review step EXPORTS AI_REVIEW_MAX_ATTEMPTS for the plugin "
          "(pre-knob tree exported nothing, so every review retried twice)")
