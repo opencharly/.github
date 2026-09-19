@@ -249,7 +249,11 @@ def parse_step(block_lines):
                 width = len(entry) - len(entry.lstrip(" "))
                 if width < CHILD_INDENT:
                     break
-                k, _, v = entry.strip().partition(":")
+                stripped = entry.strip()
+                if stripped.startswith("#"):
+                    i += 1  # YAML comment inside the env block
+                    continue
+                k, _, v = stripped.partition(":")
                 step["env"][k.strip()] = v.strip()
                 i += 1
         elif value in ("|", "|-", ">", ">-", "|+", ">+"):
@@ -848,13 +852,13 @@ def run_harness():
          "structural: header records the T4 maintainer sign-off requirement")
     note("vars.REVIEW_RUNNER_LABEL" in text,
          "structural: header names the operator lever vars.REVIEW_RUNNER_LABEL")
-    note("whole-generation deadline is the wrong bound" in text,
-         "structural: header names the CURRENT root cause (a streaming engine under "
-         "a hardcoded whole-request cap)")
+    note("NO generation bound" in text and "1.75 MB of reasoning" in text,
+         "structural: header names the MEASURED root cause (an unbounded reasoning "
+         "generation, not the timeout cap)")
     note("throttles/blocks datacenter/shared runner egress" not in text,
          "structural: no throttled-egress RCA anywhere in the workflow")
-    note("NON-STREAMING request under a WHOLE-GENERATION deadline" not in text,
-         "structural: the retired non-streaming RCA is GONE (the engine streams)")
+    note("non-streaming request under a whole-generation deadline" not in text.lower(),
+         "structural: the retired non-streaming RCA is GONE (case-insensitive)")
     note("remedies: re-run" not in text,
          "structural: no re-run-and-see remedy anywhere in the workflow text")
     note("AI_REVIEW_STREAM_IDLE_TIMEOUT" in text,
@@ -892,6 +896,16 @@ def run_harness():
              "(the engine default applies; no hardcoded 5m)")
         note(subst(raw, ns_set) == "120",
              "functional: with the org var SET the cap RESOLVES to the set value")
+    for knob in ("AI_REVIEW_REASONING_EFFORT", "AI_REVIEW_MAX_TOKENS"):
+        note(knob in review_env,
+             "functional: the review step EXPORTS " + knob + " (a generation bound)")
+        if knob in review_env:
+            ns_unset_k = Ctx({"vars": Ctx({}), "inputs": Ctx({}), "secrets": Ctx({})})
+            ns_set_k = Ctx({"vars": Ctx({knob: "x"}), "inputs": Ctx({}), "secrets": Ctx({})})
+            note(subst(review_env[knob], ns_unset_k) == "",
+                 "functional: with the org var UNSET " + knob + " is EMPTY (engine default applies)")
+            note(subst(review_env[knob], ns_set_k) == "x",
+                 "functional: with the org var SET " + knob + " resolves to the set value")
     note("AI_REVIEW_TOOL_RESULT_MAX_BYTES" in review_env,
          "functional: the review step EXPORTS AI_REVIEW_TOOL_RESULT_MAX_BYTES (the "
          "context-growth cap the streaming engine applies)")

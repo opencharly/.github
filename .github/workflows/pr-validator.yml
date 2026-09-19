@@ -27,35 +27,38 @@
 #                   never merge).
 #   AMBIGUOUS    -> exit 2 — mixed PASS+BLOCK lines in one review, exit 0.
 #
-# RCA 2026-09-19 (supersedes the 2026-09-12 diagnosis, which described the
-# then-current NON-streaming client). The review engine now STREAMS via the
-# shared sdk/llmkit client, so the meaningful bound is SILENCE between chunks,
-# not total generation time.
+# RCA 2026-09-19 (MEASURED; supersedes the 2026-09-12 and the earlier
+# 2026-09-19 "5-minute workflow cap" narrative below it).
 #
-# Symptom: ~14-minute review runs. Measured on run 35451451001 (2026-09-19):
-#   plugin-review: pass 1/1 — provider=ollama-cloud ...   (the streaming engine ran)
-#   plugin-review: turn 1: 4 tool call(s)
-#   plugin-review: turn request attempt 1/3 failed: LLM request exceeded the 5m0s whole-request deadline
-#   plugin-review: turn 2: 2 tool call(s)
-#   plugin-review: turn request attempt 1/3 failed: LLM request exceeded the 5m0s whole-request deadline
+# Two symptoms, one root cause:
+#   13m49s runs      -> "turn request attempt N/3 failed: LLM request exceeded
+#                        the 5m0s whole-request deadline: context deadline exceeded"
+#   empty reviews    -> "turn 2: final content len=0" (`verdict_lines=0`)
 #
-# ROOT CAUSE: this workflow handed the engine a HARDCODED 5-minute whole-request
-# deadline (`AI_REVIEW_ATTEMPT_TIMEOUT || '300'`), overriding the engine's own
-# 15m default, and never passed the STREAM IDLE bound at all. Turn 2 (the PR
-# diff) legitimately needed more than 5m on a large PR; the cap killed it; the
-# per-turn retry re-sent the SAME request. Two 5m stalls are ~10 of the 14 min.
+# ROOT CAUSE: the review engine sent NO generation bound — no `reasoning_effort`
+# and no `max_tokens` — and deepseek-v4.1-flash is a REASONING model. Measured
+# against the REAL validator context (28 KB rulebook + 79 KB PR thread + 120 KB
+# diff), the unbounded request generated 1.75 MB of reasoning over 786 s before
+# answering. A whole-request cap kills that mid-generation (the retry re-sends
+# it: two 5m stalls); a cap set too tight instead truncates the reasoning into an
+# EMPTY completion. The cap did not CAUSE the defect — an unbounded generation
+# did — which is why raising the cap only moves the symptom.
 #
-# THE FIX (this workflow): stop capping total generation time. Pass the
-# stream-idle bound (AI_REVIEW_STREAM_IDLE_TIMEOUT) and the tool-result cap
-# through from org vars, and leave the whole-request deadline EMPTY so the
-# engine's generous default applies unless an org overrides it. A progressing
-# generation is never cut off; a SILENT provider still fails in bounded time on
-# the idle bound.
+# THE FIX, split by owner:
+#   * engine (opencharly/plugin-review#10): BOUND the generation —
+#     `reasoning_effort: low` + `max_tokens: 65536`. Measured, the same request
+#     returns a verdict in 47-107 s instead of 786 s.
+#   * this workflow: pass the engine's bounds through from org vars
+#     (AI_REVIEW_REASONING_EFFORT, AI_REVIEW_MAX_TOKENS), pass the stream-idle
+#     bound, and leave the whole-request deadline EMPTY so the engine default
+#     applies unless an org deliberately overrides it. The engine owns the
+#     bound; this workflow no longer hardcodes one.
 #
-# Historical note (2026-09-12, retained): BEFORE streaming, a non-streaming
-# request under a whole-generation deadline failed with "awaiting headers";
-# streaming + bounded tool results (plugin-review) fixed that class.
+# Historical note (2026-09-12, retained): a pre-streaming request under a
+# whole-generation deadline failed with "awaiting headers"; streaming + bounded
+# tool results (plugin-review) superseded that class.
 #
+
 # This workflow still retries NOTHING in-job (R4): a run that produced no verdict
 # is a class to REPORT, not a flake to paper over. The runner image stays
 # operator-selectable via vars.REVIEW_RUNNER_LABEL (runs-on: below).
@@ -227,6 +230,12 @@ jobs:
           AI_REVIEW_STREAM_IDLE_TIMEOUT: ${{ vars.AI_REVIEW_STREAM_IDLE_TIMEOUT || '' }}
           AI_REVIEW_ATTEMPT_TIMEOUT: ${{ vars.AI_REVIEW_ATTEMPT_TIMEOUT || '' }}
           AI_REVIEW_TOOL_RESULT_MAX_BYTES: ${{ vars.AI_REVIEW_TOOL_RESULT_MAX_BYTES || '' }}
+          # The GENERATION bounds (the measured root-cause fix, owned by the
+          # engine). Empty means "use the engine default" (reasoning_effort=low,
+          # max_tokens=65536), which is what keeps a review from generating
+          # megabytes of reasoning and blowing the time budget.
+          AI_REVIEW_REASONING_EFFORT: ${{ vars.AI_REVIEW_REASONING_EFFORT || '' }}
+          AI_REVIEW_MAX_TOKENS: ${{ vars.AI_REVIEW_MAX_TOKENS || '' }}
           # Zero retries: a failed first attempt is terminal — no repeat cycle.
           # Default 1 org-wide; any repo may opt back to retries via its own var.
           AI_REVIEW_MAX_ATTEMPTS: ${{ vars.AI_REVIEW_MAX_ATTEMPTS || '1' }}
