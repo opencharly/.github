@@ -27,8 +27,9 @@
 #                   never merge).
 #   AMBIGUOUS    -> exit 2 — mixed PASS+BLOCK lines in one review, exit 0.
 #
-# RCA 2026-09-19 (MEASURED; supersedes the 2026-09-12 and the earlier
-# 2026-09-19 "5-minute workflow cap" narrative below it).
+# RCA 2026-09-19 (MEASURED; supersedes the 2026-09-12 "awaiting headers" and the
+# earlier 2026-09-19 "5-minute workflow cap" narratives, BOTH deleted in this PR
+# per R5 — no superseded narrative is retained).
 #
 # Two symptoms, one root cause:
 #   13m49s runs      -> "turn request attempt N/3 failed: LLM request exceeded

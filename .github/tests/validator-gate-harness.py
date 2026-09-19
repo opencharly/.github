@@ -859,6 +859,12 @@ def run_harness():
          "structural: no throttled-egress RCA anywhere in the workflow")
     note("non-streaming request under a whole-generation deadline" not in text.lower(),
          "structural: the retired non-streaming RCA is GONE (case-insensitive)")
+    note("narrative below it" not in text,
+         "structural: the header carries no dangling reference to a superseded "
+         "narrative it claims to retain (R5: deleted in the same commit)")
+    note("supersedes the 2026-09-12" in text and "BOTH deleted in this PR" in text,
+         "structural: the header states both superseded narratives are DELETED in "
+         "this PR, not retained below")
     note("opencharly/plugin-review#10" in text,
          "structural: header routes the durable generation bound to its owner "
          "(the engine, opencharly/plugin-review#10)")
