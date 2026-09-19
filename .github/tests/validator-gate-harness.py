@@ -482,9 +482,7 @@ SCENARIOS = [
             "validator INCONCLUSIVE",
             "provider unanswered",
             "in-job retries: none",
-            "NON-STREAMING",
-            "300s default",
-            "FAILED TURN",
+            "AI_REVIEW_STREAM_IDLE_TIMEOUT",
         ],
         "expect_review_outputs": {"provider_unanswered": "true", "review_rc": "1",
                                   "discarded_verdict": "false"},
@@ -531,7 +529,7 @@ SCENARIOS = [
             "do NOT retry blindly",
         ],
         "expect_comment_excludes": [
-            "NON-STREAMING request under a WHOLE-GENERATION deadline",
+            "whole-generation deadline is the wrong bound",
             "verdict-less review output",
         ],
         "expect_review_outputs": {"provider_error": "400", "provider_unanswered": "false",
@@ -651,7 +649,7 @@ SCENARIOS = [
             "carries NONE of the recognised signatures",
         ],
         "expect_comment_excludes": [
-            "NON-STREAMING request under a WHOLE-GENERATION deadline",
+            "whole-generation deadline is the wrong bound",
         ],
         "expect_review_outputs": {"provider_unanswered": "false", "review_rc": "2",
                                   "discarded_verdict": "false"},
@@ -850,35 +848,38 @@ def run_harness():
          "structural: header records the T4 maintainer sign-off requirement")
     note("vars.REVIEW_RUNNER_LABEL" in text,
          "structural: header names the operator lever vars.REVIEW_RUNNER_LABEL")
-    note("NON-STREAMING request under a WHOLE-GENERATION deadline" in text,
-         "structural: header names the CORRECTED root cause (a non-streaming, "
-         "whole-generation HTTP deadline)")
+    note("whole-generation deadline is the wrong bound" in text,
+         "structural: header names the CURRENT root cause (a streaming engine under "
+         "a hardcoded whole-request cap)")
     note("throttles/blocks datacenter/shared runner egress" not in text,
-         "structural: the superseded throttled-egress RCA is GONE from the workflow "
-         "(corrected 2026-09-12 by opencharly/.github#91)")
-    note("retry the FAILED TURN" in text and "owner: plugin-review" in text,
-         "structural: header routes the durable per-turn fix to its owner (plugin-review)")
+         "structural: no throttled-egress RCA anywhere in the workflow")
+    note("NON-STREAMING request under a WHOLE-GENERATION deadline" not in text,
+         "structural: the retired non-streaming RCA is GONE (the engine streams)")
     note("remedies: re-run" not in text,
          "structural: no re-run-and-see remedy anywhere in the workflow text")
-    note("AI_REVIEW_ATTEMPT_TIMEOUT, org-settable, default 300s" in text,
-         "structural: header documents the org-settable cap lever this workflow "
-         "passes through")
+    note("AI_REVIEW_STREAM_IDLE_TIMEOUT" in text,
+         "structural: header documents the stream-idle lever this workflow passes "
+         "through (the meaningful bound for a streaming engine)")
     note("timeout-minutes: 20" in text,
          "structural: the validate job carries a fail-hard wall clock "
          "(timeout-minutes: 20 caps a provider-unanswered burn)")
     # FUNCTIONAL coverage (the review's R10 finding: the env entry and the engine-defective
     # classification shipped with NO assertion that fails without them).
     review_env = find_step(steps, "id", "review")["env"]
+    note("AI_REVIEW_STREAM_IDLE_TIMEOUT" in review_env,
+         "functional: the review step EXPORTS AI_REVIEW_STREAM_IDLE_TIMEOUT (the "
+         "streaming engine's silence bound)")
     note("AI_REVIEW_ATTEMPT_TIMEOUT" in review_env,
-         "functional: the review step EXPORTS AI_REVIEW_ATTEMPT_TIMEOUT for the plugin "
-         "(pre-fix tree exported nothing, so no cap could ever be raised)")
+         "functional: the review step EXPORTS AI_REVIEW_ATTEMPT_TIMEOUT (optional "
+         "whole-request cap, empty by default)")
     if "AI_REVIEW_ATTEMPT_TIMEOUT" in review_env:
         raw = review_env["AI_REVIEW_ATTEMPT_TIMEOUT"]
         ns_unset = Ctx({"vars": Ctx({}), "inputs": Ctx({}), "secrets": Ctx({})})
         ns_set = Ctx({"vars": Ctx({"AI_REVIEW_ATTEMPT_TIMEOUT": "120"}),
                       "inputs": Ctx({}), "secrets": Ctx({})})
-        note(subst(raw, ns_unset) == "300",
-             "functional: with the org var UNSET the cap RESOLVES to the 300s default")
+        note(subst(raw, ns_unset) == "",
+             "functional: with the org var UNSET the whole-request cap is EMPTY "
+             "(the engine default applies; no hardcoded 5m)")
         note(subst(raw, ns_set) == "120",
              "functional: with the org var SET the cap RESOLVES to the set value")
     note("AI_REVIEW_MAX_ATTEMPTS" in review_env,
