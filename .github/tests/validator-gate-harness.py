@@ -869,6 +869,16 @@ def run_harness():
     note("AI_REVIEW_STREAM_IDLE_TIMEOUT" in review_env,
          "functional: the review step EXPORTS AI_REVIEW_STREAM_IDLE_TIMEOUT (the "
          "streaming engine's silence bound)")
+    if "AI_REVIEW_STREAM_IDLE_TIMEOUT" in review_env:
+        raw_i = review_env["AI_REVIEW_STREAM_IDLE_TIMEOUT"]
+        ns_unset_i = Ctx({"vars": Ctx({}), "inputs": Ctx({}), "secrets": Ctx({})})
+        ns_set_i = Ctx({"vars": Ctx({"AI_REVIEW_STREAM_IDLE_TIMEOUT": "45"}),
+                        "inputs": Ctx({}), "secrets": Ctx({})})
+        note(subst(raw_i, ns_unset_i) == "",
+             "functional: with the org var UNSET the idle bound is EMPTY "
+             "(the engine default applies)")
+        note(subst(raw_i, ns_set_i) == "45",
+             "functional: with the org var SET the idle bound RESOLVES to the set value")
     note("AI_REVIEW_ATTEMPT_TIMEOUT" in review_env,
          "functional: the review step EXPORTS AI_REVIEW_ATTEMPT_TIMEOUT (optional "
          "whole-request cap, empty by default)")
@@ -891,9 +901,6 @@ def run_harness():
         note(subst(raw_t, ns_unset_t) == "",
              "functional: with the org var UNSET the tool-result cap is EMPTY "
              "(the engine default applies)")
-    note("AI_REVIEW_STREAM_IDLE_TIMEOUT" in review_env,
-         "functional: the review step EXPORTS AI_REVIEW_STREAM_IDLE_TIMEOUT (the "
-         "streaming engine's silence bound)")
     note("AI_REVIEW_MAX_ATTEMPTS" in review_env,
          "functional: the review step EXPORTS AI_REVIEW_MAX_ATTEMPTS for the plugin "
          "(pre-knob tree exported nothing, so every review retried twice)")
