@@ -27,49 +27,34 @@
 #                   never merge).
 #   AMBIGUOUS    -> exit 2 — mixed PASS+BLOCK lines in one review, exit 0.
 #
-# RCA 2026-09-12 (CORRECTED — supersedes the 2026-09-11 "throttled datacenter
-# egress" diagnosis, which was WRONG; opencharly/.github#91 carries the corrected
-# RCA and the endpoint probe that refutes it).
-# Symptom: validator runs dying with "context deadline exceeded (Client.Timeout
-# exceeded while awaiting headers)" — no verdict, the required check RED.
+# RCA 2026-09-19 (supersedes the 2026-09-12 diagnosis, which described the
+# then-current NON-streaming client). The review engine now STREAMS via the
+# shared sdk/llmkit client, so the meaningful bound is SILENCE between chunks,
+# not total generation time.
 #
-# ROOT CAUSE: a NON-STREAMING request under a WHOLE-GENERATION deadline.
-# plugin-review POSTs to the provider's /chat/completions with no `stream:true`
-# (candy/plugin-review/llm.go:92), so the client receives response headers only
-# after the ENTIRE generation has finished — all under ONE http.Client{Timeout}
-# (llm.go:80) whose built-in default is 5 minutes (review.go:28,
-# defaultAttemptTimeout). The review runs inside a 20-turn tool loop (review.go,
-# defaultMaxTurns = 20) in which every turn APPENDS its tool results (the PR
-# diff/files) to the context, and the WHOLE loop is retried as 3 attempts
-# (review.go). Turn 1 therefore succeeds quickly ("turn 1: 4 tool call(s)"), and
-# turn 2 — carrying the ENLARGED context — fails in ONE OF TWO OBSERVED ways, both
-# rooted in the same non-streaming whole-generation design:
-#   (a) the generation returns EMPTY content ("turn 2: final content len=0",
-#       review_len=0) — observed on 2 of the 3 attempts in run 34682776608; or
-#   (b) it exceeds the 5-minute cap ("Client.Timeout ... while awaiting headers")
-#       — observed on the third attempt of that run.
-# The observed signature is therefore a COMPLETED turn 1 followed by a turn-2
-# failure of EITHER kind. Both are one defect class — an unbounded, non-streaming
-# request whose context grew — and the fix covers both: streaming bounds the idle
-# gap instead of the whole generation, and bounded tool-result payloads keep turn
-# 2's context small enough to answer at all.
+# Symptom: ~14-minute review runs. Measured on run 35451451001 (2026-09-19):
+#   plugin-review: pass 1/1 — provider=ollama-cloud ...   (the streaming engine ran)
+#   plugin-review: turn 1: 4 tool call(s)
+#   plugin-review: turn request attempt 1/3 failed: LLM request exceeded the 5m0s whole-request deadline
+#   plugin-review: turn 2: 2 tool call(s)
+#   plugin-review: turn request attempt 1/3 failed: LLM request exceeded the 5m0s whole-request deadline
 #
-# The endpoint was NEVER the problem: it answered 405 in 0.18s from a residential
-# path in the same window, and this runner DID receive a complete turn-1
-# response. There is no such thing as a "throttled egress" here. The contributing
-# defects are client-side: no explicit http.Transport (a stale keep-alive POST can
-# hang to the deadline), UNBOUNDED tool-result payloads, and a retry that re-runs
-# the WHOLE loop instead of the failed turn.
+# ROOT CAUSE: this workflow handed the engine a HARDCODED 5-minute whole-request
+# deadline (`AI_REVIEW_ATTEMPT_TIMEOUT || '300'`), overriding the engine's own
+# 15m default, and never passed the STREAM IDLE bound at all. Turn 2 (the PR
+# diff) legitimately needed more than 5m on a large PR; the cap killed it; the
+# per-turn retry re-sent the SAME request. Two 5m stalls are ~10 of the 14 min.
 #
-# THE FIX, TWO HALVES. (i) THIS workflow PASSES the cap through:
-# AI_REVIEW_ATTEMPT_TIMEOUT, org-settable, default 300s (= the plugin's own
-# built-in default, review.go:28): a single generation needing more than 5
-# minutes has never been observed to succeed — the recorded failures are
-# generations that NEVER answer — so the cap is a deadline, not a budget.
-# (ii) The durable
-# per-turn fixes — STREAM the completion, set an explicit http.Transport, BOUND
-# the tool-result payloads, and retry the FAILED TURN rather than the whole loop
-# — belong to plugin-review (owner: plugin-review).
+# THE FIX (this workflow): stop capping total generation time. Pass the
+# stream-idle bound (AI_REVIEW_STREAM_IDLE_TIMEOUT) and the tool-result cap
+# through from org vars, and leave the whole-request deadline EMPTY so the
+# engine's generous default applies unless an org overrides it. A progressing
+# generation is never cut off; a SILENT provider still fails in bounded time on
+# the idle bound.
+#
+# Historical note (2026-09-12, retained): BEFORE streaming, a non-streaming
+# request under a whole-generation deadline failed with "awaiting headers";
+# streaming + bounded tool results (plugin-review) fixed that class.
 #
 # This workflow still retries NOTHING in-job (R4): a run that produced no verdict
 # is a class to REPORT, not a flake to paper over. The runner image stays
@@ -229,12 +214,21 @@ jobs:
           AI_REVIEW_MODEL:     ${{ inputs.ai_review_model || vars.AI_REVIEW_MODEL }}
           AI_REVIEW_BASE_URL:  ${{ inputs.ai_review_base_url || vars.AI_REVIEW_BASE_URL }}
           AI_REVIEW_MAX_TURNS: ${{ vars.AI_REVIEW_MAX_TURNS || '20' }}
-          AI_REVIEW_ATTEMPT_TIMEOUT: ${{ vars.AI_REVIEW_ATTEMPT_TIMEOUT || '300' }}
-          # Zero retries (opencharly/plugin-review#5, engine PR #6): a failed
-          # first attempt is terminal — no repeat cycle. INERT until the engine
-          # release carrying the knob is welded and TAG below is bumped; the
-          # pinned bundle ignores unknown env. Default 1 org-wide; any repo may
-          # opt back to retries via its own AI_REVIEW_MAX_ATTEMPTS var.
+          # The engine STREAMS. The meaningful bound is SILENCE between chunks
+          # (the idle bound), which this workflow now passes through; the
+          # whole-request deadline is left UNSET so the engine's own generous
+          # default applies unless an org explicitly overrides it.
+          #
+          # A hardcoded 5m whole-request cap here was the measured cause of
+          # ~14m review runs (run 35451451001): turn 2 (the PR diff) legitimately
+          # needed more than 5m, the cap killed it, and the per-turn retry re-sent
+          # the same request. A progressing generation must never be cut off;
+          # only a SILENT one should fail — which is what the idle bound is for.
+          AI_REVIEW_STREAM_IDLE_TIMEOUT: ${{ vars.AI_REVIEW_STREAM_IDLE_TIMEOUT || '' }}
+          AI_REVIEW_ATTEMPT_TIMEOUT: ${{ vars.AI_REVIEW_ATTEMPT_TIMEOUT || '' }}
+          AI_REVIEW_TOOL_RESULT_MAX_BYTES: ${{ vars.AI_REVIEW_TOOL_RESULT_MAX_BYTES || '' }}
+          # Zero retries: a failed first attempt is terminal — no repeat cycle.
+          # Default 1 org-wide; any repo may opt back to retries via its own var.
           AI_REVIEW_MAX_ATTEMPTS: ${{ vars.AI_REVIEW_MAX_ATTEMPTS || '1' }}
           AI_REVIEW_API_KEY:   ${{ secrets.AI_REVIEW_API_KEY }}
           REVIEW_PROMPT_PATH:  ${{ github.workspace }}/runner-config/prompt/validator.md
@@ -463,9 +457,9 @@ jobs:
           # describes. No branch above falls through to it (see the bounded default), so a log
           # without that signature cannot receive it.
           if [ "$narrative" = "streaming" ]; then
-            rootcause='**Root cause.** A NON-STREAMING request under a WHOLE-GENERATION deadline: plugin-review POSTs with no `stream:true` (candy/plugin-review/llm.go:92), so response headers arrive only when the ENTIRE generation finishes, all under one `http.Client{Timeout}` (llm.go:80) whose built-in default is 5 minutes (review.go:28). The review runs in a 20-turn tool loop that APPENDS the tool results of every turn (the PR diff/files) to the context and retries the whole loop up to AI_REVIEW_MAX_ATTEMPTS times (3 in the pinned bundle; 1 once the fail-fast wiring activates): turn 1 completes, and turn 2 — carrying the enlarged context — fails in ONE OF TWO OBSERVED ways: it returns EMPTY content (`turn 2: final content len=0`, observed on 2 of the 3 attempts in run 34682776608) or it exceeds the 5-minute cap (observed on the third). Both are one defect class — an unbounded, non-streaming request whose context grew. The endpoint answered 405 in 0.18s in the same window — there is no throttled egress.'
-            remedy1='1. this workflow now PASSES the cap through — `AI_REVIEW_ATTEMPT_TIMEOUT` (org-settable, 300s default) — raise it if a large context still exceeds it;'
-            remedy2='2. plugin-review: stream the completion, set an explicit `http.Transport`, bound the tool-result payloads, and retry the FAILED TURN rather than the whole loop (owner: plugin-review).'
+            rootcause='**Root cause.** The review engine STREAMS, so a whole-generation deadline is the wrong bound: a large tool-result turn (the PR diff on turn 2) can legitimately need more than a fixed whole-request cap, and the per-turn retry then re-sends the SAME request. The measured 2026-09-19 signature (`pass 1/1` + two `turn request attempt 1/3 failed: LLM request exceeded the 5m0s whole-request deadline` lines) was THIS WORKFLOW handing the engine a hardcoded 5-minute `AI_REVIEW_ATTEMPT_TIMEOUT` and never passing the STREAM IDLE bound. The engine is not at fault; the cap was.'
+            remedy1='1. pass `AI_REVIEW_STREAM_IDLE_TIMEOUT` (the silence bound) and leave `AI_REVIEW_ATTEMPT_TIMEOUT` UNSET so the engine default applies — a progressing generation is never cut off;'
+            remedy2='2. if this persists, raise the idle bound or the tool-result cap (`AI_REVIEW_TOOL_RESULT_MAX_BYTES`) rather than capping total generation time.'
           fi
           {
             echo '## validator INCONCLUSIVE — no review verdict was produced (not a BLOCK; no code finding)'
