@@ -58,9 +58,12 @@
 # ACTIVE vs INERT (verified against the pinned bundle, never asserted — the
 # `strings` evidence is in this PR's body):
 #   * ACTIVE NOW (carried by the pinned engine v2026.255.1803):
-#     AI_REVIEW_STREAM_IDLE_TIMEOUT, AI_REVIEW_TOOL_RESULT_MAX_BYTES and
-#     AI_REVIEW_ATTEMPT_TIMEOUT. Dropping the hardcoded 300s cap takes effect
-#     immediately on the current pin.
+#     AI_REVIEW_STREAM_IDLE_TIMEOUT, AI_REVIEW_TOOL_RESULT_MAX_BYTES,
+#     AI_REVIEW_ATTEMPT_TIMEOUT and AI_REVIEW_MAX_ATTEMPTS. Dropping the
+#     hardcoded 300s cap takes effect immediately on the current pin. NOTE: the
+#     workflow's built-in fallback TAG (v2026.254.1902) predates
+#     AI_REVIEW_MAX_ATTEMPTS and AI_REVIEW_STREAM_IDLE_TIMEOUT; those two are
+#     ACTIVE only because vars.CHARLY_VERSION pins v2026.255.1803 org-wide.
 #   * INERT until the engine release carrying them is welded AND the pinned
 #     TAG below is bumped: AI_REVIEW_REASONING_EFFORT and AI_REVIEW_MAX_TOKENS.
 #     The pinned bundle has ZERO hits for both (the engine's generation bound

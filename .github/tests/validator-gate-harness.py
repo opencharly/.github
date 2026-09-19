@@ -871,6 +871,9 @@ def run_harness():
     note("INERT until the engine release carrying them is welded" in text,
          "structural: header states the generation knobs are INERT on the current "
          "pin until the engine release is welded and the TAG bumped")
+    note("AI_REVIEW_MAX_ATTEMPTS" in text and "ACTIVE NOW" in text,
+         "structural: header's ACTIVE inventory accounts for AI_REVIEW_MAX_ATTEMPTS "
+         "(the workflow edits its comment, so the knob must be evidenced)")
     note("the engine is not at fault" not in text.lower(),
          "structural: no emitted narrative exonerates the engine of the unbounded "
          "generation (header and emitted RCA agree)")
