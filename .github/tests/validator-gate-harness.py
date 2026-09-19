@@ -865,6 +865,12 @@ def run_harness():
     note("INERT until the engine release carrying them is welded" in text,
          "structural: header states the generation knobs are INERT on the current "
          "pin until the engine release is welded and the TAG bumped")
+    note("the engine is not at fault" not in text.lower(),
+         "structural: no emitted narrative exonerates the engine of the unbounded "
+         "generation (header and emitted RCA agree)")
+    note("PRIMARY cause of the ~14m runs" in text,
+         "structural: header/env state the primary cause is the engine's unbounded "
+         "generation, with the workflow cap as the amplifier")
     note("remedies: re-run" not in text,
          "structural: no re-run-and-see remedy anywhere in the workflow text")
     note("AI_REVIEW_STREAM_IDLE_TIMEOUT" in text,

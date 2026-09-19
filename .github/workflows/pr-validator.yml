@@ -236,13 +236,21 @@ jobs:
           # whole-request deadline is left UNSET so the engine's own generous
           # default applies unless an org explicitly overrides it.
           #
-          # A hardcoded 5m whole-request cap here was the measured cause of
-          # ~14m review runs (run 35451451001): turn 2 (the PR diff) legitimately
-          # needed more than 5m, the cap killed it, and the per-turn retry re-sent
-          # the same request. A progressing generation must never be cut off;
-          # only a SILENT one should fail — which is what the idle bound is for.
+          # The PRIMARY cause of the ~14m runs (run 35451451001) was the engine's
+          # unbounded reasoning generation (owner: opencharly/plugin-review#10);
+          # the hardcoded 5m whole-request cap HERE was the amplifier — it killed
+          # a progressing generation mid-flight and the per-turn retry re-sent the
+          # same request. Removing the cap stops the amplification; bounding the
+          # generation (the engine PR) removes the cause. A progressing generation
+          # must never be cut off; only a SILENT one should fail — which is what
+          # the idle bound is for.
           # ACTIVE on the pinned engine v2026.255.1803 (all three knobs have
           # `strings` hits in the bundled plugin-review — evidence in the body).
+          # A DEFINED-EMPTY var is treated as UNSET by the pinned engine:
+          # getenvAny (candy/plugin-review/parse.go) returns "" for any env whose
+          # value is "", and every knob caller guards with `if v := getenvAny(…
+          # ); v != ""`. So `|| ''` means "no override", NOT "parse 0" — pasted
+          # source excerpt in the body.
           AI_REVIEW_STREAM_IDLE_TIMEOUT: ${{ vars.AI_REVIEW_STREAM_IDLE_TIMEOUT || '' }}
           AI_REVIEW_ATTEMPT_TIMEOUT: ${{ vars.AI_REVIEW_ATTEMPT_TIMEOUT || '' }}
           AI_REVIEW_TOOL_RESULT_MAX_BYTES: ${{ vars.AI_REVIEW_TOOL_RESULT_MAX_BYTES || '' }}
@@ -484,8 +492,8 @@ jobs:
           # describes. No branch above falls through to it (see the bounded default), so a log
           # without that signature cannot receive it.
           if [ "$narrative" = "streaming" ]; then
-            rootcause='**Root cause.** The review engine STREAMS, so a whole-generation deadline is the wrong bound: a large tool-result turn (the PR diff on turn 2) can legitimately need more than a fixed whole-request cap, and the per-turn retry then re-sends the SAME request. The measured 2026-09-19 signature (`pass 1/1` + two `turn request attempt 1/3 failed: LLM request exceeded the 5m0s whole-request deadline` lines) was THIS WORKFLOW handing the engine a hardcoded 5-minute `AI_REVIEW_ATTEMPT_TIMEOUT` and never passing the STREAM IDLE bound. The engine is not at fault; the cap was.'
-            remedy1='1. pass `AI_REVIEW_STREAM_IDLE_TIMEOUT` (the silence bound) and leave `AI_REVIEW_ATTEMPT_TIMEOUT` UNSET so the engine default applies — a progressing generation is never cut off;'
+            rootcause='**Root cause.** The ENGINE sent no generation bound (`reasoning_effort` / `max_tokens`), so a reasoning model generated megabytes of reasoning before answering (measured: 1.75 MB / 786 s on the real context). THIS WORKFLOW then converted that into a hard failure by handing the engine a hardcoded 5-minute whole-request `AI_REVIEW_ATTEMPT_TIMEOUT` (the engine streams, so a whole-generation deadline is the wrong bound) — the cap killed the generation mid-flight and the per-turn retry re-sent the SAME request. The primary cause is the unbounded generation (owner: the engine, opencharly/plugin-review#10); the hardcoded cap is the workflow-side amplifier this PR removes.'
+            remedy1='1. bound the generation in the engine (opencharly/plugin-review#10); pass `AI_REVIEW_STREAM_IDLE_TIMEOUT` (the correct bound for a streaming engine) and leave `AI_REVIEW_ATTEMPT_TIMEOUT` UNSET so no whole-generation cap cuts a progressing stream;'
             remedy2='2. if this persists, raise the idle bound or the tool-result cap (`AI_REVIEW_TOOL_RESULT_MAX_BYTES`) rather than capping total generation time.'
           fi
           {
