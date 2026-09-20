@@ -55,24 +55,23 @@
 #     applies unless an org deliberately overrides it. The engine owns the
 #     bound; this workflow no longer hardcodes one.
 #
-# ACTIVE vs INERT (verified against the pinned bundle, never asserted — the
-# `strings` evidence is in this PR's body):
-#   * ACTIVE NOW (carried by the pinned engine v2026.255.1803):
+# ACTIVE (verified against the pinned bundle with `strings`, never asserted —
+# the evidence is in this PR's body):
+#   * ALL SIX knobs this workflow passes are ACTIVE on the org pin
+#     `vars.CHARLY_VERSION = v2026.263.0616`, whose welded engine is
+#     `plugin-review@v2026.263.0549` (the opencharly/plugin-review#10 merge):
 #     AI_REVIEW_STREAM_IDLE_TIMEOUT, AI_REVIEW_TOOL_RESULT_MAX_BYTES,
-#     AI_REVIEW_ATTEMPT_TIMEOUT and AI_REVIEW_MAX_ATTEMPTS. Dropping the
-#     hardcoded 300s cap takes effect immediately on the current pin. NOTE: the
-#     workflow's built-in fallback TAG (v2026.254.1902) predates
-#     AI_REVIEW_MAX_ATTEMPTS and AI_REVIEW_STREAM_IDLE_TIMEOUT; those two are
-#     ACTIVE only because vars.CHARLY_VERSION pins v2026.255.1803 org-wide.
-#   * INERT until the engine release carrying them is welded AND the pinned
-#     TAG below is bumped: AI_REVIEW_REASONING_EFFORT and AI_REVIEW_MAX_TOKENS.
-#     The pinned bundle has ZERO hits for both (the engine's generation bound
-#     lands in opencharly/plugin-review#10). Until then these two env entries
-#     are passed through and IGNORED — the generation stays unbounded on the
-#     current engine, and the engine's whole-request default of 15 * time.Minute
-#     (newLLMClient maps total <= 0 to defaultAttemptTimeout) remains the only
-#     per-turn ceiling. This caveat is retained DELIBERATELY: a `|| ''` entry
-#     whose knob the pinned engine ignores is inert, not active.
+#     AI_REVIEW_ATTEMPT_TIMEOUT, AI_REVIEW_MAX_ATTEMPTS,
+#     AI_REVIEW_REASONING_EFFORT and AI_REVIEW_MAX_TOKENS each have a `strings`
+#     hit in the bundled plugin-review. So passing the generation bounds
+#     through is now effective, not inert: dropping the hardcoded 300s cap takes
+#     effect immediately, and the engine's own bounded default (high thinking
+#     plus a max_tokens budget sized above what thinking consumes) is what keeps
+#     a review fast.
+#   * The workflow's built-in fallback TAG (v2026.254.1902) is OLDER and lacks
+#     several of these knobs; they are ACTIVE only because the org pins
+#     v2026.263.0616. Bumping the pin is what carries a new engine; the pin is
+#     the single lever.
 #
 # No non-streaming / whole-generation RCA survives in this workflow (R5): the
 # superseded 2026-09-12 narrative is deleted, not retained as history.
@@ -266,11 +265,12 @@ jobs:
           AI_REVIEW_ATTEMPT_TIMEOUT: ${{ vars.AI_REVIEW_ATTEMPT_TIMEOUT || '' }}
           AI_REVIEW_TOOL_RESULT_MAX_BYTES: ${{ vars.AI_REVIEW_TOOL_RESULT_MAX_BYTES || '' }}
           # The GENERATION bounds (the measured root-cause fix, owned by the
-          # engine). INERT on the current pin: the released plugin-review has
-          # ZERO `strings` hits for both (the bound lands in
-          # opencharly/plugin-review#10). Passed through now so the wiring is in
-          # place; empty means "use the engine default" once the engine release
-          # carrying the knob is welded and the TAG below is bumped.
+          # engine). ACTIVE on the org pin v2026.263.0616, whose welded
+          # plugin-review reads both (verified with `strings`). Empty means "use
+          # the engine default": high thinking plus a max_tokens budget sized
+          # above what thinking consumes — the combination measured to return a
+          # verdict in tens of seconds instead of the old 13-minute run. An
+          # operator may override either without a rebuild.
           AI_REVIEW_REASONING_EFFORT: ${{ vars.AI_REVIEW_REASONING_EFFORT || '' }}
           AI_REVIEW_MAX_TOKENS: ${{ vars.AI_REVIEW_MAX_TOKENS || '' }}
           # Zero retries: a failed first attempt is terminal — no repeat cycle.

@@ -868,12 +868,13 @@ def run_harness():
     note("opencharly/plugin-review#10" in text,
          "structural: header routes the durable generation bound to its owner "
          "(the engine, opencharly/plugin-review#10)")
-    note("INERT until the engine release carrying them is welded" in text,
-         "structural: header states the generation knobs are INERT on the current "
-         "pin until the engine release is welded and the TAG bumped")
-    note("AI_REVIEW_MAX_ATTEMPTS" in text and "ACTIVE NOW" in text,
-         "structural: header's ACTIVE inventory accounts for AI_REVIEW_MAX_ATTEMPTS "
-         "(the workflow edits its comment, so the knob must be evidenced)")
+    note("the generation knobs are INERT" not in text and "INERT until the engine release" not in text,
+         "structural: header no longer claims the generation knobs are INERT — the "
+         "org pin v2026.263.0616 welds an engine that reads them, so claiming "
+         "inert would be a stale divergence")
+    note("ALL SIX knobs" in text and "v2026.263.0616" in text,
+         "structural: header's ACTIVE inventory names the pin and accounts for "
+         "every knob the workflow passes (verified with `strings`, not asserted)")
     note("the engine is not at fault" not in text.lower(),
          "structural: no emitted narrative exonerates the engine of the unbounded "
          "generation (header and emitted RCA agree)")
