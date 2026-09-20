@@ -249,7 +249,11 @@ def parse_step(block_lines):
                 width = len(entry) - len(entry.lstrip(" "))
                 if width < CHILD_INDENT:
                     break
-                k, _, v = entry.strip().partition(":")
+                stripped = entry.strip()
+                if stripped.startswith("#"):
+                    i += 1  # YAML comment inside the env block
+                    continue
+                k, _, v = stripped.partition(":")
                 step["env"][k.strip()] = v.strip()
                 i += 1
         elif value in ("|", "|-", ">", ">-", "|+", ">+"):
@@ -482,9 +486,7 @@ SCENARIOS = [
             "validator INCONCLUSIVE",
             "provider unanswered",
             "in-job retries: none",
-            "NON-STREAMING",
-            "300s default",
-            "FAILED TURN",
+            "AI_REVIEW_STREAM_IDLE_TIMEOUT",
         ],
         "expect_review_outputs": {"provider_unanswered": "true", "review_rc": "1",
                                   "discarded_verdict": "false"},
@@ -531,7 +533,7 @@ SCENARIOS = [
             "do NOT retry blindly",
         ],
         "expect_comment_excludes": [
-            "NON-STREAMING request under a WHOLE-GENERATION deadline",
+            "whole-generation deadline is the wrong bound",
             "verdict-less review output",
         ],
         "expect_review_outputs": {"provider_error": "400", "provider_unanswered": "false",
@@ -651,7 +653,7 @@ SCENARIOS = [
             "carries NONE of the recognised signatures",
         ],
         "expect_comment_excludes": [
-            "NON-STREAMING request under a WHOLE-GENERATION deadline",
+            "whole-generation deadline is the wrong bound",
         ],
         "expect_review_outputs": {"provider_unanswered": "false", "review_rc": "2",
                                   "discarded_verdict": "false"},
@@ -850,37 +852,91 @@ def run_harness():
          "structural: header records the T4 maintainer sign-off requirement")
     note("vars.REVIEW_RUNNER_LABEL" in text,
          "structural: header names the operator lever vars.REVIEW_RUNNER_LABEL")
-    note("NON-STREAMING request under a WHOLE-GENERATION deadline" in text,
-         "structural: header names the CORRECTED root cause (a non-streaming, "
-         "whole-generation HTTP deadline)")
+    note("NO generation bound" in text and "1.75 MB of reasoning" in text,
+         "structural: header names the MEASURED root cause (an unbounded reasoning "
+         "generation, not the timeout cap)")
     note("throttles/blocks datacenter/shared runner egress" not in text,
-         "structural: the superseded throttled-egress RCA is GONE from the workflow "
-         "(corrected 2026-09-12 by opencharly/.github#91)")
-    note("retry the FAILED TURN" in text and "owner: plugin-review" in text,
-         "structural: header routes the durable per-turn fix to its owner (plugin-review)")
+         "structural: no throttled-egress RCA anywhere in the workflow")
+    note("non-streaming request under a whole-generation deadline" not in text.lower(),
+         "structural: the retired non-streaming RCA is GONE (case-insensitive)")
+    note("narrative below it" not in text,
+         "structural: the header carries no dangling reference to a superseded "
+         "narrative it claims to retain (R5: deleted in the same commit)")
+    note("supersedes the 2026-09-12" in text and "BOTH deleted in this PR" in text,
+         "structural: the header states both superseded narratives are DELETED in "
+         "this PR, not retained below")
+    note("opencharly/plugin-review#10" in text,
+         "structural: header routes the durable generation bound to its owner "
+         "(the engine, opencharly/plugin-review#10)")
+    note("the generation knobs are INERT" not in text and "INERT until the engine release" not in text,
+         "structural: header no longer claims the generation knobs are INERT — the "
+         "org pin v2026.263.0616 welds an engine that reads them, so claiming "
+         "inert would be a stale divergence")
+    note("ALL SIX knobs" in text and "v2026.263.0616" in text,
+         "structural: header's ACTIVE inventory names the pin and accounts for "
+         "every knob the workflow passes (verified with `strings`, not asserted)")
+    note("the engine is not at fault" not in text.lower(),
+         "structural: no emitted narrative exonerates the engine of the unbounded "
+         "generation (header and emitted RCA agree)")
+    note("PRIMARY cause of the ~14m runs" in text,
+         "structural: header/env state the primary cause is the engine's unbounded "
+         "generation, with the workflow cap as the amplifier")
     note("remedies: re-run" not in text,
          "structural: no re-run-and-see remedy anywhere in the workflow text")
-    note("AI_REVIEW_ATTEMPT_TIMEOUT, org-settable, default 300s" in text,
-         "structural: header documents the org-settable cap lever this workflow "
-         "passes through")
+    note("AI_REVIEW_STREAM_IDLE_TIMEOUT" in text,
+         "structural: header documents the stream-idle lever this workflow passes "
+         "through (the meaningful bound for a streaming engine)")
     note("timeout-minutes: 20" in text,
          "structural: the validate job carries a fail-hard wall clock "
          "(timeout-minutes: 20 caps a provider-unanswered burn)")
     # FUNCTIONAL coverage (the review's R10 finding: the env entry and the engine-defective
     # classification shipped with NO assertion that fails without them).
     review_env = find_step(steps, "id", "review")["env"]
+    note("AI_REVIEW_STREAM_IDLE_TIMEOUT" in review_env,
+         "functional: the review step EXPORTS AI_REVIEW_STREAM_IDLE_TIMEOUT (the "
+         "streaming engine's silence bound)")
+    if "AI_REVIEW_STREAM_IDLE_TIMEOUT" in review_env:
+        raw_i = review_env["AI_REVIEW_STREAM_IDLE_TIMEOUT"]
+        ns_unset_i = Ctx({"vars": Ctx({}), "inputs": Ctx({}), "secrets": Ctx({})})
+        ns_set_i = Ctx({"vars": Ctx({"AI_REVIEW_STREAM_IDLE_TIMEOUT": "45"}),
+                        "inputs": Ctx({}), "secrets": Ctx({})})
+        note(subst(raw_i, ns_unset_i) == "",
+             "functional: with the org var UNSET the idle bound is EMPTY "
+             "(the engine default applies)")
+        note(subst(raw_i, ns_set_i) == "45",
+             "functional: with the org var SET the idle bound RESOLVES to the set value")
     note("AI_REVIEW_ATTEMPT_TIMEOUT" in review_env,
-         "functional: the review step EXPORTS AI_REVIEW_ATTEMPT_TIMEOUT for the plugin "
-         "(pre-fix tree exported nothing, so no cap could ever be raised)")
+         "functional: the review step EXPORTS AI_REVIEW_ATTEMPT_TIMEOUT (optional "
+         "whole-request cap, empty by default)")
     if "AI_REVIEW_ATTEMPT_TIMEOUT" in review_env:
         raw = review_env["AI_REVIEW_ATTEMPT_TIMEOUT"]
         ns_unset = Ctx({"vars": Ctx({}), "inputs": Ctx({}), "secrets": Ctx({})})
         ns_set = Ctx({"vars": Ctx({"AI_REVIEW_ATTEMPT_TIMEOUT": "120"}),
                       "inputs": Ctx({}), "secrets": Ctx({})})
-        note(subst(raw, ns_unset) == "300",
-             "functional: with the org var UNSET the cap RESOLVES to the 300s default")
+        note(subst(raw, ns_unset) == "",
+             "functional: with the org var UNSET the whole-request cap is EMPTY "
+             "(the engine default applies; no hardcoded 5m)")
         note(subst(raw, ns_set) == "120",
              "functional: with the org var SET the cap RESOLVES to the set value")
+    for knob in ("AI_REVIEW_REASONING_EFFORT", "AI_REVIEW_MAX_TOKENS"):
+        note(knob in review_env,
+             "functional: the review step EXPORTS " + knob + " (a generation bound)")
+        if knob in review_env:
+            ns_unset_k = Ctx({"vars": Ctx({}), "inputs": Ctx({}), "secrets": Ctx({})})
+            ns_set_k = Ctx({"vars": Ctx({knob: "x"}), "inputs": Ctx({}), "secrets": Ctx({})})
+            note(subst(review_env[knob], ns_unset_k) == "",
+                 "functional: with the org var UNSET " + knob + " is EMPTY (engine default applies)")
+            note(subst(review_env[knob], ns_set_k) == "x",
+                 "functional: with the org var SET " + knob + " resolves to the set value")
+    note("AI_REVIEW_TOOL_RESULT_MAX_BYTES" in review_env,
+         "functional: the review step EXPORTS AI_REVIEW_TOOL_RESULT_MAX_BYTES (the "
+         "context-growth cap the streaming engine applies)")
+    if "AI_REVIEW_TOOL_RESULT_MAX_BYTES" in review_env:
+        raw_t = review_env["AI_REVIEW_TOOL_RESULT_MAX_BYTES"]
+        ns_unset_t = Ctx({"vars": Ctx({}), "inputs": Ctx({}), "secrets": Ctx({})})
+        note(subst(raw_t, ns_unset_t) == "",
+             "functional: with the org var UNSET the tool-result cap is EMPTY "
+             "(the engine default applies)")
     note("AI_REVIEW_MAX_ATTEMPTS" in review_env,
          "functional: the review step EXPORTS AI_REVIEW_MAX_ATTEMPTS for the plugin "
          "(pre-knob tree exported nothing, so every review retried twice)")
