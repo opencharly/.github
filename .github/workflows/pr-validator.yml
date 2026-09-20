@@ -248,19 +248,22 @@ jobs:
           # generation (the engine PR) removes the cause. A progressing generation
           # must never be cut off; only a SILENT one should fail — which is what
           # the idle bound is for.
-          # ACTIVE on the pinned engine v2026.255.1803 (all three knobs have
-          # `strings` hits in the bundled plugin-review — evidence in the body).
-          # A DEFINED-EMPTY var is treated as UNSET by the pinned engine:
-          # getenvAny (candy/plugin-review/parse.go) returns "" for any env whose
-          # value is "", and every knob caller guards with `if v := getenvAny(…
-          # ); v != ""`. So `|| ''` means "no override", NOT "parse 0".
+          # ACTIVE on the org pin v2026.263.0616 (its welded plugin-review has
+          # `strings` hits for all three knobs — evidence in the body).
+          # A DEFINED-EMPTY var is treated as UNSET by that engine: getenvAny
+          # (candy/plugin-review/parse.go) returns "" for any env whose value is
+          # "", and every knob caller guards with `if v := getenvAny(…); v != ""`.
+          # So `|| ''` means "no override", NOT "parse 0".
           #
           # Empty therefore selects the ENGINE default, which is NOT "no cap":
           # newLLMClient maps `total <= 0` to defaultAttemptTimeout = 15 * time.Minute
-          # (idle default 3 * time.Minute; source excerpt in the body). That 15m
-          # per-turn cap sits UNDER this job's timeout-minutes: 20 wall clock, so
-          # the wall clock is only reached if the engine default is itself
-          # exceeded/overridden.
+          # (idle default 3 * time.Minute; source excerpt in the body). That is a
+          # PER-TURN cap inside the turn loop (up to AI_REVIEW_MAX_TURNS turns), so
+          # it is NOT bounded by this job's timeout-minutes: 20 wall clock — the
+          # wall clock can be reached across several turns without any single turn
+          # exceeding 15 m. The per-turn bounds (idle silence, and the engine's
+          # bounded generation) are what keep a run short; the job wall clock is
+          # the last-resort backstop, not a per-turn ceiling.
           AI_REVIEW_STREAM_IDLE_TIMEOUT: ${{ vars.AI_REVIEW_STREAM_IDLE_TIMEOUT || '' }}
           AI_REVIEW_ATTEMPT_TIMEOUT: ${{ vars.AI_REVIEW_ATTEMPT_TIMEOUT || '' }}
           AI_REVIEW_TOOL_RESULT_MAX_BYTES: ${{ vars.AI_REVIEW_TOOL_RESULT_MAX_BYTES || '' }}
