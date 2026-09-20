@@ -276,6 +276,14 @@ jobs:
           # operator may override either without a rebuild.
           AI_REVIEW_REASONING_EFFORT: ${{ vars.AI_REVIEW_REASONING_EFFORT || '' }}
           AI_REVIEW_MAX_TOKENS: ${{ vars.AI_REVIEW_MAX_TOKENS || '' }}
+          # FULL DEBUG TRACE (opt-in via vars). AI_REVIEW_DEBUG makes the engine
+          # emit, per turn, the wall time, prompt/context bytes, reasoning bytes,
+          # finish_reason, token usage (incl. reasoning tokens) and per-tool
+          # name/arg/result sizes; AI_REVIEW_DEBUG_REASONING additionally dumps the
+          # reasoning text. This is the observability an RCA needs: without it a
+          # long run is three aggregate lines with no per-turn attribution.
+          AI_REVIEW_DEBUG: ${{ vars.AI_REVIEW_DEBUG || '' }}
+          AI_REVIEW_DEBUG_REASONING: ${{ vars.AI_REVIEW_DEBUG_REASONING || '' }}
           # Zero retries: a failed first attempt is terminal — no repeat cycle.
           # Default 1 org-wide; any repo may opt back to retries via its own var.
           AI_REVIEW_MAX_ATTEMPTS: ${{ vars.AI_REVIEW_MAX_ATTEMPTS || '1' }}

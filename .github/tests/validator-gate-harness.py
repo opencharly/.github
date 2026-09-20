@@ -928,6 +928,17 @@ def run_harness():
                  "functional: with the org var UNSET " + knob + " is EMPTY (engine default applies)")
             note(subst(review_env[knob], ns_set_k) == "x",
                  "functional: with the org var SET " + knob + " resolves to the set value")
+    for knob in ("AI_REVIEW_DEBUG", "AI_REVIEW_DEBUG_REASONING"):
+        note(knob in review_env,
+             "functional: the review step EXPORTS " + knob + " (the full debug trace "
+             "an RCA needs — per-turn timing, usage, finish_reason, reasoning)")
+        if knob in review_env:
+            ns_unset_d = Ctx({"vars": Ctx({}), "inputs": Ctx({}), "secrets": Ctx({})})
+            ns_set_d = Ctx({"vars": Ctx({knob: "1"}), "inputs": Ctx({}), "secrets": Ctx({})})
+            note(subst(review_env[knob], ns_unset_d) == "",
+                 "functional: with the org var UNSET " + knob + " is EMPTY (debug off)")
+            note(subst(review_env[knob], ns_set_d) == "1",
+                 "functional: with the org var SET " + knob + " resolves to the set value")
     note("AI_REVIEW_TOOL_RESULT_MAX_BYTES" in review_env,
          "functional: the review step EXPORTS AI_REVIEW_TOOL_RESULT_MAX_BYTES (the "
          "context-growth cap the streaming engine applies)")
