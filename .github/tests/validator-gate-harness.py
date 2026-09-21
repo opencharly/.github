@@ -401,12 +401,24 @@ FAKE_GH = NL.join([
     "  fi",
     "  echo \"=== end comment ===\" >> \"$FAKE_COMMENT_LOG\"",
     "fi",
-    # `gh api ... comments --jq ... | length` — the auto-close step counts the
-    # PR's BLOCK verdict comments. The scenario supplies the count via
-    # FAKE_BLOCK_COUNT (default 0). This is the ONLY gh api call the workflow
+    # `gh api --paginate ...` — the auto-close step counts the PR's BLOCK verdict
+    # comments. Emit REAL JSON pages (the workflow pipes to `jq -s`, which collects
+    # the pages into one array), so the multi-page path is genuinely exercised.
+    # FAKE_BLOCK_COUNT bot BLOCK comments + FAKE_OTHER_COUNT other comments are
+    # emitted in pages of FAKE_PAGE_SIZE (default 30, GitHub's page size) so a
+    # multi-page thread is reproducible. This is the ONLY gh api call the workflow
     # makes, so answering it here is exact, not a blanket stub.
     "if [ \"$1\" = \"api\" ]; then",
-    "  echo \"${FAKE_BLOCK_COUNT:-0}\"",
+    "  python3 - \"${FAKE_BLOCK_COUNT:-0}\" \"${FAKE_OTHER_COUNT:-0}\" \"${FAKE_PAGE_SIZE:-30}\" <<'PYEOF'",
+    "import json, sys",
+    "blocks, other, size = int(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3])",
+    "items = [{\"user\": {\"login\": \"github-actions[bot]\"}, \"body\": \"## Review — BLOCK\\n\\nblocked\"}] * blocks",
+    "items += [{\"user\": {\"login\": \"someone\"}, \"body\": \"a normal comment\"}] * other",
+    "for i in range(0, max(len(items), 1), size):",
+    "    print(json.dumps(items[i:i+size]))",
+    "    if not items:",
+    "        break",
+    "PYEOF",
     "  exit 0",
     "fi",
     "exit 0",
@@ -499,6 +511,27 @@ SCENARIOS = [
         "name": "auto-close-at-threshold",
         "fake": "block",
         "block_count": 5,
+        "expect_exit": 1,
+        "expect_steps": ["review", "parse", "Auto-close after N BLOCKs", "Gate (BLOCK)", "evidence"],
+        "expect_verdict": "BLOCK",
+        "expect_comment": True,
+        "expect_comment_contains": ["Auto-closed", "open a **NEW** pull request"],
+        "expect_auto_merge": False,
+        "expect_closed": True,
+        "expect_review_outputs": {"provider_unanswered": "false", "review_rc": "0"},
+    },
+    {
+        # AUTO-CLOSE (multi-page): a thread longer than ONE page must still count
+        # correctly. With the old `gh api --paginate --jq 'length'` the filter ran
+        # PER PAGE (a >30-comment thread yielded several numbers), the guard
+        # rejected the newline, and auto-close silently disabled itself — on
+        # exactly the long threads it exists to bound. 5 blocks + 60 others at a
+        # page size of 30 = 3 pages; the count must still be 5 and the PR closed.
+        "name": "auto-close-multi-page",
+        "fake": "block",
+        "block_count": 5,
+        "other_count": 60,
+        "page_size": 30,
         "expect_exit": 1,
         "expect_steps": ["review", "parse", "Auto-close after N BLOCKs", "Gate (BLOCK)", "evidence"],
         "expect_verdict": "BLOCK",
@@ -807,6 +840,8 @@ def run_scenario(spec, ordered, tmpdir, fakedir, workspace):
         # The auto-close step counts the PR's BLOCK comments via `gh api`; the
         # scenario supplies the count so the threshold branch is exercised.
         env["FAKE_BLOCK_COUNT"] = str(spec.get("block_count", 0))
+        env["FAKE_OTHER_COUNT"] = str(spec.get("other_count", 0))
+        env["FAKE_PAGE_SIZE"] = str(spec.get("page_size", 30))
         stem = label + "." + re.sub("[^A-Za-z0-9]+", "_", name)
         out_file = os.path.join(tmpdir, stem + ".github_output")
         open(out_file, "w").close()

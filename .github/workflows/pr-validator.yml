@@ -4,12 +4,14 @@
 # (squash). GitHub branch protection waits for all required checks
 # (including repo-specific CI gates like verify/go) before merging.
 #
-# Runs the plugin-review charly plugin: it assembles the COMPLETE PR context
-# (body, every changed file's full diff, commits, every comment) and makes ONE
-# model call for a deterministic Verdict: PASS|BLOCK, ONE PR comment,
-# $GITHUB_OUTPUT outputs. The engine + its rulebook are welded into the pinned
-# charly release (vars.CHARLY_VERSION); the prompt is EMBEDDED in the plugin, so
-# this workflow passes no plan/prompt path.
+# Runs the plugin-review charly plugin to review this PR and gate it with a
+# deterministic Verdict: PASS|BLOCK, ONE PR comment, $GITHUB_OUTPUT outputs.
+# The engine invoked is whatever the pinned charly release (vars.CHARLY_VERSION)
+# welds. REVIEW_PROMPT_PATH is passed because the CURRENTLY-pinned engine reads
+# its rulebook from that file; once the plugin-review release that EMBEDS the
+# rulebook is welded, the env becomes vestigial and is dropped in the same step
+# that bumps the pin. This workflow passes no plan path: the plain
+# `charly review` form is accepted by both the current and the next engine.
 #
 # VERDICT TAXONOMY — these classes are NEVER conflated (a provider that did not
 # answer is not a code finding, and it is not a pass either):
@@ -289,11 +291,10 @@ jobs:
           # Default 1 org-wide; any repo may opt back to retries via its own var.
           AI_REVIEW_MAX_ATTEMPTS: ${{ vars.AI_REVIEW_MAX_ATTEMPTS || '1' }}
           AI_REVIEW_API_KEY:   ${{ secrets.AI_REVIEW_API_KEY }}
-          # The review rulebook + the engine are both in the pinned charly release:
-          # the prompt is EMBEDDED in the plugin (no file read) and the engine is
-          # invoked directly. REVIEW_PROMPT_PATH is still passed for forward
-          # compatibility with an engine that reads one; the current engine ignores
-          # it (its rulebook is embedded).
+          # The CURRENTLY-pinned engine reads its rulebook from REVIEW_PROMPT_PATH;
+          # the next (embedded-rulebook) engine ignores it. Both accept the plain
+          # `charly review` form, so this env is the only transitional surface and
+          # is removed when the embedded-rulebook release is welded.
           REVIEW_PROMPT_PATH:  ${{ github.workspace }}/runner-config/prompt/validator.md
           GITHUB_TOKEN:        ${{ github.token }}
         run: |
@@ -472,10 +473,14 @@ jobs:
             exit 0
           fi
           # Count the validator's OWN BLOCK verdict comments (the exact
-          # "## Review — BLOCK" header every review comment carries). This is the
-          # number of times the author was told, not a count of comments in general.
-          blocks=$(gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments" \
-            --jq '[.[] | select(.user.login=="github-actions[bot]") | select(.body | contains("## Review — BLOCK"))] | length' 2>/dev/null || true)
+          # "## Review — BLOCK" header every review comment carries). The count
+          # MUST be page-correct: `gh api --paginate ... --jq` applies the filter
+          # PER PAGE (so a >30-comment thread yields several numbers), which the
+          # guard below would reject and silently disable auto-close on exactly
+          # the long threads this feature exists to bound. `--paginate | jq -s`
+          # collects the pages into ONE array first.
+          blocks=$(gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments?per_page=100" 2>/dev/null \
+            | jq -s '[.[][] | select(.user.login=="github-actions[bot]") | select(.body | contains("## Review — BLOCK"))] | length' 2>/dev/null || true)
           case "$blocks" in
             ''|*[!0-9]*) echo "::warning::could not count BLOCK comments (got '$blocks') — not auto-closing"; exit 0;;
           esac
