@@ -271,6 +271,20 @@ jobs:
           # the last-resort backstop, not a per-turn ceiling.
           AI_REVIEW_STREAM_IDLE_TIMEOUT: ${{ vars.AI_REVIEW_STREAM_IDLE_TIMEOUT || '' }}
           AI_REVIEW_ATTEMPT_TIMEOUT: ${{ vars.AI_REVIEW_ATTEMPT_TIMEOUT || '' }}
+          # SAMPLING (vendor-recommended for deepseek-v4.1-flash: temp=1.0,
+          # top_p=0.95). Forwarded so an operator can TUNE it from an org variable
+          # without a rebuild; empty means "the engine's own default". The
+          # frequency/presence penalties are the engine's measured guard against
+          # degenerate repetition; context tokens/margin size the fail-closed guard.
+          AI_REVIEW_TEMPERATURE: ${{ vars.AI_REVIEW_TEMPERATURE || '' }}
+          AI_REVIEW_TOP_P: ${{ vars.AI_REVIEW_TOP_P || '' }}
+          AI_REVIEW_FREQUENCY_PENALTY: ${{ vars.AI_REVIEW_FREQUENCY_PENALTY || '' }}
+          AI_REVIEW_PRESENCE_PENALTY: ${{ vars.AI_REVIEW_PRESENCE_PENALTY || '' }}
+          AI_REVIEW_STOP: ${{ vars.AI_REVIEW_STOP || '' }}
+          AI_REVIEW_CONTEXT_TOKENS: ${{ vars.AI_REVIEW_CONTEXT_TOKENS || '' }}
+          AI_REVIEW_CONTEXT_MARGIN: ${{ vars.AI_REVIEW_CONTEXT_MARGIN || '' }}
+          AI_REVIEW_PROMPT_EXTRA: ${{ vars.AI_REVIEW_PROMPT_EXTRA || '' }}
+          AI_REVIEW_POST_COMMENT: ${{ vars.AI_REVIEW_POST_COMMENT || '' }}
           AI_REVIEW_TOOL_RESULT_MAX_BYTES: ${{ vars.AI_REVIEW_TOOL_RESULT_MAX_BYTES || '' }}
           # The GENERATION bounds (the measured root-cause fix, owned by the
           # engine). ACTIVE on the org pin v2026.263.0616, whose welded
@@ -289,6 +303,10 @@ jobs:
           # long run is three aggregate lines with no per-turn attribution.
           AI_REVIEW_DEBUG: ${{ vars.AI_REVIEW_DEBUG || '' }}
           AI_REVIEW_DEBUG_REASONING: ${{ vars.AI_REVIEW_DEBUG_REASONING || '' }}
+          # Session affinity (the pinned engine's x-opencode-session header).
+          AI_REVIEW_SESSION_ID: ${{ vars.AI_REVIEW_SESSION_ID || '' }}
+          # NOTE: AI_REVIEW_OUT is deliberately NOT forwarded — the review step
+          # passes `--out /tmp/review.txt` explicitly, which the engine honours.
           # Zero retries: a failed first attempt is terminal — no repeat cycle.
           # Default 1 org-wide; any repo may opt back to retries via its own var.
           AI_REVIEW_MAX_ATTEMPTS: ${{ vars.AI_REVIEW_MAX_ATTEMPTS || '1' }}
