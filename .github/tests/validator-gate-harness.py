@@ -386,15 +386,28 @@ FAKE_GH = NL.join([
     "#!/usr/bin/env bash",
     "echo \"gh $*\" >> \"$FAKE_LOG\"",
     "if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"comment\" ]; then",
-    "  body=\"\"",
+    "  body=\"\"; bodyfile=\"\"",
     "  prev=\"\"",
     "  for a in \"$@\"; do",
-    "    if [ \"$prev\" = \"--body-file\" ]; then body=\"$a\"; fi",
+    "    if [ \"$prev\" = \"--body-file\" ]; then bodyfile=\"$a\"; fi",
+    "    if [ \"$prev\" = \"--body\" ]; then body=\"$a\"; fi",
     "    prev=\"$a\"",
     "  done",
     "  echo \"=== gh pr comment (fake gh) ===\" >> \"$FAKE_COMMENT_LOG\"",
-    "  if [ -f \"$body\" ]; then cat \"$body\" >> \"$FAKE_COMMENT_LOG\"; else echo \"(missing body file: $body)\" >> \"$FAKE_COMMENT_LOG\"; fi",
+    "  if [ -n \"$bodyfile\" ]; then",
+    "    if [ -f \"$bodyfile\" ]; then cat \"$bodyfile\" >> \"$FAKE_COMMENT_LOG\"; else echo \"(missing body file: $bodyfile)\" >> \"$FAKE_COMMENT_LOG\"; fi",
+    "  else",
+    "    printf '%s\\n' \"$body\" >> \"$FAKE_COMMENT_LOG\"",
+    "  fi",
     "  echo \"=== end comment ===\" >> \"$FAKE_COMMENT_LOG\"",
+    "fi",
+    # `gh api ... comments --jq ... | length` — the auto-close step counts the
+    # PR's BLOCK verdict comments. The scenario supplies the count via
+    # FAKE_BLOCK_COUNT (default 0). This is the ONLY gh api call the workflow
+    # makes, so answering it here is exact, not a blanket stub.
+    "if [ \"$1\" = \"api\" ]; then",
+    "  echo \"${FAKE_BLOCK_COUNT:-0}\"",
+    "  exit 0",
     "fi",
     "exit 0",
     ""
@@ -437,6 +450,10 @@ def build_ns(step_outputs, workspace, tmpdir):
 TARGETS = [
     ("id", "review"),
     ("id", "parse"),
+    # Auto-close runs BEFORE the Gate (BLOCK) in the workflow, so the close +
+    # notice land before the gate fails the check. The harness executes in this
+    # order, so it must mirror the workflow's.
+    ("name", "Auto-close after N BLOCKs"),
     ("name", "Gate (BLOCK)"),
     ("name", "Gate (inconclusive)"),
     ("name", "Gate (ambiguous)"),
@@ -468,10 +485,41 @@ SCENARIOS = [
         "name": "block",
         "fake": "block",
         "expect_exit": 1,
-        "expect_steps": ["review", "parse", "Gate (BLOCK)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close after N BLOCKs", "Gate (BLOCK)", "evidence"],
         "expect_verdict": "BLOCK",
         "expect_comment": False,
         "expect_auto_merge": False,
+        "expect_review_outputs": {"provider_unanswered": "false", "review_rc": "0"},
+    },
+    {
+        # AUTO-CLOSE: a PR whose BLOCK count has reached the threshold must be
+        # closed with the "open a NEW fixed PR" notice. The harness supplies the
+        # count via FAKE_BLOCK_COUNT and the threshold via vars; both branches
+        # (below/at threshold) are asserted.
+        "name": "auto-close-at-threshold",
+        "fake": "block",
+        "block_count": 5,
+        "expect_exit": 1,
+        "expect_steps": ["review", "parse", "Auto-close after N BLOCKs", "Gate (BLOCK)", "evidence"],
+        "expect_verdict": "BLOCK",
+        "expect_comment": True,
+        "expect_comment_contains": ["Auto-closed", "open a **NEW** pull request"],
+        "expect_auto_merge": False,
+        "expect_closed": True,
+        "expect_review_outputs": {"provider_unanswered": "false", "review_rc": "0"},
+    },
+    {
+        # AUTO-CLOSE (below threshold): a PR under the threshold must NOT be
+        # closed — the step runs but takes the "below threshold" branch.
+        "name": "auto-close-below-threshold",
+        "fake": "block",
+        "block_count": 2,
+        "expect_exit": 1,
+        "expect_steps": ["review", "parse", "Auto-close after N BLOCKs", "Gate (BLOCK)", "evidence"],
+        "expect_verdict": "BLOCK",
+        "expect_comment": False,
+        "expect_auto_merge": False,
+        "expect_closed": False,
         "expect_review_outputs": {"provider_unanswered": "false", "review_rc": "0"},
     },
     {
@@ -697,7 +745,7 @@ SCENARIOS = [
         "name": "block-with-error",
         "fake": "block-with-error",
         "expect_exit": 1,
-        "expect_steps": ["review", "parse", "Gate (BLOCK)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close after N BLOCKs", "Gate (BLOCK)", "evidence"],
         "expect_verdict": "BLOCK",
         "expect_comment": False,
         "expect_auto_merge": False,
@@ -756,6 +804,9 @@ def run_scenario(spec, ordered, tmpdir, fakedir, workspace):
         env["FAKE_LOG"] = log_path
         env["FAKE_COMMENT_LOG"] = comment_path
         env["FAKE_SCENARIO"] = spec["fake"]
+        # The auto-close step counts the PR's BLOCK comments via `gh api`; the
+        # scenario supplies the count so the threshold branch is exercised.
+        env["FAKE_BLOCK_COUNT"] = str(spec.get("block_count", 0))
         stem = label + "." + re.sub("[^A-Za-z0-9]+", "_", name)
         out_file = os.path.join(tmpdir, stem + ".github_output")
         open(out_file, "w").close()
@@ -1025,6 +1076,12 @@ def run_harness():
         note(armed == spec["expect_auto_merge"],
              prefix + "auto-merge armed (" + str(armed) + ") == expected " +
              str(spec["expect_auto_merge"]))
+        # Auto-close: the step posts a notice + closes the PR only at/above the
+        # threshold. Asserted from the gh call log so the branch is proven.
+        closed = "pr close" in result["calls"]
+        note(closed == spec.get("expect_closed", False),
+             prefix + "PR closed (" + str(closed) + ") == expected " +
+             str(spec.get("expect_closed", False)))
         has_comment = result["comment"].strip() != ""
         note(has_comment == spec["expect_comment"],
              prefix + "PR comment posted == " + str(spec["expect_comment"]))

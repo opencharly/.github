@@ -4,11 +4,12 @@
 # (squash). GitHub branch protection waits for all required checks
 # (including repo-specific CI gates like verify/go) before merging.
 #
-# Runs the plugin-review charly plugin (the action-review cutover, replacing
-# opencharly/pi-review-action): read-only GitHub tools, deterministic
-# Verdict: PASS|BLOCK, ONE PR comment, $GITHUB_OUTPUT outputs. WHICH plugins/
-# steps run is declared in opencharly/action-review@main:prompt/validator.md +
-# review-plan.yml (charly review --plan); this workflow never changes for that.
+# Runs the plugin-review charly plugin: it assembles the COMPLETE PR context
+# (body, every changed file's full diff, commits, every comment) and makes ONE
+# model call for a deterministic Verdict: PASS|BLOCK, ONE PR comment,
+# $GITHUB_OUTPUT outputs. The engine + its rulebook are welded into the pinned
+# charly release (vars.CHARLY_VERSION); the prompt is EMBEDDED in the plugin, so
+# this workflow passes no plan/prompt path.
 #
 # VERDICT TAXONOMY — these classes are NEVER conflated (a provider that did not
 # answer is not a code finding, and it is not a pass either):
@@ -227,7 +228,7 @@ jobs:
           # must not take the whole org gate down.
           CHARLY_PLUGIN_DIR="$D/plugins" "$D/bin/charly" review --self-test || echo "::warning::bootstrap self-test crashed — continuing (the review step re-validates)"
 
-      - name: Run review plan (steps + runtime plugins declared in action-review review-plan.yml)
+      - name: Run the review engine (assemble context, one model call, verdict)
         id: review
         env:
           PR_NUMBER: ${{ inputs.pr-number }}
@@ -288,25 +289,26 @@ jobs:
           # Default 1 org-wide; any repo may opt back to retries via its own var.
           AI_REVIEW_MAX_ATTEMPTS: ${{ vars.AI_REVIEW_MAX_ATTEMPTS || '1' }}
           AI_REVIEW_API_KEY:   ${{ secrets.AI_REVIEW_API_KEY }}
+          # The review rulebook + the engine are both in the pinned charly release:
+          # the prompt is EMBEDDED in the plugin (no file read) and the engine is
+          # invoked directly. REVIEW_PROMPT_PATH is still passed for forward
+          # compatibility with an engine that reads one; the current engine ignores
+          # it (its rulebook is embedded).
           REVIEW_PROMPT_PATH:  ${{ github.workspace }}/runner-config/prompt/validator.md
-          REVIEW_PLAN_PATH:    ${{ github.workspace }}/runner-config/review-plan.yml
           GITHUB_TOKEN:        ${{ github.token }}
         run: |
           cd "$GITHUB_WORKSPACE/runner-config"
 
-          # /tmp/review.txt is written ONLY by a fully successful plan
-          # (plugin-review plan.go writes OutPath on the success path, after every
-          # verdict:required step produced a verdict) — so clear it first: a stale
-          # file must never be parsed as THIS run's verdict.
+          # /tmp/review.txt is written ONLY by a fully successful review (the
+          # engine writes OutPath on the success path, after a verdict) — so clear
+          # it first: a stale file must never be parsed as THIS run's verdict.
           rm -f /tmp/review.txt /tmp/review.log
 
           # bash -e must NOT abort here: a verdict-less run is a CLASS to report,
-          # not a crash. Capture the exit code instead (plugin-review exits 1 on
-          # the provider-unanswered class, 2 on "verdict: required but no Verdict
-          # line produced"). NO RETRY: see the RCA header — a retry re-runs the
-          # same doomed generation (R4).
+          # not a crash. Capture the exit code instead. NO RETRY: a retry re-runs
+          # the same doomed generation (R4).
           rc=0
-          charly review --plan "$REVIEW_PLAN_PATH" --out /tmp/review.txt > /tmp/review.log 2>&1 || rc=$?
+          charly review --out /tmp/review.txt > /tmp/review.log 2>&1 || rc=$?
           echo "review rc=$rc"
           cat /tmp/review.log
 
@@ -445,11 +447,53 @@ jobs:
           fi
           echo "verdict=$distinct" >> "$GITHUB_OUTPUT"
 
+      # AUTO-CLOSE after N BLOCK verdicts (workflow policy, AI_REVIEW_AUTO_CLOSE_AFTER,
+      # default 5). A PR that keeps collecting BLOCKs — because the author re-pushes
+      # without fixing the raised findings — inflates the reviewer's context with its
+      # own comment thread and risks a runaway review. Counting BLOCKs and closing at
+      # the threshold, with a message telling the author to open a NEW fully-fixed PR,
+      # bounds that loop. Runs BEFORE the BLOCK gate so the close + message land, then
+      # the gate still fails the check (the close is a policy action, not a verdict).
+      # 0 disables it. The count is the PR's own review comments, so it survives
+      # across runs with no external state.
+      - name: Auto-close after N BLOCKs
+        if: steps.parse.outputs.verdict == 'BLOCK'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr-number }}
+          REPO: ${{ github.repository }}
+          THRESHOLD: ${{ vars.AI_REVIEW_AUTO_CLOSE_AFTER || '5' }}
+        run: |
+          case "$THRESHOLD" in
+            ''|*[!0-9]*) echo "::warning::AI_REVIEW_AUTO_CLOSE_AFTER=$THRESHOLD is not a number — disabling auto-close"; exit 0;;
+          esac
+          if [ "$THRESHOLD" -le 0 ]; then
+            echo "auto-close disabled (threshold=$THRESHOLD)"
+            exit 0
+          fi
+          # Count the validator's OWN BLOCK verdict comments (the exact
+          # "## Review — BLOCK" header every review comment carries). This is the
+          # number of times the author was told, not a count of comments in general.
+          blocks=$(gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments" \
+            --jq '[.[] | select(.user.login=="github-actions[bot]") | select(.body | contains("## Review — BLOCK"))] | length' 2>/dev/null || true)
+          case "$blocks" in
+            ''|*[!0-9]*) echo "::warning::could not count BLOCK comments (got '$blocks') — not auto-closing"; exit 0;;
+          esac
+          echo "BLOCK verdicts on this PR: $blocks (threshold $THRESHOLD)"
+          if [ "$blocks" -lt "$THRESHOLD" ]; then
+            echo "below threshold — not closing"
+            exit 0
+          fi
+          msg=$(printf '## Auto-closed: %s unanswered BLOCK verdicts\n\nThis PR has received **%s** validator `BLOCK` verdicts without the raised findings being fixed, so the gate is auto-closing it (threshold `AI_REVIEW_AUTO_CLOSE_AFTER=%s`).\n\n**Why:** re-running the validator against the same unfixed head only adds another BLOCK and grows this PR'\''s comment thread, which is what drives the reviewer into a runaway. The loop is bounded here instead.\n\n**What to do:** open a **NEW** pull request from a fresh branch with **every** finding from the BLOCK verdicts below already fixed, rather than continuing on this head. Each BLOCK comment lists the exact findings; read them all and fix them before opening the new PR.\n\nThis is a policy action, not a code finding — the validator verdict on this run stands.' "$THRESHOLD" "$blocks" "$THRESHOLD")
+          gh pr comment "$PR_NUMBER" --repo "$REPO" --body "$msg" || echo "::warning::could not post the auto-close notice (non-fatal)"
+          gh pr close "$PR_NUMBER" --repo "$REPO" || echo "::warning::could not close the PR (non-fatal)"
+
       - name: Gate (BLOCK)
         if: steps.parse.outputs.verdict == 'BLOCK'
         run: |
           echo "::error::AI review blocked this PR"
           exit 1
+
 
       # INCONCLUSIVE is NOT a BLOCK: no code finding was produced — the provider
       # never answered (or the review yielded no Verdict line). Report that plainly
