@@ -31,7 +31,8 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib-org.sh"
 command -v gh >/dev/null
 [[ -n "${GH_TOKEN:-}" ]] || { echo "GH_TOKEN is required (the bypass-actor App/PAT)" >&2; exit 1; }
 
-mapfile -t repos < <(discover_repos)
+repos_out="$(discover_repos)" || { echo "FATAL: gh repo list (targets) failed" >&2; exit 1; }
+mapfile -t repos <<<"$repos_out"
 [[ ${#repos[@]} -gt 0 ]] || { echo "no active repositories discovered for $ORG" >&2; exit 1; }
 
 deleted=0 skipped=0 failed=0

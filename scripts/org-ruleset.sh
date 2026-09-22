@@ -72,14 +72,21 @@ app_id() {
 APP_ID="$(app_id)"
 
 # TARGET repos: active, non-fork, default branch `main` — the exact set the old
-# per-repo ruleset owner applied to. Discovered, never hand-listed.
-mapfile -t repos < <(discover_repos)
+# per-repo ruleset owner applied to. Discovered, never hand-listed. The discovery
+# status is checked at the CALL SITE (a `mapfile ... < <(fn)` guard would be dead —
+# see lib-org.sh).
+repos_out="$(discover_repos)" || { echo "FATAL: gh repo list (targets) failed" >&2; exit 1; }
+mapfile -t repos <<<"$repos_out"
 [[ ${#repos[@]} -gt 0 ]] || { echo "no active repositories discovered for $ORG" >&2; exit 1; }
 
 # EXCLUDE set for the org ruleset's `repository_name` condition: everything that is
 # NOT a target (archived, fork, or a non-`main` default branch). `~ALL` targets every
-# repo, so the non-targets must be named out explicitly to mirror the old scope.
-mapfile -t excludes < <(discover_excludes)
+# repo, so the non-targets must be named out explicitly to mirror the old scope. An
+# API failure here (an empty result is legitimate, so emptiness is NOT the signal) is
+# fatal — otherwise `exclude` would be `[]` and the ruleset would target forks and
+# archived repos too.
+excludes_out="$(discover_excludes)" || { echo "FATAL: gh repo list (excludes) failed" >&2; exit 1; }
+mapfile -t excludes <<<"$excludes_out"
 exclude_json() {
   local out="[" first=1 n
   for n in "${excludes[@]}"; do
@@ -160,7 +167,11 @@ case "$mode" in
     #      unprotected; the required workflow is now the only producer of the check.
     #   3. delete the per-repo rulesets (now redundant — the org ruleset carries the
     #      same required check + branch rules).
-    #   4. enforce the per-repo `allow_auto_merge` setting.
+    #   4. remove any surviving LEGACY branch protection (repos/…/branches/main/
+    #      protection). Org rulesets are additive and do NOT remove it, and the
+    #      classic protection has no bypass slot for `charly-auto-merge`, so it would
+    #      block the App's protected-main CHANGELOG writes.
+    #   5. enforce the per-repo `allow_auto_merge` setting.
     stragglers=0
     for repo in "${repos[@]}"; do
       has_dispatcher "$repo" && { echo "REFUSING: $repo still carries a dispatcher" >&2; stragglers=$((stragglers+1)); }
@@ -184,6 +195,15 @@ case "$mode" in
       [[ -n "$rid" ]] || continue
       gh api --method DELETE "repos/$ORG/$repo/rulesets/$rid" >/dev/null
       echo "$repo: removed redundant per-repo ruleset"
+    done
+
+    for repo in "${repos[@]}"; do
+      # The classic protection blocks the app's changelog write (no bypass) — remove
+      # it wherever it survives (idempotent: absent is a no-op).
+      if gh api "repos/$ORG/$repo/branches/main/protection" >/dev/null 2>&1; then
+        gh api --method DELETE "repos/$ORG/$repo/branches/main/protection" >/dev/null
+        echo "$repo: removed legacy branch protection"
+      fi
     done
 
     for repo in "${repos[@]}"; do
@@ -227,6 +247,8 @@ case "$mode" in
       if has_dispatcher "$repo"; then
         echo "$repo: per-repo dispatcher still present" >&2; fail=1
       fi
+      legacy="$(api_status "repos/$ORG/$repo/branches/main/protection")"
+      [[ "$legacy" == "404" ]] || { echo "$repo: legacy branch protection still present (HTTP $legacy)" >&2; fail=1; }
       auto="$(gh api "repos/$ORG/$repo" --jq '.allow_auto_merge')"
       [[ "$auto" == "true" ]] || { echo "$repo: allow_auto_merge must be true" >&2; fail=1; }
     done

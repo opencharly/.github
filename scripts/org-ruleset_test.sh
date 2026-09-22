@@ -7,22 +7,26 @@ trap 'rm -rf "$STATE"' EXIT
 
 # Mock state: two target repos. `alpha` carries the per-repo ruleset + dispatcher;
 # `beta` is clean. `allow_auto_merge` is false on beta (the regression the script
-# must fix) and true on alpha. `api_broken` forces a non-404 API failure on the
-# dispatcher probe, so the script must ABORT rather than read it as "absent".
+# must fix) and true on alpha. `alpha` also carries legacy branch protection (the
+# script must remove it; verify must assert its absence).
 printf 'true\n'  >"$STATE/auto_alpha"
 printf 'false\n' >"$STATE/auto_beta"
 printf 'present\n' >"$STATE/ruleset_alpha"
 printf 'present\n' >"$STATE/disp_alpha"
+printf 'present\n' >"$STATE/legacy_alpha"
 : >"$STATE/transcript"
 
 gh() {
   if [[ "$1 $2" == "repo list" ]]; then
-    # A failure in either discovery call must abort (the excludes read is now guarded).
-    [[ "${FORCE_REPO_LIST_FAIL:-}" == 1 ]] && return 1
-    # Distinguish target discovery (`.defaultBranchRef.name == "main"`) from exclude
-    # discovery (the `!=` filter). Targets: alpha, beta. Excludes: none.
+    # A failure in either discovery call must abort. FORCE_REPO_LIST_FAIL targets the
+    # EXCLUDES read specifically (the path the count guard cannot catch); the targets
+    # read always succeeds so the excludes abort is exercised, not the count guard.
     local jqfilter="${*: -1}"
-    [[ "$jqfilter" == *"!="* ]] && return 0
+    if [[ "$jqfilter" == *"!="* ]]; then
+      [[ "${FORCE_EXCLUDES_FAIL:-}" == 1 ]] && return 1
+      return 0
+    fi
+    [[ "${FORCE_TARGETS_FAIL:-}" == 1 ]] && return 1
     printf 'alpha\nbeta\n'; return
   fi
   [[ "$1" == api ]] || return 90
@@ -85,6 +89,13 @@ JSON
       if [[ "$(cat "$STATE/disp_$repo" 2>/dev/null)" == present ]]; then emit 200 '{"sha":"sha"}'; return; fi
       emit 404 '{}'; return
     fi
+    if [[ "$path" == "repos/test/$repo/branches/main/protection" ]]; then
+      if [[ "$method" == DELETE ]]; then
+        rm -f "$STATE/legacy_$repo"; printf 'deleted %s legacy\n' "$repo" >>"$STATE/transcript"; return 0
+      fi
+      if [[ "$(cat "$STATE/legacy_$repo" 2>/dev/null)" == present ]]; then emit 200 '{}'; return; fi
+      emit 404 '{}'; return
+    fi
   fi
   return 91
 }
@@ -100,6 +111,7 @@ fi
 rm -f "$STATE/disp_alpha"
 OPENCHARLY_ORG=test "$root/scripts/org-ruleset.sh" apply >/dev/null
 grep -q 'deleted alpha ruleset' "$STATE/transcript" || { echo "FAIL: alpha ruleset not deleted" >&2; exit 1; }
+grep -q 'deleted alpha legacy'  "$STATE/transcript" || { echo "FAIL: alpha legacy protection not removed" >&2; exit 1; }
 grep -q 'PATCH beta auto'       "$STATE/transcript" || { echo "FAIL: beta auto-merge not enabled" >&2; exit 1; }
 [[ "$(cat "$STATE/auto_beta")" == true ]] || { echo "FAIL: beta auto-merge state not true" >&2; exit 1; }
 grep -q 'PATCH alpha' "$STATE/transcript" && { echo "FAIL: alpha auto-merge must not be re-patched" >&2; exit 1; }
@@ -118,11 +130,19 @@ printf 'present\n' >"$STATE/ruleset_beta"
 if OPENCHARLY_ORG=test "$root/scripts/org-ruleset.sh" verify >/dev/null 2>&1; then
   echo "FAIL: verify must fail when a per-repo ruleset reappears" >&2; exit 1
 fi
+rm -f "$STATE/ruleset_beta"
 
-# A repo-list discovery failure must ABORT (a failed excludes read must never yield
-# an empty exclude set, which would apply the ruleset to forks/archived repos too).
-if FORCE_REPO_LIST_FAIL=1 OPENCHARLY_ORG=test "$root/scripts/org-ruleset.sh" apply >/dev/null 2>&1; then
-  echo "FAIL: apply must abort when a repo-list discovery fails" >&2; exit 1
+# A regression — legacy branch protection reappears — must fail verify.
+printf 'present\n' >"$STATE/legacy_beta"
+if OPENCHARLY_ORG=test "$root/scripts/org-ruleset.sh" verify >/dev/null 2>&1; then
+  echo "FAIL: verify must fail when legacy branch protection reappears" >&2; exit 1
+fi
+rm -f "$STATE/legacy_beta"
+
+# A failed EXCLUDES read must ABORT (an empty exclude set would apply the ruleset to
+# forks/archived repos too). This is the path the targets count-guard cannot catch.
+if FORCE_EXCLUDES_FAIL=1 OPENCHARLY_ORG=test "$root/scripts/org-ruleset.sh" apply >/dev/null 2>&1; then
+  echo "FAIL: apply must abort when the excludes read fails" >&2; exit 1
 fi
 
 echo "org-ruleset_test: all assertions passed (apply/verify/abort)"
