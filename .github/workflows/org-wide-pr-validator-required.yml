@@ -1,0 +1,61 @@
+# ORG-WIDE PR VALIDATOR — the REQUIRED WORKFLOW (org ruleset `workflows` rule).
+#
+# This is the single org-level entry point. It is NOT copied into any repo: the ONE
+# organization ruleset (owned by scripts/org-ruleset.sh) points at THIS file in
+# `opencharly/.github`, and GitHub runs it on every pull request in every targeted
+# repo. One file, one owner, zero per-repo copies to drift.
+#
+# WHY THIS EXISTS. GitHub's only native way to require a workflow org-wide is the
+# `workflows` ruleset rule, available on the Team plan (the org was on the free plan
+# when the per-repo dispatcher pattern began). This replaces the per-repo
+# `.github/workflows/pr-validator.yml` dispatcher stub entirely: the org ruleset
+# carries BOTH the `workflows` rule AND the ordinary branch rules (required status
+# check `validate / validate`, no force-push, no deletion, no creation), so the same
+# one ruleset also replaces the per-repo branch rulesets.
+#
+# The required workflow runs in the TARGET repo's context but its definition is read
+# from this repo at the pinned ref; it calls the same reusable validator
+# (`pr-validator.yml@main`) the whole org uses, so the gate logic stays one source.
+# The check it produces is `<job name> / validate` — the exact context required.
+name: charly/pr-validator
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+# ONE run per PR: a re-dispatch/push cancels the in-flight run, so the head can never
+# carry duplicate same-name `validate / validate` check runs (a duplicate FAILED run
+# kept `mergeable_state: blocked` despite PASS — measured on opencharly #38,
+# CHANGELOG/2026.251.0758.md). The concurrency block lives HERE, on the workflow that
+# declares it, and this workflow therefore carries `actions: write`: `actions: write`
+# is the permission that permits cancelling a workflow run (GitHub Actions
+# permissions table), and the measured regression #163 (CHANGELOG/2026.251.0844.md:
+# "callers whose installed dispatchers lack `actions: write` ... fail to expand the
+# reusable (0 jobs, instant failure)") is why the reusable pr-validator.yml
+# deliberately carries NO concurrency of its own. Keeping this top-level workflow's
+# declaration together with `actions: write` is the configuration measured to expand
+# and dedupe.
+concurrency:
+  group: pr-validator-${{ github.repository }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+jobs:
+  validate:
+    name: validate
+    if: github.event.pull_request.head.repo.fork == false
+    uses: opencharly/.github/.github/workflows/pr-validator.yml@main
+    with:
+      pr-number: ${{ github.event.pull_request.number }}
+      # Exact parity with the retired per-repo dispatcher: forward the provider
+      # selection. `vars` resolves in the TARGET repo's context (org-level variables
+      # with visibility `all` are in scope), so a repo can still override per-repo.
+      # The reusable itself falls back to `vars.AI_REVIEW_*` when these are empty.
+      ai_review_provider: ${{ vars.AI_REVIEW_PROVIDER }}
+      ai_review_model: ${{ vars.AI_REVIEW_MODEL }}
+      ai_review_base_url: ${{ vars.AI_REVIEW_BASE_URL }}
+    secrets: inherit

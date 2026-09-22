@@ -1,0 +1,43 @@
+# RETIRE THE PER-REPO VALIDATOR DISPATCHERS (one-shot org cutover).
+#
+# The ONE org ruleset (scripts/org-ruleset.sh) makes the org required workflow the
+# sole producer of the required `validate / validate` check, so every repo's
+# `.github/workflows/pr-validator.yml` dispatcher stub is now redundant — and while it
+# remains, a PR carries TWO same-name check runs, which keeps mergeability BLOCKED
+# despite PASS (the measured #38 lesson). This workflow deletes those stub files.
+#
+# WHY IT IS A WORKFLOW: deleting a file on a protected `main` needs a commit authored
+# by a ruleset BYPASS actor. The `charly-auto-merge` App IS that actor (`contents:
+# write`, installed org-wide), so it does the deletion; the operator-run
+# scripts/org-ruleset.sh deliberately adds NO human bypass to the ruleset (that would
+# loosen main protection).
+#
+# RUN ORDER (one time): dispatch this workflow FIRST, then run
+# `scripts/org-ruleset.sh apply` (it refuses while any dispatcher survives), then
+# `scripts/org-ruleset.sh verify`. Idempotent: already-absent files are skipped.
+name: retire-per-repo-dispatchers
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  retire:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create bot token (charly-auto-merge App)
+        id: app
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547
+        with:
+          app-id: ${{ secrets.CHARLY_AUTO_MERGE_APP_ID }}
+          private-key: ${{ secrets.CHARLY_AUTO_MERGE_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - uses: actions/checkout@v7
+
+      - name: Retire the per-repo dispatchers (org-wide)
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: bash scripts/retire-per-repo-dispatchers.sh
