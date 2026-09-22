@@ -159,7 +159,7 @@ rm -f "$STATE/legacy_beta"
 
 # A scope regression — the ruleset's exclude set drifts — must fail verify.
 printf 'true\n' >"$STATE/scope_mismatch"
-if OPENCHARLY_ORG=test SCOPE_MISMATCH=1 "$root/scripts/org-ruleset.sh" verify >/dev/null 2>&1; then
+if OPENCHARLY_ORG=test "$root/scripts/org-ruleset.sh" verify >/dev/null 2>&1; then
   echo "FAIL: verify must fail when the ruleset's target scope drifts" >&2; exit 1
 fi
 rm -f "$STATE/scope_mismatch"
