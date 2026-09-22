@@ -1,10 +1,25 @@
 # ORG-WIDE PR-VALIDATOR DISPATCHER — install at .github/workflows/pr-validator.yml
 #
-# Copy VERBATIM into every repo. The job MUST stay named `validate`: the branch
-# ruleset requires the status check `validate / validate` (scripts/branch-protection.sh
-# $CONTEXT), and a check run from a reusable-workflow call is named
-# `<caller job name> / <called job name>`. Renaming this job renames the check, the
-# required check then never appears, and the repo can never merge.
+# THIS FILE IS THE SINGLE SOURCE. Every opencharly repo's
+# `.github/workflows/pr-validator.yml` is a byte-identical copy of it, kept in
+# sync by `scripts/sync-dispatchers.sh apply` and enforced by
+# `scripts/sync-dispatchers.sh verify` (the same single-owner pattern as
+# `scripts/branch-protection.sh`). Do NOT hand-edit a repo's copy — run the
+# script. The validator LOGIC is the reusable workflow
+# `opencharly/.github/.github/workflows/pr-validator.yml@main`; a change THERE
+# reaches every repo at once. This stub only carries what GitHub cannot express
+# org-wide on the free plan (org required-workflows need GitHub Team).
+#
+# The job MUST stay named `validate`: the branch ruleset requires the status
+# check `validate / validate` (scripts/branch-protection.sh $CONTEXT), and a
+# check run from a reusable-workflow call is named
+# `<caller job name> / <called job name>`. Renaming this job renames the check,
+# the required check then never appears, and the repo can never merge.
+#
+# NO repo-specific configuration lives here. Provider/model/endpoint/key and
+# every model-behaviour knob are read by the reusable workflow from ORG-level
+# variables/secret (Settings → Secrets and variables → Actions, visibility all)
+# — never passed through `with:`. Add nothing repo-specific to this file.
 name: charly/pr-validator
 
 on:
@@ -16,11 +31,11 @@ on:
         required: true
         type: string
 
-# ONE run per PR (concurrency dedupe — a re-dispatch/push cancels the in-flight run;
-# duplicated same-name check runs kept mergeability blocked despite PASS — #38 lesson).
-# NOTE: the dispatcher MUST carry actions: write — cancel-in-progress requires it; the
-# reusable workflow itself does NOT carry concurrency (legacy callers without actions:
-# write would fail to expand it — #163 infra regression, reverted).
+# ONE run per PR (concurrency dedupe — a re-dispatch/push cancels the in-flight
+# run; duplicated same-name check runs kept mergeability blocked despite PASS —
+# #38 lesson). NOTE: the dispatcher MUST carry actions: write — cancel-in-progress
+# requires it; the reusable workflow itself does NOT carry concurrency (legacy
+# callers without actions: write would fail to expand it — #163, reverted).
 concurrency:
   group: pr-validator-${{ github.repository }}-${{ inputs.pr-number || github.event.pull_request.number }}
   cancel-in-progress: true
@@ -39,7 +54,4 @@ jobs:
     uses: opencharly/.github/.github/workflows/pr-validator.yml@main
     with:
       pr-number: ${{ inputs.pr-number || github.event.pull_request.number }}
-      ai_review_provider: ${{ vars.AI_REVIEW_PROVIDER }}
-      ai_review_model: ${{ vars.AI_REVIEW_MODEL }}
-      ai_review_base_url: ${{ vars.AI_REVIEW_BASE_URL }}
     secrets: inherit
