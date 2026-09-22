@@ -20,18 +20,23 @@ set -euo pipefail
 #     scripts/branch-protection.sh), and
 #   * the per-repo `.github/workflows/pr-validator.yml` DISPATCHER stub — which only
 #     ever existed because org required-workflows need GitHub Team (the org was on
-#     the free plan when the per-repo pattern began).
+#     the free plan when the per-repo pattern began). The stub FILES are retired by
+#     `.github/workflows/retire-per-repo-dispatchers.yml` (they need an app-token
+#     commit on a protected `main`, which this operator-run script cannot make).
 # Nothing is copied into any repo; there is no per-repo validator config to drift.
 #
 # THE ONE SETTING THAT CANNOT MOVE: `allow_auto_merge` is a per-repository setting
-# with no org-level default (the org endpoint does not expose one). The validator
-# enables GitHub native auto-merge on a PASS, which fails and leaves the check red
-# when the repo setting is off — so this script still enforces it per repo.
+# with no org-level default (the org endpoint exposes none). The validator enables
+# GitHub native auto-merge on a PASS, which fails and leaves the check red when the
+# repo setting is off — so this script still enforces it per repo.
+#
+# THE RULESET CARRIES ONLY THE SAME BYPASS THE OLD PER-REPO RULESETS DID: the
+# `charly-auto-merge` app, whose protected-main CHANGELOG writes must land. It
+# deliberately adds NO human bypass, so main protection is not loosened.
 #
 # usage: $0 {apply|verify}
-#   apply  — the one-shot, idempotent cutover: enable the org ruleset, delete the
-#            now-redundant per-repo rulesets, retire the per-repo dispatcher files,
-#            and enforce the per-repo `allow_auto_merge` setting.
+#   apply  — enable the org ruleset, delete the now-redundant per-repo rulesets, and
+#            enforce the per-repo `allow_auto_merge` setting. Idempotent.
 #   verify — read-only; assert the whole end state.
 
 readonly ORG="${OPENCHARLY_ORG:-opencharly}"
@@ -42,9 +47,7 @@ readonly REQUIRED_PATH=".github/workflows/org-wide-pr-validator-required.yml"
 readonly REQUIRED_REF="${REQUIRED_REF:-refs/heads/main}"
 readonly DISPATCHER_PATH=".github/workflows/pr-validator.yml"
 # The SOURCE repo's dispatcher lives at a DIFFERENT path: its `pr-validator.yml` is
-# the REUSABLE, so its own dispatcher stub is the `-dispatcher.yml` file. The org
-# ruleset still targets `.github` (it is in `~ALL`), so that stub must be retired too
-# or `.github` PRs would get duplicate `validate / validate` producers.
+# the REUSABLE, so its own dispatcher stub is the `-dispatcher.yml` file.
 readonly SOURCE_DISPATCHER_PATH=".github/workflows/pr-validator-dispatcher.yml"
 readonly CONTEXT="validate / validate"
 readonly APP_SLUG="charly-auto-merge"
@@ -59,9 +62,8 @@ SOURCE_ID="$(gh api "repos/$ORG/$SOURCE_REPO" --jq .id)"
 
 # The GitHub App that runs the org's tag-on-merge changelog writes and the
 # validator's bot pushes. It is a scoped BYPASS actor of the org ruleset so its
-# protected-main writes can land (the legacy branch-protection API drops bypass
-# fields; the ruleset API carries them). `OrganizationAdmin` is ALSO a bypass actor
-# so this cutover's operator can retarget the per-repo dispatchers directly.
+# protected-main writes can land (the legacy branch-protection API dropped bypass
+# fields; the ruleset API carries them).
 app_id() {
   if [[ -n "${OPENCHARLY_APP_ID:-}" ]]; then
     echo "$OPENCHARLY_APP_ID"
@@ -111,7 +113,6 @@ ruleset_payload() {
     "ref_name": {"include": ["refs/heads/main"], "exclude": []}
   },
   "bypass_actors": [
-    {"actor_id": null, "actor_type": "OrganizationAdmin", "bypass_mode": "always"},
     {"actor_id": $APP_ID, "actor_type": "Integration", "bypass_mode": "always"}
   ],
   "rules": [
@@ -127,66 +128,63 @@ ruleset_payload() {
 JSON
 }
 
+# All reads below run under `set -e`: a 401/403/rate-limit/network failure ABORTS the
+# script rather than being silently mistaken for an empty result. Only the dispatcher
+# existence check has to tell a real 404 (absent) from an API failure, so it alone
+# inspects the HTTP status.
+
 existing_id() {
   gh api "orgs/$ORG/rulesets" \
-    --jq ".[] | select(.name == \"$RULESET_NAME\") | .id" 2>/dev/null || true
+    --jq ".[] | select(.name == \"$RULESET_NAME\") | .id"
 }
 
-has_dispatcher() {
-  gh api "repos/$ORG/$1/contents/$(dispatcher_path_for "$1")" --jq '.sha' >/dev/null 2>&1
+repo_ruleset_id() {
+  gh api "repos/$ORG/$1/rulesets" \
+    --jq ".[] | select(.name == \"$REPO_RULESET_NAME\") | .id"
 }
 
-# dispatcher_path_for returns the repo-appropriate dispatcher path: the SOURCE repo
-# uses the `-dispatcher.yml` stub (its `pr-validator.yml` is the reusable).
 dispatcher_path_for() {
+  # The SOURCE repo uses the `-dispatcher.yml` stub (its `pr-validator.yml` is the
+  # reusable). Every other repo uses the standard dispatcher path.
   [[ "$1" == "$SOURCE_REPO" ]] && echo "$SOURCE_DISPATCHER_PATH" || echo "$DISPATCHER_PATH"
 }
 
-# retire_dispatcher deletes the per-repo dispatcher file on `main`. The org ruleset's
-# OrganizationAdmin bypass lets the operator's token land the commit directly.
-retire_dispatcher() {
-  local repo="$1" path sha
-  path="$(dispatcher_path_for "$repo")"
-  sha="$(gh api "repos/$ORG/$repo/contents/$path?ref=main" --jq .sha)"
-  gh api --method DELETE "repos/$ORG/$repo/contents/$path" \
-    -f message="chore: retire the per-repo validator dispatcher (org-wide required workflow)" \
-    -f sha="$sha" -f branch=main --jq '.commit.sha' >/dev/null
+# api_status <path> — the HTTP status of a GET; 000 on a transport/other failure.
+api_status() {
+  local resp
+  resp="$(gh api --include "$1" 2>&1 || true)"
+  printf '%s\n' "$resp" | awk 'NR==1 { print $2; exit }'
 }
 
-ensure_auto_merge() {
-  local repo="$1" auto
-  auto="$(gh api "repos/$ORG/$repo" --jq '.allow_auto_merge' 2>/dev/null || true)"
-  if [[ "$auto" != "true" ]]; then
-    gh api --method PATCH "repos/$ORG/$repo" -f allow_auto_merge=true --jq .allow_auto_merge >/dev/null
-  fi
-}
-
-delete_repo_ruleset() {
-  local repo="$1" id
-  id="$(gh api "repos/$ORG/$repo/rulesets" \
-    --jq ".[] | select(.name == \"$REPO_RULESET_NAME\") | .id" 2>/dev/null || true)"
-  [[ -n "$id" ]] || return 1
-  gh api --method DELETE "repos/$ORG/$repo/rulesets/$id" >/dev/null
+# has_dispatcher <repo> — 0 if the per-repo dispatcher file exists, 1 if it is a real
+# 404, and a hard abort on any other status (a transient error must never read as
+# "absent" and silently skip retirement, which would leave a duplicate producer).
+has_dispatcher() {
+  local code
+  code="$(api_status "repos/$ORG/$1/contents/$(dispatcher_path_for "$1")")"
+  case "$code" in
+    200) return 0 ;;
+    404) return 1 ;;
+    *) echo "FATAL: gh api contents for $1 -> HTTP $code" >&2; exit 1 ;;
+  esac
 }
 
 case "$mode" in
   apply)
-    gh api "repos/$ORG/$SOURCE_REPO/contents/$REQUIRED_PATH?ref=${REQUIRED_REF#refs/heads/}" --jq '.sha' >/dev/null \
+    # The required workflow must exist on the pinned ref the ruleset names.
+    gh api "repos/$ORG/$SOURCE_REPO/contents/$REQUIRED_PATH?ref=${REQUIRED_REF#refs/heads/}" --jq .sha >/dev/null \
       || { echo "required workflow missing on $REQUIRED_REF in $SOURCE_REPO — merge it first" >&2; exit 1; }
 
     # apply order (idempotent; safe to re-run):
     #   1. create/update the org ruleset — protection is enabled FIRST so main is
-    #      never unprotected; the new required workflow immediately becomes the
-    #      producer of `validate / validate`.
+    #      never unprotected; the required workflow becomes a producer of the check.
     #   2. delete the per-repo rulesets (now redundant — the org ruleset carries the
     #      same required check + branch rules).
-    #   3. retire the per-repo dispatcher files (the old producer of the check).
-    #   4. enforce the per-repo `allow_auto_merge` setting.
-    # The brief overlap between steps 1 and 3 is the accepted cost: existing check
-    # runs are unaffected, so no open PR loses its green; only a PR that is PUSHED
-    # inside the window could momentarily carry two `validate / validate` runs, and
-    # a re-push clears it (the #38 duplicate-check lesson). `set -e` stops the run
-    # on any failure, and every step is re-runnable.
+    #   3. enforce the per-repo `allow_auto_merge` setting.
+    # The per-repo dispatcher FILES are retired separately, BEFORE step 1, by
+    # retire-per-repo-dispatchers.yml (they need an app-token commit on protected
+    # `main`). Retiring them first means step 1 is the sole producer from the start —
+    # no window with two producers of `validate / validate` (the #38 duplicate hazard).
     id="$(existing_id)"
     if [[ -n "$id" ]]; then
       gh api --method PUT "orgs/$ORG/rulesets/$id" --input <(ruleset_payload) --jq .id >/dev/null
@@ -198,16 +196,18 @@ case "$mode" in
     echo "required workflow: $SOURCE_REPO/$REQUIRED_PATH@$REQUIRED_REF"
 
     for repo in "${repos[@]}"; do
-      delete_repo_ruleset "$repo" && echo "$repo: removed redundant per-repo ruleset" || true
+      rid="$(repo_ruleset_id "$repo")"
+      [[ -n "$rid" ]] || continue
+      gh api --method DELETE "repos/$ORG/$repo/rulesets/$rid" >/dev/null
+      echo "$repo: removed redundant per-repo ruleset"
     done
 
     for repo in "${repos[@]}"; do
-      has_dispatcher "$repo" || continue
-      retire_dispatcher "$repo" && echo "$repo: retired dispatcher"
-    done
-
-    for repo in "${repos[@]}"; do
-      ensure_auto_merge "$repo"
+      auto="$(gh api "repos/$ORG/$repo" --jq '.allow_auto_merge')"
+      if [[ "$auto" != "true" ]]; then
+        gh api --method PATCH "repos/$ORG/$repo" -f allow_auto_merge=true --jq .allow_auto_merge >/dev/null
+        echo "$repo: enabled repo-level allow_auto_merge"
+      fi
     done
     ;;
   verify)
@@ -228,15 +228,16 @@ case "$mode" in
       echo "$state" | jq -e --argjson app "$APP_ID" \
         '[.bypass_actors[]|select(.actor_id==$app)] | length > 0' >/dev/null \
         || { echo "org ruleset is missing the $APP_SLUG app bypass" >&2; fail=1; }
+      echo "$state" | jq -e '[.bypass_actors[]|select(.actor_type=="OrganizationAdmin")] | length == 0' >/dev/null \
+        || { echo "org ruleset must not add a human bypass" >&2; fail=1; }
     fi
     for repo in "${repos[@]}"; do
-      id="$(gh api "repos/$ORG/$repo/rulesets" \
-        --jq ".[] | select(.name == \"$REPO_RULESET_NAME\") | .id" 2>/dev/null || true)"
-      [[ -z "$id" ]] || { echo "$repo: redundant per-repo ruleset still present" >&2; fail=1; }
+      rid="$(repo_ruleset_id "$repo")"
+      [[ -z "$rid" ]] || { echo "$repo: redundant per-repo ruleset still present" >&2; fail=1; }
       if has_dispatcher "$repo"; then
         echo "$repo: per-repo dispatcher still present" >&2; fail=1
       fi
-      auto="$(gh api "repos/$ORG/$repo" --jq '.allow_auto_merge' 2>/dev/null || true)"
+      auto="$(gh api "repos/$ORG/$repo" --jq '.allow_auto_merge')"
       [[ "$auto" == "true" ]] || { echo "$repo: allow_auto_merge must be true" >&2; fail=1; }
     done
     [[ "$fail" == 0 ]] && echo "org-wide required workflow + main protection verified"

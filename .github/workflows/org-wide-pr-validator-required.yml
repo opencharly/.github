@@ -25,12 +25,16 @@ on:
 
 # ONE run per PR: a re-dispatch/push cancels the in-flight run, so the head can never
 # carry duplicate same-name `validate / validate` check runs (a duplicate FAILED run
-# kept `mergeable_state: blocked` despite PASS — measured on opencharly #38). The
-# concurrency block lives HERE, on the top-level workflow that declares it, and that
-# workflow therefore carries `actions: write` — the measured constraint (opencharly
-# #163, CHANGELOG/2026.251.0844.md): a workflow declaring cancel-in-progress whose
-# caller lacks `actions: write` fails to expand (0 jobs, instant startup failure), so
-# the reusable pr-validator.yml deliberately carries NO concurrency of its own.
+# kept `mergeable_state: blocked` despite PASS — measured on opencharly #38,
+# CHANGELOG/2026.251.0758.md). The concurrency block lives HERE, on the workflow that
+# declares it, and this workflow therefore carries `actions: write`: `actions: write`
+# is the permission that permits cancelling a workflow run (GitHub Actions
+# permissions table), and the measured regression #163 (CHANGELOG/2026.251.0844.md:
+# "callers whose installed dispatchers lack `actions: write` ... fail to expand the
+# reusable (0 jobs, instant failure)") is why the reusable pr-validator.yml
+# deliberately carries NO concurrency of its own. Keeping this top-level workflow's
+# declaration together with `actions: write` is the configuration measured to expand
+# and dedupe.
 concurrency:
   group: pr-validator-${{ github.repository }}-${{ github.event.pull_request.number }}
   cancel-in-progress: true

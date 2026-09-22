@@ -16,11 +16,16 @@ copy inherits the files here — so a change lands **once**, not in every repo.
   required workflow) *and* the ordinary branch rules (required status check, no
   force-push, no deletion, no creation), applied to every active non-fork
   `main`-default repo. It also enforces the one setting that cannot move to the org
-  (`allow_auto_merge`, a per-repo setting with no org default). `apply` is the
-  one-shot, idempotent cutover: it enables the org ruleset, deletes the
-  now-redundant per-repo rulesets, retires the per-repo dispatcher files, and
-  enforces `allow_auto_merge`. `verify` asserts the whole end state. Its offline
-  mock-`gh` test is `scripts/org-ruleset_test.sh`.
+  (`allow_auto_merge`, a per-repo setting with no org default). `apply` enables the
+  org ruleset, deletes the now-redundant per-repo rulesets, and enforces
+  `allow_auto_merge`; `verify` asserts the whole end state. Its offline mock-`gh`
+  test is `scripts/org-ruleset_test.sh`.
+- **`.github/workflows/retire-per-repo-dispatchers.yml`** — the one-shot cutover
+  step that DELETES each repo's redundant `.github/workflows/pr-validator.yml`
+  dispatcher stub. It is a workflow (not part of the owner script) because a delete
+  on a protected `main` needs a ruleset-bypass commit author — the `charly-auto-merge`
+  App. Run it BEFORE `scripts/org-ruleset.sh apply`, so the org required workflow is
+  never a second producer of the required check. Idempotent (absent files skipped).
 - **`.github/workflows/pr-validator.yml`** — the org-wide `charly/pr-validator` gate.
   A **reusable workflow** (`on: workflow_call`) that also self-gates this `.github`
   repo (`on: pull_request`). It runs a fresh, independent charly review (the plugin-review plugin, welded
@@ -61,11 +66,14 @@ here too — one source, inherited everywhere.
 `validate / validate` check for every repo, so no repo installs anything. The old
 per-repo `.github/workflows/pr-validator.yml` dispatcher stub existed only because
 org required-workflows need GitHub Team (the org was on the free plan when that
-pattern began); the org ruleset now replaces it, and `apply` retires the stub in
-every repo. To re-derive the org-wide state:
+pattern began); the org ruleset now replaces it, and
+`.github/workflows/retire-per-repo-dispatchers.yml` deletes the stub in every repo.
+The one-time cutover order is:
 
 ```console
-$ scripts/org-ruleset.sh verify   # asserts the whole end state
+$ gh workflow run retire-per-repo-dispatchers.yml   # delete the per-repo stubs first
+$ scripts/org-ruleset.sh apply                      # then enable the org ruleset
+$ scripts/org-ruleset.sh verify                     # assert the whole end state
 ```
 
 ## Required org-level configuration

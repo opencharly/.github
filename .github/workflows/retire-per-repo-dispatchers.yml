@@ -1,0 +1,82 @@
+# RETIRE THE PER-REPO VALIDATOR DISPATCHERS (one-shot org cutover).
+#
+# The ONE org ruleset (scripts/org-ruleset.sh) makes the org required workflow the
+# sole producer of the required `validate / validate` check, so every repo's
+# `.github/workflows/pr-validator.yml` dispatcher stub is now redundant — and while it
+# remains, a PR carries TWO same-name check runs, which keeps mergeability BLOCKED
+# despite PASS (the measured #38 lesson). This workflow deletes those stub files.
+#
+# WHY IT IS A WORKFLOW AND NOT PART OF scripts/org-ruleset.sh: deleting a file on a
+# protected `main` needs a commit authored by a ruleset BYPASS actor. The
+# `charly-auto-merge` App IS that actor (`contents: write`, installed org-wide), so
+# it does the deletion here; the operator-run script deliberately adds NO human
+# bypass to the ruleset (that would loosen main protection).
+#
+# RUN ORDER (one time): dispatch this workflow FIRST, then run
+# `scripts/org-ruleset.sh apply` — so there is never a window with two producers of
+# the required check. This workflow is idempotent: already-absent files are skipped.
+name: retire-per-repo-dispatchers
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  retire:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create bot token (charly-auto-merge App)
+        id: app
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547
+        with:
+          app-id: ${{ secrets.CHARLY_AUTO_MERGE_APP_ID }}
+          private-key: ${{ secrets.CHARLY_AUTO_MERGE_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - uses: actions/github-script@v7
+        env:
+          BOT_TOKEN: ${{ steps.app.outputs.token }}
+        with:
+          github-token: ${{ steps.app.outputs.token }}
+          script: |
+            const org = context.repo.owner;
+            const SOURCE = '.github';
+            const STD = '.github/workflows/pr-validator.yml';
+            const SRC_STUB = '.github/workflows/pr-validator-dispatcher.yml';
+            const pathFor = (r) => (r === SOURCE ? SRC_STUB : STD);
+
+            const repos = await github.paginate(github.rest.repos.listForOrg, {
+              org, per_page: 100, type: 'all',
+            });
+
+            let deleted = 0, skipped = 0, failed = 0;
+            for (const repo of repos) {
+              if (repo.archived || repo.fork || repo.default_branch !== 'main') continue;
+              const path = pathFor(repo.name);
+              let sha;
+              try {
+                const { data } = await github.rest.repos.getContent({
+                  owner: org, repo: repo.name, path, ref: 'main',
+                });
+                sha = data.sha;
+              } catch (e) {
+                if (e.status === 404) { skipped++; continue; }
+                core.error(`${repo.name}: getContent ${e.status} ${e.message}`); failed++; continue;
+              }
+              try {
+                await github.rest.repos.deleteFile({
+                  owner: org, repo: repo.name, path,
+                  message: 'chore: retire the per-repo validator dispatcher (org-wide required workflow)',
+                  sha, branch: 'main',
+                });
+                deleted++;
+                core.info(`${repo.name}: retired ${path}`);
+              } catch (e) {
+                core.error(`${repo.name}: deleteFile ${e.status} ${e.message}`); failed++;
+              }
+              if (failed > 20) { throw new Error('too many failures — aborting'); }
+            }
+            core.notice(`retired=${deleted} absent=${skipped} failed=${failed}`);
+            if (failed > 0) core.setFailed(`${failed} repos failed — re-run this workflow to retry them`);
