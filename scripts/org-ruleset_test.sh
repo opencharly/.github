@@ -65,14 +65,21 @@ gh() {
     fi
     cat "$STATE/org_ruleset_id" 2>/dev/null || true; return
   fi
-  if [[ "$path" == "orgs/test/rulesets/"* ]]; then
-    [[ "$method" == DELETE ]] && { rm -f "$STATE/org_ruleset_id"; return; }
-    [[ "$method" == PUT ]] && { printf '55\n'; return; }
-    cat <<JSON
-{"id":55,"enforcement":"active","rules":[{"type":"workflows","parameters":{"workflows":[{"path":".github/workflows/org-wide-pr-validator-required.yml"}]}},{"type":"required_status_checks","parameters":{"strict_required_status_checks_policy":true,"required_status_checks":[{"context":"validate / validate"}]}},{"type":"non_fast_forward"},{"type":"deletion"},{"type":"creation"}],"bypass_actors":[{"actor_id":123,"actor_type":"Integration"}]}
+    if [[ "$path" == "orgs/test/rulesets/"* ]]; then
+      [[ "$method" == DELETE ]] && { rm -f "$STATE/org_ruleset_id"; return; }
+      [[ "$method" == PUT ]] && { printf '55\n'; return; }
+      if [[ -f "$STATE/scope_mismatch" ]]; then
+        # A drifted scope (wrong exclude) — verify must detect it.
+        cat <<JSON
+{"id":55,"enforcement":"active","conditions":{"repository_name":{"include":["~ALL"],"exclude":["some-other-repo"],"protected":false},"ref_name":{"include":["refs/heads/main"],"exclude":[]}},"rules":[{"type":"workflows","parameters":{"workflows":[{"path":".github/workflows/org-wide-pr-validator-required.yml"}]}},{"type":"required_status_checks","parameters":{"strict_required_status_checks_policy":true,"required_status_checks":[{"context":"validate / validate"}]}},{"type":"non_fast_forward"},{"type":"deletion"},{"type":"creation"}],"bypass_actors":[{"actor_id":123,"actor_type":"Integration"}]}
 JSON
-    return
-  fi
+        return
+      fi
+      cat <<JSON
+{"id":55,"enforcement":"active","conditions":{"repository_name":{"include":["~ALL"],"exclude":[],"protected":false},"ref_name":{"include":["refs/heads/main"],"exclude":[]}},"rules":[{"type":"workflows","parameters":{"workflows":[{"path":".github/workflows/org-wide-pr-validator-required.yml"}]}},{"type":"required_status_checks","parameters":{"strict_required_status_checks_policy":true,"required_status_checks":[{"context":"validate / validate"}]}},{"type":"non_fast_forward"},{"type":"deletion"},{"type":"creation"}],"bypass_actors":[{"actor_id":123,"actor_type":"Integration"}]}
+JSON
+      return
+    fi
 
   local repo=""
   [[ "$path" =~ ^repos/test/(alpha|beta)(/|$) ]] && repo="${BASH_REMATCH[1]}"
@@ -149,6 +156,13 @@ if OPENCHARLY_ORG=test "$root/scripts/org-ruleset.sh" verify >/dev/null 2>&1; th
   echo "FAIL: verify must fail when legacy branch protection reappears" >&2; exit 1
 fi
 rm -f "$STATE/legacy_beta"
+
+# A scope regression — the ruleset's exclude set drifts — must fail verify.
+printf 'true\n' >"$STATE/scope_mismatch"
+if OPENCHARLY_ORG=test SCOPE_MISMATCH=1 "$root/scripts/org-ruleset.sh" verify >/dev/null 2>&1; then
+  echo "FAIL: verify must fail when the ruleset's target scope drifts" >&2; exit 1
+fi
+rm -f "$STATE/scope_mismatch"
 
 # A failed EXCLUDES read must ABORT (an empty exclude set would apply the ruleset to
 # forks/archived repos too). This is the path the targets count-guard cannot catch.

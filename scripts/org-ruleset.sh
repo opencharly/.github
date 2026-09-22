@@ -236,6 +236,18 @@ case "$mode" in
     if [[ -n "$id" ]]; then
       state="$(gh api "orgs/$ORG/rulesets/$id")"
       echo "$state" | jq -e '.enforcement == "active"' >/dev/null || { echo "org ruleset not active" >&2; fail=1; }
+      # TARGET SCOPE: the ruleset must target `~ALL` (minus the excluded non-target
+      # repos) on `refs/heads/main` — a silently narrowed/widened scope would still
+      # otherwise pass. The expected exclude set is re-derived and compared exactly.
+      echo "$state" | jq -e '.conditions.repository_name.include == ["~ALL"]' >/dev/null \
+        || { echo "org ruleset must target ~ALL repositories" >&2; fail=1; }
+      echo "$state" | jq -e '.conditions.repository_name.protected == false' >/dev/null \
+        || { echo "org ruleset repository_name.protected must be false" >&2; fail=1; }
+      echo "$state" | jq -e --argjson exp "$(exclude_json)" \
+        '.conditions.repository_name.exclude == $exp' >/dev/null \
+        || { echo "org ruleset exclude set does not match the non-target repos" >&2; fail=1; }
+      echo "$state" | jq -e '.conditions.ref_name.include == ["refs/heads/main"] and .conditions.ref_name.exclude == []' >/dev/null \
+        || { echo "org ruleset must target exactly refs/heads/main" >&2; fail=1; }
       echo "$state" | jq -e --arg p "$REQUIRED_PATH" \
         '[.rules[]|select(.type=="workflows")|.parameters.workflows[].path] | index($p) != null' >/dev/null \
         || { echo "org ruleset does not require $REQUIRED_PATH" >&2; fail=1; }
