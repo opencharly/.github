@@ -50,9 +50,14 @@ for repo in "${repos[@]}"; do
   esac
   # The blob SHA is the delete target's concurrency guard.
   sha="$(gh api "repos/$ORG/$repo/contents/$path" --jq .sha)"
-  resp="$(gh api --method DELETE "repos/$ORG/$repo/contents/$path" \
+  # Gate the counters on the delete's EXIT STATUS, never on `resp` being non-empty:
+  # `2>&1` captures the error text on failure, so a non-empty `resp` alone would count
+  # the same repo as BOTH retired and failed.
+  if resp="$(gh api --method DELETE "repos/$ORG/$repo/contents/$path" \
       -f message="chore: retire the per-repo validator dispatcher (org-wide required workflow)" \
-      -f sha="$sha" -f branch=main --jq '.commit.sha' 2>&1)" || {
+      -f sha="$sha" -f branch=main --jq '.commit.sha' 2>&1)"; then
+    echo "$repo: retired $path"; deleted=$((deleted+1))
+  else
     if [[ "$resp" == *"Resource not accessible by integration"* ]]; then
       echo "FATAL: the token cannot write workflow files (403 on $repo)." >&2
       echo "The App used for this cutover must hold BOTH 'contents: write' (ruleset bypass actor)" >&2
@@ -61,8 +66,7 @@ for repo in "${repos[@]}"; do
     fi
     echo "ERROR: $repo deleteFile failed: $resp" >&2; failed=$((failed+1))
     [[ "$failed" -gt "$MAX_FAILURES" ]] && { echo "too many failures — aborting" >&2; exit 1; }
-  }
-  [[ -z "${resp:-}" ]] || { echo "$repo: retired $path"; deleted=$((deleted+1)); }
+  fi
 done
 echo "retired=$deleted absent=$skipped failed=$failed"
 [[ "$failed" == 0 ]]

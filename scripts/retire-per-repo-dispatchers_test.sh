@@ -74,11 +74,13 @@ if FORCE_API_FAIL=1 GH_TOKEN=x OPENCHARLY_ORG=test "$root/scripts/retire-per-rep
   echo "FAIL: must abort on a non-404 probe failure" >&2; exit 1
 fi
 
-# a delete failure must fail the run.
+# a delete failure must fail the run AND count the repo as failed-only — never as
+# both retired and failed (the `2>&1` error text must not be read as success).
 printf 'present\n' >"$STATE/disp_alpha"
-if FORCE_DELETE_FAIL=1 GH_TOKEN=x OPENCHARLY_ORG=test "$root/scripts/retire-per-repo-dispatchers.sh" >/dev/null 2>&1; then
-  echo "FAIL: must fail when a delete fails" >&2; exit 1
-fi
+out="$(FORCE_DELETE_FAIL=1 GH_TOKEN=x OPENCHARLY_ORG=test "$root/scripts/retire-per-repo-dispatchers.sh" 2>&1)" && {
+  echo "FAIL: must fail when a delete fails" >&2; exit 1; }
+grep -q "retired=0 absent=1 failed=1" <<<"$out" \
+  || { echo "FAIL: delete-failure counters must be retired=0 absent=1 failed=1 (got: $(grep 'retired=' <<<"$out"))" >&2; exit 1; }
 
 # a 403 permission error (token cannot write workflow files) must ABORT immediately
 # with the remediation, never churn through the remaining repos.
