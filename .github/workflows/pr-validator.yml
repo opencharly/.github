@@ -64,21 +64,24 @@
 #
 # ACTIVE (verified against the pinned bundle with `strings`, never asserted —
 # the evidence is in this PR's body):
-#   * ALL SIX knobs this workflow passes are ACTIVE on the org pin
-#     `vars.CHARLY_VERSION = v2026.263.0616`, whose welded engine is
-#     `plugin-review@v2026.263.0549` (the opencharly/plugin-review#10 merge):
+#   * The org pin `vars.CHARLY_VERSION = v2026.263.2131` welds
+#     `plugin-review@v2026.263.1956`. In that bundled plugin, `strings` finds the
+#     generation/idle/context knobs this workflow passes —
 #     AI_REVIEW_STREAM_IDLE_TIMEOUT, AI_REVIEW_TOOL_RESULT_MAX_BYTES,
 #     AI_REVIEW_ATTEMPT_TIMEOUT, AI_REVIEW_MAX_ATTEMPTS,
-#     AI_REVIEW_REASONING_EFFORT and AI_REVIEW_MAX_TOKENS each have a `strings`
-#     hit in the bundled plugin-review. So passing the generation bounds
-#     through is now effective, not inert: dropping the hardcoded 300s cap takes
-#     effect immediately, and the engine's own bounded default (high thinking
-#     plus a max_tokens budget sized above what thinking consumes) is what keeps
-#     a review fast.
+#     AI_REVIEW_REASONING_EFFORT, AI_REVIEW_MAX_TOKENS, AI_REVIEW_CONTEXT_TOKENS,
+#     AI_REVIEW_CONTEXT_MARGIN, AI_REVIEW_SESSION_ID — so passing the generation
+#     bounds through is effective, not inert.
+#   * The sampling/penalty/stop/prompt knobs this workflow ALSO forwards
+#     (AI_REVIEW_TEMPERATURE, _TOP_P, _FREQUENCY_PENALTY, _PRESENCE_PENALTY,
+#     _STOP, _PROMPT_EXTRA, _POST_COMMENT) are ABSENT from the org pin's welded
+#     plugin — they are INERT until the pin moves to the release that welds
+#     plugin-review v2026.265.0505 (opencharly/charly#626, merged). Forwarding
+#     them now is forward-compatible: the engine ignores unknown env, and the
+#     bump is the single lever that activates them.
 #   * The workflow's built-in fallback TAG (v2026.254.1902) is OLDER and lacks
-#     several of these knobs; they are ACTIVE only because the org pins
-#     v2026.263.0616. Bumping the pin is what carries a new engine; the pin is
-#     the single lever.
+#     several of these knobs; they are ACTIVE only through the org pin. Bumping
+#     the pin is what carries a new engine.
 #
 # No non-streaming / whole-generation RCA survives in this workflow (R5): the
 # superseded 2026-09-12 narrative is deleted, not retained as history.
@@ -255,7 +258,7 @@ jobs:
           # generation (the engine PR) removes the cause. A progressing generation
           # must never be cut off; only a SILENT one should fail — which is what
           # the idle bound is for.
-          # ACTIVE on the org pin v2026.263.0616 (its welded plugin-review has
+          # ACTIVE on the org pin v2026.263.2131 (its welded plugin-review has
           # `strings` hits for all three knobs — evidence in the body).
           # A DEFINED-EMPTY var is treated as UNSET by that engine: getenvAny
           # (candy/plugin-review/parse.go) returns "" for any env whose value is
@@ -289,7 +292,7 @@ jobs:
           AI_REVIEW_POST_COMMENT: ${{ vars.AI_REVIEW_POST_COMMENT || '' }}
           AI_REVIEW_TOOL_RESULT_MAX_BYTES: ${{ vars.AI_REVIEW_TOOL_RESULT_MAX_BYTES || '' }}
           # The GENERATION bounds (the measured root-cause fix, owned by the
-          # engine). ACTIVE on the org pin v2026.263.0616, whose welded
+          # engine). ACTIVE on the org pin v2026.263.2131, whose welded
           # plugin-review reads both (verified with `strings`). Empty means "use
           # the engine default": high thinking plus a max_tokens budget sized
           # above what thinking consumes — the combination measured to return a
@@ -513,7 +516,7 @@ jobs:
             echo "below threshold — not closing"
             exit 0
           fi
-          msg=$(printf '## Auto-closed: %s unanswered BLOCK verdicts\n\nThis PR has received **%s** validator `BLOCK` verdicts without the raised findings being fixed, so the gate is auto-closing it (threshold `AI_REVIEW_AUTO_CLOSE_AFTER=%s`).\n\n**Why:** re-running the validator against the same unfixed head only adds another BLOCK and grows this PR'\''s comment thread, which is what drives the reviewer into a runaway. The loop is bounded here instead.\n\n**What to do:** open a **NEW** pull request from a fresh branch with **every** finding from the BLOCK verdicts below already fixed, rather than continuing on this head. Each BLOCK comment lists the exact findings; read them all and fix them before opening the new PR.\n\nThis is a policy action, not a code finding — the validator verdict on this run stands.' "$THRESHOLD" "$blocks" "$THRESHOLD")
+          msg=$(printf '## Auto-closed: %s unanswered BLOCK verdicts\n\nThis PR has received **%s** validator `BLOCK` verdicts without the raised findings being fixed, so the gate is auto-closing it (threshold `AI_REVIEW_AUTO_CLOSE_AFTER=%s`).\n\n**Why:** re-running the validator against the same unfixed head only adds another BLOCK and grows this PR'\''s comment thread, which is what drives the reviewer into a runaway. The loop is bounded here instead.\n\n**What to do:** open a **NEW** pull request from a fresh branch with **every** finding from the BLOCK verdicts below already fixed, rather than continuing on this head. Each BLOCK comment lists the exact findings; read them all and fix them before opening the new PR.\n\nThis is a policy action, not a code finding — the validator verdict on this run stands.' "$blocks" "$blocks" "$THRESHOLD")
           gh pr comment "$PR_NUMBER" --repo "$REPO" --body "$msg" || echo "::warning::could not post the auto-close notice (non-fatal)"
           gh pr close "$PR_NUMBER" --repo "$REPO" || echo "::warning::could not close the PR (non-fatal)"
 

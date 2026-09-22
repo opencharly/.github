@@ -542,6 +542,25 @@ SCENARIOS = [
         "expect_review_outputs": {"provider_unanswered": "false", "review_rc": "0"},
     },
     {
+        # AUTO-CLOSE (over threshold): the notice MUST render the ACTUAL BLOCK count,
+        # not the threshold. `blocks=8` against the default threshold 5 fired the
+        # headline "Auto-closed: 5 unanswered BLOCK verdicts" while the body said
+        # "received **8**" — a false statement from the gate. The scenario asserts
+        # the real count appears (and the threshold-only count does not).
+        "name": "auto-close-over-threshold-count",
+        "fake": "block",
+        "block_count": 8,
+        "expect_exit": 1,
+        "expect_steps": ["review", "parse", "Auto-close after N BLOCKs", "Gate (BLOCK)", "evidence"],
+        "expect_verdict": "BLOCK",
+        "expect_comment": True,
+        "expect_comment_contains": ["Auto-closed: 8 unanswered BLOCK verdicts", "received **8**"],
+        "expect_comment_excludes": ["Auto-closed: 5 unanswered"],
+        "expect_auto_merge": False,
+        "expect_closed": True,
+        "expect_review_outputs": {"provider_unanswered": "false", "review_rc": "0"},
+    },
+    {
         # AUTO-CLOSE (below threshold): a PR under the threshold must NOT be
         # closed — the step runs but takes the "below threshold" branch.
         "name": "auto-close-below-threshold",
@@ -956,11 +975,13 @@ def run_harness():
          "(the engine, opencharly/plugin-review#10)")
     note("the generation knobs are INERT" not in text and "INERT until the engine release" not in text,
          "structural: header no longer claims the generation knobs are INERT — the "
-         "org pin v2026.263.0616 welds an engine that reads them, so claiming "
+         "org pin v2026.263.2131 welds an engine that reads them, so claiming "
          "inert would be a stale divergence")
-    note("ALL SIX knobs" in text and "v2026.263.0616" in text,
-         "structural: header's ACTIVE inventory names the pin and accounts for "
-         "every knob the workflow passes (verified with `strings`, not asserted)")
+    note("v2026.263.2131" in text and "plugin-review@v2026.263.1956" in text and
+         "INERT until the pin moves" in text,
+         "structural: header's inventory names the ACTUAL org pin and its welded "
+         "plugin-review, and marks the sampling/penalty knobs INERT until the pin "
+         "moves (verified with `strings`, not asserted)")
     note("the engine is not at fault" not in text.lower(),
          "structural: no emitted narrative exonerates the engine of the unbounded "
          "generation (header and emitted RCA agree)")
