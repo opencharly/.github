@@ -1,0 +1,73 @@
+# BOOTSTRAP THE INITIAL `main` ON EMPTY REPOS (org-wide).
+#
+# The ONE org ruleset (scripts/org-ruleset.sh) targets `refs/heads/main` and carries
+# the `creation` rule, so a brand-new repo cannot create its first `main` by ANY
+# operator path: `git push`, the contents API, repo auto_init, and branch rename are
+# all rejected ("Cannot create ref due to creations being restricted" / "repository
+# rules do not permit renaming branch ... to 'main'"). The ruleset's only bypass
+# actor is the `charly-auto-merge` App, so this workflow mints that App token and
+# creates `refs/heads/main` via the git-data refs API — the API with no
+# branch-must-exist precondition.
+#
+# WHY IT IS A WORKFLOW (not an operator script): creating a ref under the `creation`
+# rule needs a ruleset BYPASS actor. The `charly-auto-merge` App IS that actor; as in
+# retire-per-repo-dispatchers.yml, the operator-run scripts deliberately add NO human
+# bypass to the ruleset. The workflow mints the App token and exports it as GH_TOKEN.
+#
+# DEFAULT BRANCH: creating the ref is not enough — a repo whose default branch is
+# still the operator's first-pushed `feat/...` must have it set to `main`. The App
+# token CANNOT do that (`PATCH /repos/...` -> 403 "Resource not accessible by
+# integration"; measured), so after this workflow runs, set it with the operator's
+# admin token:
+#
+#   gh api --method PATCH repos/opencharly/<repo> -f default_branch=main
+#
+# (The ref itself is created by the App; only the repo SETTING needs admin.)
+#
+# REQUIRED APP PERMISSION: `contents: write` — the same ruleset bypass the App holds
+# for the protected-main CHANGELOG commits. No `workflows: write` is needed (this
+# creates a ref, it does not write a workflow file).
+#
+# SAFE + IDEMPOTENT: an existing `main` is skipped, never moved; a repo with no
+# non-main ref to seed from is skipped with a message. Re-running is a no-op.
+#
+# usage: dispatch with an optional space-separated `repos` input; empty = every org
+# repo that has no `main`.
+name: bootstrap-repo-main
+
+on:
+  workflow_dispatch:
+    inputs:
+      repos:
+        description: "Space-separated repo names to bootstrap (empty = all repos without a main)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create bot token (charly-auto-merge App)
+        id: app
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547
+        with:
+          app-id: ${{ secrets.CHARLY_AUTO_MERGE_APP_ID }}
+          private-key: ${{ secrets.CHARLY_AUTO_MERGE_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - uses: actions/checkout@v7
+
+      - name: Bootstrap the initial main (org-wide)
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.repos }}" ]; then
+            # shellcheck disable=SC2086
+            bash scripts/bootstrap-repo-main.sh ${{ inputs.repos }}
+          else
+            bash scripts/bootstrap-repo-main.sh
+          fi
