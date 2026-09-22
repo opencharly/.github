@@ -142,9 +142,22 @@ A bot-token push re-triggers `pull_request: synchronize` normally.
 Setup (already done org-wide):
 
 - GitHub App `charly-auto-merge` (id 4675576), installed on `opencharly`
-  with All-repositories access.
+  with All-repositories access. It is ALSO the ruleset bypass actor, so it
+  additionally needs the **`workflows: write`** permission (Repository
+  permissions → Workflows: Read and write) for the org cutover's dispatcher
+  deletions (`.github/workflows/*`), on top of `contents: write`.
 - Org secrets `CHARLY_AUTO_MERGE_APP_ID` + `CHARLY_AUTO_MERGE_PRIVATE_KEY`.
-  Fallback: `CHARLY_BOT_TOKEN` (fine-grained PAT, Contents: write).
+  Fallback: `CHARLY_BOT_TOKEN` (fine-grained PAT, Contents: write + Workflows: write).
 
 The rename step hard-fails when neither is configured, so a missing
 secret never silently degrades to the approval-required loop.
+
+## The org-wide required workflow (ONE config, no per-repo copy)
+
+Branch protection AND the required validator used to be applied per repo (a branch
+ruleset + a copied `.github/workflows/pr-validator.yml` dispatcher). On GitHub Team
+they are now ONE organization ruleset (`scripts/org-ruleset.sh`), which carries both
+the `workflows` rule (naming `org-wide-pr-validator-required.yml` here) and the
+branch rules (strict required `validate / validate`, no force-push/deletion/create).
+One-time cutover order: `gh workflow run retire-per-repo-dispatchers.yml`, then
+`scripts/org-ruleset.sh apply`, then `scripts/org-ruleset.sh verify`.
