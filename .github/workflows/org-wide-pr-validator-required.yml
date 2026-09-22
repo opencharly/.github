@@ -1,0 +1,41 @@
+# ORG-WIDE PR VALIDATOR — the REQUIRED WORKFLOW (org ruleset `workflows` rule).
+#
+# This is the single org-level entry point. It is NOT copied into any repo: an
+# organization ruleset (org Settings → Rulesets → branch ruleset, rule
+# "Require workflows to pass", targeting all repositories) points at THIS file
+# in `opencharly/.github`, and GitHub runs it on every pull request in every
+# targeted repo. One file, one owner, zero per-repo copies to drift.
+#
+# WHY THIS EXISTS (vs the per-repo dispatcher): GitHub's only native way to
+# require a workflow org-wide is the `workflows` ruleset rule, available on the
+# Team plan (the org was on free when the per-repo dispatcher pattern began).
+# The required workflow runs in the TARGET repo's context but its definition is
+# read from this repo at the pinned ref; it calls the same reusable validator
+# (`pr-validator.yml@main`) that the whole org already uses, so the gate logic
+# stays one source. The check it produces is `<job name> / validate`, which the
+# per-repo branch ruleset requires (scripts/branch-protection.sh $CONTEXT).
+name: charly/pr-validator
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+# ONE run per PR (a re-dispatch/push cancels the in-flight run). The required
+# workflow holds actions: write so cancel-in-progress works.
+concurrency:
+  group: pr-validator-${{ github.repository }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+jobs:
+  validate:
+    name: validate
+    if: github.event.pull_request.head.repo.fork == false
+    uses: opencharly/.github/.github/workflows/pr-validator.yml@main
+    with:
+      pr-number: ${{ github.event.pull_request.number }}
+    secrets: inherit
