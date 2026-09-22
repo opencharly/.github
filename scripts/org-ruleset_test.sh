@@ -16,7 +16,15 @@ printf 'present\n' >"$STATE/disp_alpha"
 : >"$STATE/transcript"
 
 gh() {
-  if [[ "$1 $2" == "repo list" ]]; then printf 'alpha\nbeta\n'; return; fi
+  if [[ "$1 $2" == "repo list" ]]; then
+    # A failure in either discovery call must abort (the excludes read is now guarded).
+    [[ "${FORCE_REPO_LIST_FAIL:-}" == 1 ]] && return 1
+    # Distinguish target discovery (`.defaultBranchRef.name == "main"`) from exclude
+    # discovery (the `!=` filter). Targets: alpha, beta. Excludes: none.
+    local jqfilter="${*: -1}"
+    [[ "$jqfilter" == *"!="* ]] && return 0
+    printf 'alpha\nbeta\n'; return
+  fi
   [[ "$1" == api ]] || return 90
   shift
   local method=GET include=0
@@ -109,6 +117,12 @@ fi
 printf 'present\n' >"$STATE/ruleset_beta"
 if OPENCHARLY_ORG=test "$root/scripts/org-ruleset.sh" verify >/dev/null 2>&1; then
   echo "FAIL: verify must fail when a per-repo ruleset reappears" >&2; exit 1
+fi
+
+# A repo-list discovery failure must ABORT (a failed excludes read must never yield
+# an empty exclude set, which would apply the ruleset to forks/archived repos too).
+if FORCE_REPO_LIST_FAIL=1 OPENCHARLY_ORG=test "$root/scripts/org-ruleset.sh" apply >/dev/null 2>&1; then
+  echo "FAIL: apply must abort when a repo-list discovery fails" >&2; exit 1
 fi
 
 echo "org-ruleset_test: all assertions passed (apply/verify/abort)"

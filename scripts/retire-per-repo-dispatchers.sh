@@ -23,31 +23,15 @@ set -euo pipefail
 #
 # usage: GH_TOKEN=<app|pat> $0
 
-readonly ORG="${OPENCHARLY_ORG:-opencharly}"
-readonly SOURCE_REPO=".github"
-readonly DISPATCHER_PATH=".github/workflows/pr-validator.yml"
-readonly SOURCE_DISPATCHER_PATH=".github/workflows/pr-validator-dispatcher.yml"
 readonly MAX_FAILURES="${RETIRE_MAX_FAILURES:-20}"
+
+# shellcheck source=lib-org.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib-org.sh"
 
 command -v gh >/dev/null
 [[ -n "${GH_TOKEN:-}" ]] || { echo "GH_TOKEN is required (the bypass-actor App/PAT)" >&2; exit 1; }
 
-dispatcher_path_for() {
-  [[ "$1" == "$SOURCE_REPO" ]] && echo "$SOURCE_DISPATCHER_PATH" || echo "$DISPATCHER_PATH"
-}
-
-api_status() {
-  local resp
-  resp="$(gh api --include "$1" 2>&1 || true)"
-  printf '%s\n' "$resp" | awk 'NR==1 { print $2; exit }'
-}
-
-mapfile -t repos < <(
-  gh repo list "$ORG" --limit 1000 \
-    --json name,isArchived,isFork,defaultBranchRef \
-    --jq '.[] | select(.isArchived == false and .isFork == false and .defaultBranchRef.name == "main") | .name' |
-    sort
-)
+mapfile -t repos < <(discover_repos)
 [[ ${#repos[@]} -gt 0 ]] || { echo "no active repositories discovered for $ORG" >&2; exit 1; }
 
 deleted=0 skipped=0 failed=0

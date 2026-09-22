@@ -40,18 +40,15 @@ set -euo pipefail
 #            enforce the per-repo `allow_auto_merge` setting. Idempotent.
 #   verify — read-only; assert the whole end state.
 
-readonly ORG="${OPENCHARLY_ORG:-opencharly}"
 readonly RULESET_NAME="org-wide required workflow & main protection"
 readonly REPO_RULESET_NAME="main branch protection"
-readonly SOURCE_REPO=".github"
 readonly REQUIRED_PATH=".github/workflows/org-wide-pr-validator-required.yml"
 readonly REQUIRED_REF="${REQUIRED_REF:-refs/heads/main}"
-readonly DISPATCHER_PATH=".github/workflows/pr-validator.yml"
-# The SOURCE repo's dispatcher lives at a DIFFERENT path: its `pr-validator.yml` is
-# the REUSABLE, so its own dispatcher stub is the `-dispatcher.yml` file.
-readonly SOURCE_DISPATCHER_PATH=".github/workflows/pr-validator-dispatcher.yml"
 readonly CONTEXT="validate / validate"
 readonly APP_SLUG="charly-auto-merge"
+
+# shellcheck source=lib-org.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib-org.sh"
 
 usage() { echo "usage: $0 {apply|verify}" >&2; exit 2; }
 [[ $# -eq 1 ]] || usage
@@ -76,23 +73,13 @@ APP_ID="$(app_id)"
 
 # TARGET repos: active, non-fork, default branch `main` — the exact set the old
 # per-repo ruleset owner applied to. Discovered, never hand-listed.
-mapfile -t repos < <(
-  gh repo list "$ORG" --limit 1000 \
-    --json name,isArchived,isFork,defaultBranchRef \
-    --jq '.[] | select(.isArchived == false and .isFork == false and .defaultBranchRef.name == "main") | .name' |
-    sort
-)
+mapfile -t repos < <(discover_repos)
 [[ ${#repos[@]} -gt 0 ]] || { echo "no active repositories discovered for $ORG" >&2; exit 1; }
 
 # EXCLUDE set for the org ruleset's `repository_name` condition: everything that is
 # NOT a target (archived, fork, or a non-`main` default branch). `~ALL` targets every
 # repo, so the non-targets must be named out explicitly to mirror the old scope.
-mapfile -t excludes < <(
-  gh repo list "$ORG" --limit 1000 \
-    --json name,isArchived,isFork,defaultBranchRef \
-    --jq '.[] | select((.isArchived == true) or (.isFork == true) or (.defaultBranchRef.name != "main")) | .name' |
-    sort
-)
+mapfile -t excludes < <(discover_excludes)
 exclude_json() {
   local out="[" first=1 n
   for n in "${excludes[@]}"; do
@@ -142,19 +129,6 @@ existing_id() {
 repo_ruleset_id() {
   gh api "repos/$ORG/$1/rulesets" \
     --jq ".[] | select(.name == \"$REPO_RULESET_NAME\") | .id"
-}
-
-dispatcher_path_for() {
-  # The SOURCE repo uses the `-dispatcher.yml` stub (its `pr-validator.yml` is the
-  # reusable). Every other repo uses the standard dispatcher path.
-  [[ "$1" == "$SOURCE_REPO" ]] && echo "$SOURCE_DISPATCHER_PATH" || echo "$DISPATCHER_PATH"
-}
-
-# api_status <path> — the HTTP status of a GET; 000 on a transport/other failure.
-api_status() {
-  local resp
-  resp="$(gh api --include "$1" 2>&1 || true)"
-  printf '%s\n' "$resp" | awk 'NR==1 { print $2; exit }'
 }
 
 # has_dispatcher <repo> — 0 if the per-repo dispatcher file exists, 1 if it is a real
