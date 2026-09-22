@@ -10,10 +10,17 @@ copy inherits the files here — so a change lands **once**, not in every repo.
   the exact evidence the fresh `pr-validator` validator needs: the change-class
   R10 gate + pasted output, whether the changed code path ran live (which caps
   the attribution tier), and a full R0–R10 + pillars "state HOW / N/A" checklist.
-- **`scripts/branch-protection.sh`** — the single organization-wide owner of the
-  required `charly/pr-validator` check. It discovers every active, non-fork
-  repository, replaces the required context in one batch, and verifies the
-  resulting protection without maintaining per-repository copies or lists.
+- **`scripts/org-ruleset.sh`** — the SINGLE organization-wide owner of BOTH the
+  required `validate / validate` check AND main-branch protection. On GitHub Team
+  it creates ONE org ruleset carrying the `workflows` rule (pointing at this repo's
+  required workflow) *and* the ordinary branch rules (required status check, no
+  force-push, no deletion, no creation), applied to every active non-fork
+  `main`-default repo. It also enforces the one setting that cannot move to the org
+  (`allow_auto_merge`, a per-repo setting with no org default). `apply` is the
+  one-shot, idempotent cutover: it enables the org ruleset, deletes the
+  now-redundant per-repo rulesets, retires the per-repo dispatcher files, and
+  enforces `allow_auto_merge`. `verify` asserts the whole end state. Its offline
+  mock-`gh` test is `scripts/org-ruleset_test.sh`.
 - **`.github/workflows/pr-validator.yml`** — the org-wide `charly/pr-validator` gate.
   A **reusable workflow** (`on: workflow_call`) that also self-gates this `.github`
   repo (`on: pull_request`). It runs a fresh, independent charly review (the plugin-review plugin, welded
@@ -26,50 +33,40 @@ copy inherits the files here — so a change lands **once**, not in every repo.
   **INCONCLUSIVE** + exit 3 — the required check stays RED, so a provider that
   never answered can neither pass unreviewed code nor be mistaken for a code
   finding — mixed verdict → exit 2).
+- **`.github/workflows/org-wide-pr-validator-required.yml`** — the org-level
+  REQUIRED WORKFLOW the org ruleset names. GitHub runs it on every PR in every
+  targeted repo (definition read once from this repo at the pinned ref); it calls
+  the reusable `pr-validator.yml@main` above, so the gate logic stays one source,
+  and it carries the per-PR `concurrency` dedupe + `actions: write` (the #163
+  constraint — see the file header). This file replacing the per-repo dispatcher
+  is why no repo carries validator config of its own.
 - **`.github/workflows/validator-harness.yml`** +
   **`.github/tests/validator-gate-harness.py`** — the gate's own R10 coverage.
   The harness (python3 stdlib only, offline, fakes for charly and gh) drives the
   REAL `run:` bodies of the decision chain above and asserts each exit code, the
   classification, the INCONCLUSIVE comment and whether auto-merge was armed; the
   workflow runs it on every `pull_request` and on `workflow_dispatch`, so a
-  non-zero harness exit reddens the check. Coverage that never runs enforces
-  nothing.
-- **`org-wide-pr-validator-dispatcher.yml`** — the one-file installer any org repo
-  drops in as `.github/workflows/pr-validator.yml` to inherit the same gate via
-  `uses: opencharly/.github/.github/workflows/pr-validator.yml@main` (see below).
+  non-zero harness exit reddens the check. The workflow also runs
+  `scripts/org-ruleset_test.sh` (the owner script's offline mock-`gh` test) so
+  the org-ruleset cutover logic is exercised on every `.github` PR. Coverage that
+  never runs enforces nothing.
 
 Future org-wide defaults (issue templates, `CONTRIBUTING.md`, `SECURITY.md`) belong
 here too — one source, inherited everywhere.
 
 ## How the gate is installed in an org repo
 
-The gate is a **single source** in this repo; sibling repos never copy the
-validator logic. A repo opts in by installing the one-file dispatcher:
-`.github/workflows/pr-validator.yml` containing
+**It is not.** The gate is a **single source** in this repo — the ONE org ruleset
+(`scripts/org-ruleset.sh`) names the required workflow and requires the
+`validate / validate` check for every repo, so no repo installs anything. The old
+per-repo `.github/workflows/pr-validator.yml` dispatcher stub existed only because
+org required-workflows need GitHub Team (the org was on the free plan when that
+pattern began); the org ruleset now replaces it, and `apply` retires the stub in
+every repo. To re-derive the org-wide state:
 
-```yaml
-name: charly/pr-validator
-on:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-permissions:
-  contents: read
-  pull-requests: write
-  issues: write
-jobs:
-  pr-validator:
-    name: charly/pr-validator
-    if: github.event.pull_request.head.repo.fork == false
-    uses: opencharly/.github/.github/workflows/pr-validator.yml@main
-    secrets: inherit
+```console
+$ scripts/org-ruleset.sh verify   # asserts the whole end state
 ```
-
-(`org-wide-pr-validator-dispatcher.yml` is the exact template.) The repo's
-branch protection then requires the `charly/pr-validator` check context. The
-workflow's job is named `charly/pr-validator`, so the check run satisfies it —
-the workflow is the canonical single writer of that context, and branch
-protection enforces it. Companion repos (`plugins`, `charly`) install the
-dispatcher in their cut-over PRs.
 
 ## Required org-level configuration
 

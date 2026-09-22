@@ -26,3 +26,5 @@ jobs:
       - uses: actions/checkout@v7
       - name: Run the validator-gate harness (offline, python3 stdlib)
         run: python3 .github/tests/validator-gate-harness.py
+      - name: Run the org-ruleset owner-script test (offline, mock gh)
+        run: bash scripts/org-ruleset_test.sh
