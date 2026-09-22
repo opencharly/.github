@@ -176,15 +176,24 @@ case "$mode" in
       || { echo "required workflow missing on $REQUIRED_REF in $SOURCE_REPO — merge it first" >&2; exit 1; }
 
     # apply order (idempotent; safe to re-run):
-    #   1. create/update the org ruleset — protection is enabled FIRST so main is
-    #      never unprotected; the required workflow becomes a producer of the check.
-    #   2. delete the per-repo rulesets (now redundant — the org ruleset carries the
+    #   1. refuse while any repo still carries a dispatcher — enabling the org
+    #      required workflow with a surviving dispatcher yields TWO producers of
+    #      `validate / validate`, which keeps mergeability BLOCKED despite PASS (the
+    #      measured #38 hazard). The dispatchers are retired first by
+    #      retire-per-repo-dispatchers.yml, so step 2 is the sole producer.
+    #   2. create/update the org ruleset — protection is enabled so main is never
+    #      unprotected; the required workflow is now the only producer of the check.
+    #   3. delete the per-repo rulesets (now redundant — the org ruleset carries the
     #      same required check + branch rules).
-    #   3. enforce the per-repo `allow_auto_merge` setting.
-    # The per-repo dispatcher FILES are retired separately, BEFORE step 1, by
-    # retire-per-repo-dispatchers.yml (they need an app-token commit on protected
-    # `main`). Retiring them first means step 1 is the sole producer from the start —
-    # no window with two producers of `validate / validate` (the #38 duplicate hazard).
+    #   4. enforce the per-repo `allow_auto_merge` setting.
+    stragglers=0
+    for repo in "${repos[@]}"; do
+      has_dispatcher "$repo" && { echo "REFUSING: $repo still carries a dispatcher" >&2; stragglers=$((stragglers+1)); }
+    done
+    if [[ "$stragglers" != 0 ]]; then
+      echo "retire them first: gh workflow run retire-per-repo-dispatchers.yml" >&2
+      exit 1
+    fi
     id="$(existing_id)"
     if [[ -n "$id" ]]; then
       gh api --method PUT "orgs/$ORG/rulesets/$id" --input <(ruleset_payload) --jq .id >/dev/null
@@ -223,8 +232,14 @@ case "$mode" in
       echo "$state" | jq -e --arg ctx "$CONTEXT" \
         '[.rules[]|select(.type=="required_status_checks")|.parameters.required_status_checks[].context] | index($ctx) != null' >/dev/null \
         || { echo "org ruleset does not require the '$CONTEXT' check" >&2; fail=1; }
+      echo "$state" | jq -e '[.rules[]|select(.type=="required_status_checks")|.parameters.required_status_checks] | first | length == 1' >/dev/null \
+        || { echo "org ruleset must require EXACTLY ONE check" >&2; fail=1; }
+      echo "$state" | jq -e '[.rules[]|select(.type=="required_status_checks")|.parameters.strict_required_status_checks_policy] | first == true' >/dev/null \
+        || { echo "org ruleset must be strict (head up-to-date before merge)" >&2; fail=1; }
       echo "$state" | jq -e '[.rules[].type] | index("non_fast_forward") != null and index("deletion") != null and index("creation") != null' >/dev/null \
         || { echo "org ruleset is missing a branch-protection rule" >&2; fail=1; }
+      echo "$state" | jq -e '[.rules[].type] | index("pull_request") == null' >/dev/null \
+        || { echo "org ruleset must NOT require pull-request reviews (the validator is the gate)" >&2; fail=1; }
       echo "$state" | jq -e --argjson app "$APP_ID" \
         '[.bypass_actors[]|select(.actor_id==$app)] | length > 0' >/dev/null \
         || { echo "org ruleset is missing the $APP_SLUG app bypass" >&2; fail=1; }

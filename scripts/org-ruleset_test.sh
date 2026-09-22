@@ -52,7 +52,7 @@ gh() {
     [[ "$method" == DELETE ]] && { rm -f "$STATE/org_ruleset_id"; return; }
     [[ "$method" == PUT ]] && { printf '55\n'; return; }
     cat <<JSON
-{"id":55,"enforcement":"active","rules":[{"type":"workflows","parameters":{"workflows":[{"path":".github/workflows/org-wide-pr-validator-required.yml"}]}},{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"validate / validate"}]}},{"type":"non_fast_forward"},{"type":"deletion"},{"type":"creation"}],"bypass_actors":[{"actor_id":123,"actor_type":"Integration"}]}
+{"id":55,"enforcement":"active","rules":[{"type":"workflows","parameters":{"workflows":[{"path":".github/workflows/org-wide-pr-validator-required.yml"}]}},{"type":"required_status_checks","parameters":{"strict_required_status_checks_policy":true,"required_status_checks":[{"context":"validate / validate"}]}},{"type":"non_fast_forward"},{"type":"deletion"},{"type":"creation"}],"bypass_actors":[{"actor_id":123,"actor_type":"Integration"}]}
 JSON
     return
   fi
@@ -83,22 +83,20 @@ JSON
 export -f gh
 export STATE
 
-# apply: creates the org ruleset, deletes alpha's legacy ruleset, and flips beta's
-# allow_auto_merge on. It does NOT retire dispatchers (that needs the app-token
-# workflow) — verify therefore fails while alpha's dispatcher remains.
+# apply REFUSES while alpha's dispatcher survives (it would be a duplicate producer).
+if OPENCHARLY_ORG=test "$root/scripts/org-ruleset.sh" apply >/dev/null 2>&1; then
+  echo "FAIL: apply must refuse while a per-repo dispatcher survives" >&2; exit 1
+fi
+
+# Simulate retire-per-repo-dispatchers.yml deleting the stub, then apply succeeds.
+rm -f "$STATE/disp_alpha"
 OPENCHARLY_ORG=test "$root/scripts/org-ruleset.sh" apply >/dev/null
 grep -q 'deleted alpha ruleset' "$STATE/transcript" || { echo "FAIL: alpha ruleset not deleted" >&2; exit 1; }
 grep -q 'PATCH beta auto'       "$STATE/transcript" || { echo "FAIL: beta auto-merge not enabled" >&2; exit 1; }
 [[ "$(cat "$STATE/auto_beta")" == true ]] || { echo "FAIL: beta auto-merge state not true" >&2; exit 1; }
 grep -q 'PATCH alpha' "$STATE/transcript" && { echo "FAIL: alpha auto-merge must not be re-patched" >&2; exit 1; }
 
-# verify must fail while a dispatcher survives (it would be a duplicate producer).
-if OPENCHARLY_ORG=test "$root/scripts/org-ruleset.sh" verify >/dev/null 2>&1; then
-  echo "FAIL: verify must fail while a per-repo dispatcher survives" >&2; exit 1
-fi
-
-# Simulate retire-per-repo-dispatchers.yml deleting the stub, then verify passes.
-rm -f "$STATE/disp_alpha"
+# verify passes on the fully-migrated state.
 OPENCHARLY_ORG=test "$root/scripts/org-ruleset.sh" verify >/dev/null
 
 # A real API failure on the dispatcher probe must ABORT verify (never read as

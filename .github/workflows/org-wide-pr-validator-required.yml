@@ -51,4 +51,11 @@ jobs:
     uses: opencharly/.github/.github/workflows/pr-validator.yml@main
     with:
       pr-number: ${{ github.event.pull_request.number }}
+      # Exact parity with the retired per-repo dispatcher: forward the provider
+      # selection. `vars` resolves in the TARGET repo's context (org-level variables
+      # with visibility `all` are in scope), so a repo can still override per-repo.
+      # The reusable itself falls back to `vars.AI_REVIEW_*` when these are empty.
+      ai_review_provider: ${{ vars.AI_REVIEW_PROVIDER }}
+      ai_review_model: ${{ vars.AI_REVIEW_MODEL }}
+      ai_review_base_url: ${{ vars.AI_REVIEW_BASE_URL }}
     secrets: inherit
