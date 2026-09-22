@@ -31,19 +31,19 @@ gh() {
   fi
   [[ "$1" == api ]] || return 90
   shift
-  local method=GET include=0
-  while [[ "${1:-}" == --* ]]; do
+  local method=GET include=0 input="" path=""
+  while [[ $# -gt 0 ]]; do
     case "$1" in
       --method) method="$2"; shift 2 ;;
       --include) include=1; shift ;;
+      --input) input="$2"; shift 2 ;;
       --jq) shift 2 ;;
-      --input) shift ;;
-      *) shift ;;
+      --) shift ;;
+      --*) shift ;;
+      *) [[ -z "$path" ]] && path="$1"; shift ;;
     esac
   done
-  [[ -n "${1:-}" ]] || return 90
-  local path="$1"; shift
-  local query=""; [[ "${1:-}" == *\?* ]] && query="$1"
+  [[ -n "$path" ]] || return 90
 
   emit() { # emit <status> <body>
     [[ $include == 1 ]] && printf 'HTTP/2.0 %s X\r\n\r\n' "$1"
@@ -57,7 +57,12 @@ gh() {
     printf 'wfsha\n'; return
   fi
   if [[ "$path" == "orgs/test/rulesets" ]]; then
-    if [[ "$method" == POST ]]; then printf '55\n' >"$STATE/org_ruleset_id"; printf '55\n'; return; fi
+    if [[ "$method" == POST ]]; then
+      # Capture the payload so the test can assert the exclude set renders as []
+      # (not [""]) when there are no forks/archived repos.
+      [[ -n "$input" ]] && cat "$input" >"$STATE/payload.json"
+      printf '55\n' >"$STATE/org_ruleset_id"; printf '55\n'; return
+    fi
     cat "$STATE/org_ruleset_id" 2>/dev/null || true; return
   fi
   if [[ "$path" == "orgs/test/rulesets/"* ]]; then
@@ -116,6 +121,11 @@ grep -q 'deleted alpha legacy'  "$STATE/transcript" || { echo "FAIL: alpha legac
 grep -q 'PATCH beta auto'       "$STATE/transcript" || { echo "FAIL: beta auto-merge not enabled" >&2; exit 1; }
 [[ "$(cat "$STATE/auto_beta")" == true ]] || { echo "FAIL: beta auto-merge state not true" >&2; exit 1; }
 grep -q 'PATCH alpha' "$STATE/transcript" && { echo "FAIL: alpha auto-merge must not be re-patched" >&2; exit 1; }
+
+# The posted payload must render an EMPTY exclude set as `[]`, not `[""]` (the
+# mapfile-on-empty bug), and must still target `~ALL`.
+grep -q '"exclude": \[\]' "$STATE/payload.json" || { echo "FAIL: empty exclude set must render as [] (got: $(grep -o '"exclude": \[[^]]*\]' "$STATE/payload.json"))" >&2; exit 1; }
+grep -q '"include": \["~ALL"\]' "$STATE/payload.json" || { echo "FAIL: ruleset must include ~ALL" >&2; exit 1; }
 
 # verify passes on the fully-migrated state.
 OPENCHARLY_ORG=test "$root/scripts/org-ruleset.sh" verify >/dev/null

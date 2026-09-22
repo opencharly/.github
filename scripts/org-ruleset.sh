@@ -76,8 +76,8 @@ APP_ID="$(app_id)"
 # status is checked at the CALL SITE (a `mapfile ... < <(fn)` guard would be dead —
 # see lib-org.sh).
 repos_out="$(discover_repos)" || { echo "FATAL: gh repo list (targets) failed" >&2; exit 1; }
+[[ -n "$repos_out" ]] || { echo "no active repositories discovered for $ORG" >&2; exit 1; }
 mapfile -t repos <<<"$repos_out"
-[[ ${#repos[@]} -gt 0 ]] || { echo "no active repositories discovered for $ORG" >&2; exit 1; }
 
 # EXCLUDE set for the org ruleset's `repository_name` condition: everything that is
 # NOT a target (archived, fork, or a non-`main` default branch). `~ALL` targets every
@@ -86,7 +86,11 @@ mapfile -t repos <<<"$repos_out"
 # fatal — otherwise `exclude` would be `[]` and the ruleset would target forks and
 # archived repos too.
 excludes_out="$(discover_excludes)" || { echo "FATAL: gh repo list (excludes) failed" >&2; exit 1; }
-mapfile -t excludes <<<"$excludes_out"
+# An empty exclude set is LEGITIMATE (no forks/archived repos), so it must produce an
+# EMPTY array — not `mapfile <<<"$empty"`, which yields one empty element and would
+# emit `[""]` (targeting a repo named "") instead of `[]`.
+excludes=()
+if [[ -n "$excludes_out" ]]; then mapfile -t excludes <<<"$excludes_out"; fi
 exclude_json() {
   local out="[" first=1 n
   for n in "${excludes[@]}"; do
