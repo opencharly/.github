@@ -84,8 +84,10 @@ $ scripts/org-ruleset.sh verify                     # assert the whole end state
 The org ruleset carries the `creation` rule on `refs/heads/main`, so a **brand-new
 repo cannot create its first `main` by any operator path** — `git push`, the
 contents API, repo `auto_init`, and branch rename are all rejected (measured:
-`GH013 Cannot create ref due to creations being restricted`; the contents API
-`409`; rename `422 repository rules do not permit renaming branch ... to 'main'`).
+`GH013 Cannot create ref due to creations being restricted` on a push; the contents
+API returns `409 Cannot create ref due to creations being restricted` on a repo with
+no refs and `404 Branch main not found` on a repo with other refs but no `main`;
+rename `422 repository rules do not permit renaming branch ... to 'main'`).
 The ruleset's only bypass actor is the `charly-auto-merge` App — and without a
 `main` the required workflow cannot run, so the required check can never be
 produced (a deadlock).

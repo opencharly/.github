@@ -62,12 +62,18 @@ jobs:
 
       - name: Bootstrap the initial main (org-wide)
         env:
+          # Pass the dispatch input through the ENVIRONMENT, never interpolated into
+          # the `run:` body: `${{ }}` inside `run:` is unsanitized, so a crafted input
+          # (`x; <cmd>`) would execute shell in a step whose env holds the org-wide
+          # `charly-auto-merge` App token (the ruleset bypass credential). Expanding a
+          # quoted env var is the safe form.
+          REPOS: ${{ inputs.repos }}
           GH_TOKEN: ${{ steps.app.outputs.token }}
         run: |
           set -euo pipefail
-          if [ -n "${{ inputs.repos }}" ]; then
-            # shellcheck disable=SC2086
-            bash scripts/bootstrap-repo-main.sh ${{ inputs.repos }}
+          if [ -n "$REPOS" ]; then
+            read -ra targets <<<"$REPOS"
+            bash scripts/bootstrap-repo-main.sh "${targets[@]}"
           else
             bash scripts/bootstrap-repo-main.sh
           fi

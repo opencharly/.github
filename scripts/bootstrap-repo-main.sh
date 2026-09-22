@@ -11,13 +11,22 @@ set -euo pipefail
 #
 #   * `git push origin main`            -> GH013 "Cannot create ref due to
 #                                          creations being restricted"
-#   * `PUT /repos/.../contents/...`     -> 409 "Cannot create ref due to
-#                                          creations being restricted"
 #   * repo auto_init at create time     -> the repo's own initial commit is ALSO
 #                                          blocked; the repo stays empty (the
 #                                          default-branch NAME is set, no ref exists)
 #   * `POST branches/{b}/rename` to main -> 422 "repository rules do not permit
 #                                          renaming branch ... to 'main'"
+#   * `PUT /repos/.../contents/...`      -> TWO measured outcomes, by repo state:
+#         - repo with NO refs at all     -> 409 "Cannot create ref due to
+#                                          creations being restricted" (the creation
+#                                          rule blocks the first ref; measured on an
+#                                          empty repo, with and without `branch=main`)
+#         - repo WITH other refs but no
+#           `main`, `branch=main` given  -> 404 "Branch main not found" (the contents
+#                                          API looks the branch up before the creation
+#                                          rule; measured on a repo with one
+#                                          `feat/...` ref)
+#       Either way the first `main` cannot be created through the contents API.
 #
 # The ruleset's ONLY bypass actor is the `charly-auto-merge` App. A repo with no
 # `main` is also a repo on which the required workflow can never run (the workflow
@@ -26,14 +35,15 @@ set -euo pipefail
 # exactly as it is the one actor that can commit the CHANGELOG on a protected
 # `main` (the retire-per-repo-dispatchers.sh precedent).
 #
-# WHY THE GIT-DATA API, NOT THE CONTENTS API. `PUT /contents/...` requires the
-# target branch to ALREADY EXIST ("Branch main not found", 404 — measured), so it
-# cannot create the FIRST ref. `POST /git/refs` creates a ref from an existing
-# commit SHA with no such precondition — the App token creates `refs/heads/main`
-# pointing at the repo's current default-branch HEAD (the operator's already-pushed
-# `feat/...` branch). The operator then sets the repo's default branch to `main`
-# (a repo-settings PATCH, which needs the operator's admin token — the App token
-# gets 403 "Resource not accessible by integration" there; measured).
+# WHY THE GIT-DATA API, NOT THE CONTENTS API. The contents API cannot create the
+# FIRST `main` at all (measured: 409 on a repo with no refs, 404 on a repo with
+# other refs but no `main`) — so it cannot create the first ref. `POST /git/refs`
+# creates a ref from an existing commit SHA with no such precondition — the App
+# token creates `refs/heads/main` pointing at the repo's current default-branch HEAD
+# (the operator's already-pushed `feat/...` branch). The operator then sets the
+# repo's default branch to `main` (a repo-settings PATCH, which needs the operator's
+# admin token — the App token gets 403 "Resource not accessible by integration"
+# there; measured).
 #
 # NON-DESTRUCTIVE: an existing `main` is left UNTOUCHED (skipped), so a re-run is
 # a no-op and this can never move a protected branch. A repo with NO non-main ref
