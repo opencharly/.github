@@ -4,11 +4,18 @@
 # (squash). GitHub branch protection waits for all required checks
 # (including repo-specific CI gates like verify/go) before merging.
 #
-# Runs the plugin-review charly plugin (the action-review cutover, replacing
-# opencharly/pi-review-action): read-only GitHub tools, deterministic
-# Verdict: PASS|BLOCK, ONE PR comment, $GITHUB_OUTPUT outputs. WHICH plugins/
-# steps run is declared in opencharly/action-review@main:prompt/validator.md +
-# review-plan.yml (charly review --plan); this workflow never changes for that.
+# Runs the plugin-review charly plugin to review this PR and gate it with a
+# deterministic Verdict: PASS|BLOCK, ONE review comment, $GITHUB_OUTPUT outputs.
+# (A policy auto-close step posts a SECOND, distinct notice when a PR exceeds the
+# BLOCK threshold; that notice is not a review comment.)
+# The engine invoked is whatever the pinned charly release (vars.CHARLY_VERSION)
+# welds. This workflow passes no plan path: the plain `charly review --out ...`
+# form is accepted by BOTH the pre-rewrite engine and the embedded-prompt engine,
+# so the invocation is weld-independent. REVIEW_PROMPT_PATH is still passed
+# because the charly release in the org pin reads its rulebook from that file;
+# the embedded-prompt engine (welded by opencharly/charly#626, merged) ignores it,
+# so once the org CHARLY_VERSION pin moves to that release the env is vestigial
+# and is dropped in the same change that bumps the pin.
 #
 # VERDICT TAXONOMY — these classes are NEVER conflated (a provider that did not
 # answer is not a code finding, and it is not a pass either):
@@ -55,23 +62,25 @@
 #     applies unless an org deliberately overrides it. The engine owns the
 #     bound; this workflow no longer hardcodes one.
 #
-# ACTIVE (verified against the pinned bundle with `strings`, never asserted —
-# the evidence is in this PR's body):
-#   * ALL SIX knobs this workflow passes are ACTIVE on the org pin
-#     `vars.CHARLY_VERSION = v2026.263.0616`, whose welded engine is
-#     `plugin-review@v2026.263.0549` (the opencharly/plugin-review#10 merge):
+# ACTIVE (verified against the pinned bundle with `strings`, never asserted):
+#   * The org pin `vars.CHARLY_VERSION = v2026.263.2131` welds
+#     `plugin-review@v2026.263.1956`. In that bundled plugin, `strings` finds the
+#     generation/idle/context knobs this workflow passes —
 #     AI_REVIEW_STREAM_IDLE_TIMEOUT, AI_REVIEW_TOOL_RESULT_MAX_BYTES,
 #     AI_REVIEW_ATTEMPT_TIMEOUT, AI_REVIEW_MAX_ATTEMPTS,
-#     AI_REVIEW_REASONING_EFFORT and AI_REVIEW_MAX_TOKENS each have a `strings`
-#     hit in the bundled plugin-review. So passing the generation bounds
-#     through is now effective, not inert: dropping the hardcoded 300s cap takes
-#     effect immediately, and the engine's own bounded default (high thinking
-#     plus a max_tokens budget sized above what thinking consumes) is what keeps
-#     a review fast.
+#     AI_REVIEW_REASONING_EFFORT, AI_REVIEW_MAX_TOKENS, AI_REVIEW_CONTEXT_TOKENS,
+#     AI_REVIEW_CONTEXT_MARGIN, AI_REVIEW_SESSION_ID and AI_REVIEW_TEMPERATURE —
+#     so passing them through is effective, not inert.
+#   * The sampling/penalty/stop/prompt knobs this workflow ALSO forwards
+#     (AI_REVIEW_TOP_P, _FREQUENCY_PENALTY, _PRESENCE_PENALTY,
+#     _STOP, _PROMPT_EXTRA, _POST_COMMENT) are ABSENT from the org pin's welded
+#     plugin — they are INERT until the pin moves to the release that welds
+#     plugin-review v2026.265.0505 (opencharly/charly#626, merged). Forwarding
+#     them now is forward-compatible: the engine ignores unknown env, and the
+#     bump is the single lever that activates them.
 #   * The workflow's built-in fallback TAG (v2026.254.1902) is OLDER and lacks
-#     several of these knobs; they are ACTIVE only because the org pins
-#     v2026.263.0616. Bumping the pin is what carries a new engine; the pin is
-#     the single lever.
+#     several of these knobs; they are ACTIVE only through the org pin. Bumping
+#     the pin is what carries a new engine.
 #
 # No non-streaming / whole-generation RCA survives in this workflow (R5): the
 # superseded 2026-09-12 narrative is deleted, not retained as history.
@@ -227,7 +236,7 @@ jobs:
           # must not take the whole org gate down.
           CHARLY_PLUGIN_DIR="$D/plugins" "$D/bin/charly" review --self-test || echo "::warning::bootstrap self-test crashed — continuing (the review step re-validates)"
 
-      - name: Run review plan (steps + runtime plugins declared in action-review review-plan.yml)
+      - name: Run the review engine (assemble context, verdict)
         id: review
         env:
           PR_NUMBER: ${{ inputs.pr-number }}
@@ -248,7 +257,7 @@ jobs:
           # generation (the engine PR) removes the cause. A progressing generation
           # must never be cut off; only a SILENT one should fail — which is what
           # the idle bound is for.
-          # ACTIVE on the org pin v2026.263.0616 (its welded plugin-review has
+          # ACTIVE on the org pin v2026.263.2131 (its welded plugin-review has
           # `strings` hits for all three knobs — evidence in the body).
           # A DEFINED-EMPTY var is treated as UNSET by that engine: getenvAny
           # (candy/plugin-review/parse.go) returns "" for any env whose value is
@@ -266,9 +275,23 @@ jobs:
           # the last-resort backstop, not a per-turn ceiling.
           AI_REVIEW_STREAM_IDLE_TIMEOUT: ${{ vars.AI_REVIEW_STREAM_IDLE_TIMEOUT || '' }}
           AI_REVIEW_ATTEMPT_TIMEOUT: ${{ vars.AI_REVIEW_ATTEMPT_TIMEOUT || '' }}
+          # SAMPLING (vendor-recommended for deepseek-v4.1-flash: temp=1.0,
+          # top_p=0.95). Forwarded so an operator can TUNE it from an org variable
+          # without a rebuild; empty means "the engine's own default". The
+          # frequency/presence penalties are the engine's measured guard against
+          # degenerate repetition; context tokens/margin size the fail-closed guard.
+          AI_REVIEW_TEMPERATURE: ${{ vars.AI_REVIEW_TEMPERATURE || '' }}
+          AI_REVIEW_TOP_P: ${{ vars.AI_REVIEW_TOP_P || '' }}
+          AI_REVIEW_FREQUENCY_PENALTY: ${{ vars.AI_REVIEW_FREQUENCY_PENALTY || '' }}
+          AI_REVIEW_PRESENCE_PENALTY: ${{ vars.AI_REVIEW_PRESENCE_PENALTY || '' }}
+          AI_REVIEW_STOP: ${{ vars.AI_REVIEW_STOP || '' }}
+          AI_REVIEW_CONTEXT_TOKENS: ${{ vars.AI_REVIEW_CONTEXT_TOKENS || '' }}
+          AI_REVIEW_CONTEXT_MARGIN: ${{ vars.AI_REVIEW_CONTEXT_MARGIN || '' }}
+          AI_REVIEW_PROMPT_EXTRA: ${{ vars.AI_REVIEW_PROMPT_EXTRA || '' }}
+          AI_REVIEW_POST_COMMENT: ${{ vars.AI_REVIEW_POST_COMMENT || '' }}
           AI_REVIEW_TOOL_RESULT_MAX_BYTES: ${{ vars.AI_REVIEW_TOOL_RESULT_MAX_BYTES || '' }}
           # The GENERATION bounds (the measured root-cause fix, owned by the
-          # engine). ACTIVE on the org pin v2026.263.0616, whose welded
+          # engine). ACTIVE on the org pin v2026.263.2131, whose welded
           # plugin-review reads both (verified with `strings`). Empty means "use
           # the engine default": high thinking plus a max_tokens budget sized
           # above what thinking consumes — the combination measured to return a
@@ -284,29 +307,35 @@ jobs:
           # long run is three aggregate lines with no per-turn attribution.
           AI_REVIEW_DEBUG: ${{ vars.AI_REVIEW_DEBUG || '' }}
           AI_REVIEW_DEBUG_REASONING: ${{ vars.AI_REVIEW_DEBUG_REASONING || '' }}
+          # Session affinity (the pinned engine's x-opencode-session header).
+          AI_REVIEW_SESSION_ID: ${{ vars.AI_REVIEW_SESSION_ID || '' }}
+          # NOTE: AI_REVIEW_OUT is deliberately NOT forwarded — the review step
+          # passes `--out /tmp/review.txt` explicitly, which the engine honours.
           # Zero retries: a failed first attempt is terminal — no repeat cycle.
           # Default 1 org-wide; any repo may opt back to retries via its own var.
           AI_REVIEW_MAX_ATTEMPTS: ${{ vars.AI_REVIEW_MAX_ATTEMPTS || '1' }}
           AI_REVIEW_API_KEY:   ${{ secrets.AI_REVIEW_API_KEY }}
+          # The charly release in the org pin reads its rulebook from
+          # REVIEW_PROMPT_PATH; the embedded-rulebook engine (welded by
+          # opencharly/charly#626, merged) ignores it. Both accept the plain
+          # `charly review --out ...` form, so this env is the only transitional
+          # surface; it is removed when the org CHARLY_VERSION pin moves to the
+          # embedded-rulebook release.
           REVIEW_PROMPT_PATH:  ${{ github.workspace }}/runner-config/prompt/validator.md
-          REVIEW_PLAN_PATH:    ${{ github.workspace }}/runner-config/review-plan.yml
           GITHUB_TOKEN:        ${{ github.token }}
         run: |
           cd "$GITHUB_WORKSPACE/runner-config"
 
-          # /tmp/review.txt is written ONLY by a fully successful plan
-          # (plugin-review plan.go writes OutPath on the success path, after every
-          # verdict:required step produced a verdict) — so clear it first: a stale
-          # file must never be parsed as THIS run's verdict.
+          # /tmp/review.txt is written ONLY by a fully successful review (the
+          # engine writes OutPath on the success path, after a verdict) — so clear
+          # it first: a stale file must never be parsed as THIS run's verdict.
           rm -f /tmp/review.txt /tmp/review.log
 
           # bash -e must NOT abort here: a verdict-less run is a CLASS to report,
-          # not a crash. Capture the exit code instead (plugin-review exits 1 on
-          # the provider-unanswered class, 2 on "verdict: required but no Verdict
-          # line produced"). NO RETRY: see the RCA header — a retry re-runs the
-          # same doomed generation (R4).
+          # not a crash. Capture the exit code instead. NO RETRY: a retry re-runs
+          # the same doomed generation (R4).
           rc=0
-          charly review --plan "$REVIEW_PLAN_PATH" --out /tmp/review.txt > /tmp/review.log 2>&1 || rc=$?
+          charly review --out /tmp/review.txt > /tmp/review.log 2>&1 || rc=$?
           echo "review rc=$rc"
           cat /tmp/review.log
 
@@ -445,11 +474,57 @@ jobs:
           fi
           echo "verdict=$distinct" >> "$GITHUB_OUTPUT"
 
+      # AUTO-CLOSE after N BLOCK verdicts (workflow policy, AI_REVIEW_AUTO_CLOSE_AFTER,
+      # default 5). A PR that keeps collecting BLOCKs — because the author re-pushes
+      # without fixing the raised findings — inflates the reviewer's context with its
+      # own comment thread and risks a runaway review. Counting BLOCKs and closing at
+      # the threshold, with a message telling the author to open a NEW fully-fixed PR,
+      # bounds that loop. Runs BEFORE the BLOCK gate so the close + message land, then
+      # the gate still fails the check (the close is a policy action, not a verdict).
+      # 0 disables it. The count is the PR's own review comments, so it survives
+      # across runs with no external state.
+      - name: Auto-close after N BLOCKs
+        if: steps.parse.outputs.verdict == 'BLOCK'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr-number }}
+          REPO: ${{ github.repository }}
+          THRESHOLD: ${{ vars.AI_REVIEW_AUTO_CLOSE_AFTER || '5' }}
+        run: |
+          case "$THRESHOLD" in
+            ''|*[!0-9]*) echo "::warning::AI_REVIEW_AUTO_CLOSE_AFTER=$THRESHOLD is not a number — disabling auto-close"; exit 0;;
+          esac
+          if [ "$THRESHOLD" -le 0 ]; then
+            echo "auto-close disabled (threshold=$THRESHOLD)"
+            exit 0
+          fi
+          # Count the validator's OWN BLOCK verdict comments (the exact
+          # "## Review — BLOCK" header every review comment carries). The count
+          # MUST be page-correct: `gh api --paginate ... --jq` applies the filter
+          # PER PAGE (so a >30-comment thread yields several numbers), which the
+          # guard below would reject and silently disable auto-close on exactly
+          # the long threads this feature exists to bound. `--paginate | jq -s`
+          # collects the pages into ONE array first.
+          blocks=$(gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments?per_page=100" 2>/dev/null \
+            | jq -s '[.[][] | select(.user.login=="github-actions[bot]") | select(.body | contains("## Review — BLOCK"))] | length' 2>/dev/null || true)
+          case "$blocks" in
+            ''|*[!0-9]*) echo "::warning::could not count BLOCK comments (got '$blocks') — not auto-closing"; exit 0;;
+          esac
+          echo "BLOCK verdicts on this PR: $blocks (threshold $THRESHOLD)"
+          if [ "$blocks" -lt "$THRESHOLD" ]; then
+            echo "below threshold — not closing"
+            exit 0
+          fi
+          msg=$(printf '## Auto-closed: %s unanswered BLOCK verdicts\n\nThis PR has received **%s** validator `BLOCK` verdicts without the raised findings being fixed, so the gate is auto-closing it (threshold `AI_REVIEW_AUTO_CLOSE_AFTER=%s`).\n\n**Why:** re-running the validator against the same unfixed head only adds another BLOCK and grows this PR'\''s comment thread, which is what drives the reviewer into a runaway. The loop is bounded here instead.\n\n**What to do:** open a **NEW** pull request from a fresh branch with **every** finding from the BLOCK verdicts below already fixed, rather than continuing on this head. Each BLOCK comment lists the exact findings; read them all and fix them before opening the new PR.\n\nThis is a policy action, not a code finding — the validator verdict on this run stands.' "$blocks" "$blocks" "$THRESHOLD")
+          gh pr comment "$PR_NUMBER" --repo "$REPO" --body "$msg" || echo "::warning::could not post the auto-close notice (non-fatal)"
+          gh pr close "$PR_NUMBER" --repo "$REPO" || echo "::warning::could not close the PR (non-fatal)"
+
       - name: Gate (BLOCK)
         if: steps.parse.outputs.verdict == 'BLOCK'
         run: |
           echo "::error::AI review blocked this PR"
           exit 1
+
 
       # INCONCLUSIVE is NOT a BLOCK: no code finding was produced — the provider
       # never answered (or the review yielded no Verdict line). Report that plainly
