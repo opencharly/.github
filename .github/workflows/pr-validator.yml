@@ -62,18 +62,17 @@
 #     applies unless an org deliberately overrides it. The engine owns the
 #     bound; this workflow no longer hardcodes one.
 #
-# ACTIVE (verified against the pinned bundle with `strings`, never asserted —
-# the evidence is in this PR's body):
+# ACTIVE (verified against the pinned bundle with `strings`, never asserted):
 #   * The org pin `vars.CHARLY_VERSION = v2026.263.2131` welds
 #     `plugin-review@v2026.263.1956`. In that bundled plugin, `strings` finds the
 #     generation/idle/context knobs this workflow passes —
 #     AI_REVIEW_STREAM_IDLE_TIMEOUT, AI_REVIEW_TOOL_RESULT_MAX_BYTES,
 #     AI_REVIEW_ATTEMPT_TIMEOUT, AI_REVIEW_MAX_ATTEMPTS,
 #     AI_REVIEW_REASONING_EFFORT, AI_REVIEW_MAX_TOKENS, AI_REVIEW_CONTEXT_TOKENS,
-#     AI_REVIEW_CONTEXT_MARGIN, AI_REVIEW_SESSION_ID — so passing the generation
-#     bounds through is effective, not inert.
+#     AI_REVIEW_CONTEXT_MARGIN, AI_REVIEW_SESSION_ID and AI_REVIEW_TEMPERATURE —
+#     so passing them through is effective, not inert.
 #   * The sampling/penalty/stop/prompt knobs this workflow ALSO forwards
-#     (AI_REVIEW_TEMPERATURE, _TOP_P, _FREQUENCY_PENALTY, _PRESENCE_PENALTY,
+#     (AI_REVIEW_TOP_P, _FREQUENCY_PENALTY, _PRESENCE_PENALTY,
 #     _STOP, _PROMPT_EXTRA, _POST_COMMENT) are ABSENT from the org pin's welded
 #     plugin — they are INERT until the pin moves to the release that welds
 #     plugin-review v2026.265.0505 (opencharly/charly#626, merged). Forwarding
