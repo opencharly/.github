@@ -79,6 +79,36 @@ $ scripts/org-ruleset.sh apply                      # then enable the org rulese
 $ scripts/org-ruleset.sh verify                     # assert the whole end state
 ```
 
+## New repos: bootstrap the initial `main`
+
+The org ruleset carries the `creation` rule on `refs/heads/main`, so a **brand-new
+repo cannot create its first `main` by any operator path** — `git push`, the
+contents API, repo `auto_init`, and branch rename are all rejected (measured:
+`GH013 Cannot create ref due to creations being restricted` on a push; the contents
+API returns `409 Cannot create ref due to creations being restricted` on a repo with
+no refs and `404 Branch main not found` on a repo with other refs but no `main`;
+rename `422 repository rules do not permit renaming branch ... to 'main'`).
+The ruleset's only bypass actor is the `charly-auto-merge` App — and without a
+`main` the required workflow cannot run, so the required check can never be
+produced (a deadlock).
+
+Bootstrap a new repo's `main` with the App-token workflow:
+
+```console
+$ gh workflow run bootstrap-repo-main.yml -f repos="my-new-repo"   # in opencharly/.github
+$ gh api --method PATCH repos/opencharly/my-new-repo -f default_branch=main
+```
+
+`scripts/bootstrap-repo-main.sh` (run by
+`.github/workflows/bootstrap-repo-main.yml`) creates `refs/heads/main` from the
+repo's current default-branch HEAD via the **git-data refs API** — the API with no
+branch-must-exist precondition (the contents API requires the branch to already
+exist). It **never** moves an existing `main` and skips a repo with nothing to seed
+from, so it is safe and idempotent. The ref creation needs only the App's
+`contents: write` bypass; setting the repo's **default branch** is a repo-settings
+change the App cannot make (`403 Resource not accessible by integration`), so that
+final step uses the operator's admin token.
+
 ## Required org-level configuration
 
 Nothing is hardcoded and no credential is committed. The workflow reads
