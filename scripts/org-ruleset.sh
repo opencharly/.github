@@ -16,8 +16,8 @@ set -euo pipefail
 #   * enforces the branch rules that require exactly that check.
 #
 # So ONE org ruleset replaces BOTH of the old per-repo mechanisms:
-#   * the per-repo branch RULESET (previously applied one-by-one by the deleted
-#     scripts/branch-protection.sh), and
+#   * the per-repo branch RULESET (previously applied one-by-one by the now-deleted
+#     per-repo ruleset owner script), and
 #   * the per-repo `.github/workflows/pr-validator.yml` DISPATCHER stub — which only
 #     ever existed because org required-workflows need GitHub Team (the org was on
 #     the free plan when the per-repo pattern began). The stub FILES are retired by
@@ -74,8 +74,8 @@ app_id() {
 }
 APP_ID="$(app_id)"
 
-# TARGET repos: active, non-fork, default branch `main` — the exact set the deleted
-# branch-protection.sh applied to. Discovered, never hand-listed.
+# TARGET repos: active, non-fork, default branch `main` — the exact set the old
+# per-repo ruleset owner applied to. Discovered, never hand-listed.
 mapfile -t repos < <(
   gh repo list "$ORG" --limit 1000 \
     --json name,isArchived,isFork,defaultBranchRef \
