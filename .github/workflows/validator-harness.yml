@@ -28,3 +28,5 @@ jobs:
         run: python3 .github/tests/validator-gate-harness.py
       - name: Run the org-ruleset owner-script test (offline, mock gh)
         run: bash scripts/org-ruleset_test.sh
+      - name: Run the dispatcher-retirement script test (offline, mock gh)
+        run: bash scripts/retire-per-repo-dispatchers_test.sh

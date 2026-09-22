@@ -22,7 +22,8 @@ set -euo pipefail
 #     ever existed because org required-workflows need GitHub Team (the org was on
 #     the free plan when the per-repo pattern began). The stub FILES are retired by
 #     `.github/workflows/retire-per-repo-dispatchers.yml` (they need an app-token
-#     commit on a protected `main`, which this operator-run script cannot make).
+#     commit on a protected `main`, which this operator-run script cannot make), and
+#     `apply` here REFUSES until that retirement has run.
 # Nothing is copied into any repo; there is no per-repo validator config to drift.
 #
 # THE ONE SETTING THAT CANNOT MOVE: `allow_auto_merge` is a per-repository setting

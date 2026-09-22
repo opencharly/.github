@@ -20,12 +20,15 @@ copy inherits the files here — so a change lands **once**, not in every repo.
   org ruleset, deletes the now-redundant per-repo rulesets, and enforces
   `allow_auto_merge`; `verify` asserts the whole end state. Its offline mock-`gh`
   test is `scripts/org-ruleset_test.sh`.
-- **`.github/workflows/retire-per-repo-dispatchers.yml`** — the one-shot cutover
+- **`scripts/retire-per-repo-dispatchers.sh`** +
+  **`.github/workflows/retire-per-repo-dispatchers.yml`** — the one-shot cutover
   step that DELETES each repo's redundant `.github/workflows/pr-validator.yml`
-  dispatcher stub. It is a workflow (not part of the owner script) because a delete
-  on a protected `main` needs a ruleset-bypass commit author — the `charly-auto-merge`
-  App. Run it BEFORE `scripts/org-ruleset.sh apply`, so the org required workflow is
-  never a second producer of the required check. Idempotent (absent files skipped).
+  dispatcher stub. It runs as a workflow because a delete on a protected `main`
+  needs a ruleset-bypass commit author — the `charly-auto-merge` App (the workflow
+  mints that token). Run it BEFORE `scripts/org-ruleset.sh apply`, which refuses
+  while any dispatcher survives, so the org required workflow is never a second
+  producer of the required check. Idempotent (absent files skipped); its offline
+  mock-`gh` test is `scripts/retire-per-repo-dispatchers_test.sh`.
 - **`.github/workflows/pr-validator.yml`** — the org-wide `charly/pr-validator` gate.
   A **reusable workflow** (`on: workflow_call`) that also self-gates this `.github`
   repo (`on: pull_request`). It runs a fresh, independent charly review (the plugin-review plugin, welded
