@@ -30,9 +30,14 @@ gh() {
   [[ "$(cat "$STATE/disp_$repo" 2>/dev/null)" == present ]] && present=1
 
   if [[ "$method" == DELETE ]]; then
+    # a 403 "Resource not accessible by integration" is a PERMISSION error (the token
+    # cannot write workflow files) — the script must abort immediately, not churn.
+    if [[ "${FORCE_PERM_FAIL:-}" == 1 ]]; then
+      printf 'gh: Resource not accessible by integration (HTTP 403)\n'; return 1
+    fi
     # a real delete failure (e.g. transient 5xx) must count as a failure
     if [[ "${FORCE_DELETE_FAIL:-}" == 1 ]]; then
-      printf 'HTTP/2.0 500 X\r\n\r\n'; return 1
+      printf 'gh: Server Error (HTTP 500)\n'; return 1
     fi
     rm -f "$STATE/disp_$repo"
     printf 'deleted %s\n' "$repo" >>"$STATE/transcript"
@@ -69,10 +74,18 @@ if FORCE_API_FAIL=1 GH_TOKEN=x OPENCHARLY_ORG=test "$root/scripts/retire-per-rep
   echo "FAIL: must abort on a non-404 probe failure" >&2; exit 1
 fi
 
-# a delete failure must fail the run.
+# a delete failure must fail the run AND count the repo as failed-only — never as
+# both retired and failed (the `2>&1` error text must not be read as success).
 printf 'present\n' >"$STATE/disp_alpha"
-if FORCE_DELETE_FAIL=1 GH_TOKEN=x OPENCHARLY_ORG=test "$root/scripts/retire-per-repo-dispatchers.sh" >/dev/null 2>&1; then
-  echo "FAIL: must fail when a delete fails" >&2; exit 1
-fi
+out="$(FORCE_DELETE_FAIL=1 GH_TOKEN=x OPENCHARLY_ORG=test "$root/scripts/retire-per-repo-dispatchers.sh" 2>&1)" && {
+  echo "FAIL: must fail when a delete fails" >&2; exit 1; }
+grep -q "retired=0 absent=1 failed=1" <<<"$out" \
+  || { echo "FAIL: delete-failure counters must be retired=0 absent=1 failed=1 (got: $(grep 'retired=' <<<"$out"))" >&2; exit 1; }
+
+# a 403 permission error (token cannot write workflow files) must ABORT immediately
+# with the remediation, never churn through the remaining repos.
+out="$(FORCE_PERM_FAIL=1 GH_TOKEN=x OPENCHARLY_ORG=test "$root/scripts/retire-per-repo-dispatchers.sh" 2>&1)" && {
+  echo "FAIL: must abort on a 403 permission error" >&2; exit 1; }
+grep -q "workflows: write" <<<"$out" || { echo "FAIL: 403 abort must name the missing permission" >&2; exit 1; }
 
 echo "retire-per-repo-dispatchers_test: all assertions passed"

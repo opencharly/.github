@@ -7,10 +7,17 @@
 # despite PASS (the measured #38 lesson). This workflow deletes those stub files.
 #
 # WHY IT IS A WORKFLOW: deleting a file on a protected `main` needs a commit authored
-# by a ruleset BYPASS actor. The `charly-auto-merge` App IS that actor (`contents:
-# write`, installed org-wide), so it does the deletion; the operator-run
-# scripts/org-ruleset.sh deliberately adds NO human bypass to the ruleset (that would
-# loosen main protection).
+# by a ruleset BYPASS actor. The `charly-auto-merge` App IS that actor, so it does the
+# deletion; the operator-run scripts/org-ruleset.sh deliberately adds NO human bypass
+# to the ruleset (that would loosen main protection).
+#
+# REQUIRED APP PERMISSION: the App MUST hold BOTH `contents: write` (the ruleset
+# bypass, for the protected-main commit) AND `workflows: write` (GitHub Apps
+# permission, required by DELETE on `.github/workflows/*` — distinct from
+# `contents: write`). Without `workflows: write` every delete returns 403 "Resource
+# not accessible by integration"; the script aborts immediately with that remediation
+# rather than churning. Grant it at the App's settings → Permissions → Repository
+# permissions → Workflows: Read and write, then re-approve the installation.
 #
 # RUN ORDER (one time): dispatch this workflow FIRST, then run
 # `scripts/org-ruleset.sh apply` (it refuses while any dispatcher survives), then
