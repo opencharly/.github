@@ -20,8 +20,12 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
 
-# ONE run per PR (a re-dispatch/push cancels the in-flight run). The required
-# workflow holds actions: write so cancel-in-progress works.
+# ONE run per PR (a re-dispatch/push cancels the in-flight run). This workflow
+# calls the reusable `pr-validator.yml`, which does NOT carry its own
+# `concurrency` — a run that declares cancel-in-progress while the caller lacks
+# `actions: write` fails to expand (the measured #163 infra regression). The
+# top-level workflow therefore carries BOTH the `concurrency` block AND
+# `actions: write`, so the cancel is permitted.
 concurrency:
   group: pr-validator-${{ github.repository }}-${{ github.event.pull_request.number }}
   cancel-in-progress: true

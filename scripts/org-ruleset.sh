@@ -78,11 +78,33 @@ has_dispatcher() {
   gh api "repos/$ORG/$1/contents/$DISPATCHER_PATH" --jq '.sha' >/dev/null 2>&1
 }
 
+# worklist_repos prints one repo per line that still carries a LOCAL dispatcher.
+# The SOURCE repo's `$DISPATCHER_PATH` is its REUSABLE workflow, not a dispatcher
+# to retire, so it is excluded.
+worklist_repos() {
+  local repo
+  for repo in "${repos[@]}"; do
+    [[ "$repo" == "$SOURCE_REPO" ]] && continue
+    has_dispatcher "$repo" && echo "$repo"
+  done
+}
+
 case "$mode" in
   apply)
-    [[ -f "$(dirname "${BASH_SOURCE[0]}")/../$REQUIRED_PATH" || true ]]
     gh api "repos/$ORG/$SOURCE_REPO/contents/$REQUIRED_PATH?ref=${REQUIRED_REF#refs/heads/}" --jq '.sha' >/dev/null \
       || { echo "required workflow missing on $REQUIRED_REF in $SOURCE_REPO — merge it first" >&2; exit 1; }
+    # HAZARD GUARD: activating the org rule while any repo still carries a local
+    # dispatcher produces DUPLICATE `validate / validate` check-runs, which block
+    # mergeability org-wide (#38). Refuse until the worklist is empty; the
+    # operator may override with ORG_RULESET_ALLOW_DUPLICATE=1 for a deliberate
+    # two-phase rollout.
+    remaining="$(worklist_repos | wc -l | tr -d ' ')"
+    if [[ "$remaining" != "0" && "${ORG_RULESET_ALLOW_DUPLICATE:-0}" != "1" ]]; then
+      echo "REFUSING: $remaining repos still carry a local $DISPATCHER_PATH — enabling the" >&2
+      echo "org required workflow now would create DUPLICATE validate/validate checks (#38)." >&2
+      echo "Retire them first ('$0 worklist'), or set ORG_RULESET_ALLOW_DUPLICATE=1 to override." >&2
+      exit 1
+    fi
     id="$(existing_id)"
     if [[ -n "$id" ]]; then
       gh api --method PUT "orgs/$ORG/rulesets/$id" --input <(ruleset_payload) --jq .id >/dev/null
@@ -92,7 +114,6 @@ case "$mode" in
       echo "org ruleset created ($id)"
     fi
     echo "required workflow: $SOURCE_REPO/$REQUIRED_PATH@$REQUIRED_REF"
-    echo "REMINDER: retire any remaining per-repo dispatcher — run '$0 worklist'."
     ;;
   verify)
     fail=0
@@ -110,9 +131,7 @@ case "$mode" in
     ;;
   worklist)
     n=0
-    for repo in "${repos[@]}"; do
-      if has_dispatcher "$repo"; then echo "$repo"; n=$((n+1)); fi
-    done
+    while IFS= read -r repo; do echo "$repo"; n=$((n+1)); done < <(worklist_repos)
     echo "--- $n repos still carry $DISPATCHER_PATH (retire each via a PR or a bypassed file delete)" >&2
     ;;
 esac
