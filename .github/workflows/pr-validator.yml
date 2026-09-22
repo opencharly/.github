@@ -5,15 +5,17 @@
 # (including repo-specific CI gates like verify/go) before merging.
 #
 # Runs the plugin-review charly plugin to review this PR and gate it with a
-# deterministic Verdict: PASS|BLOCK, ONE PR comment, $GITHUB_OUTPUT outputs.
+# deterministic Verdict: PASS|BLOCK, ONE review comment, $GITHUB_OUTPUT outputs.
+# (A policy auto-close step posts a SECOND, distinct notice when a PR exceeds the
+# BLOCK threshold; that notice is not a review comment.)
 # The engine invoked is whatever the pinned charly release (vars.CHARLY_VERSION)
 # welds. This workflow passes no plan path: the plain `charly review --out ...`
-# form is accepted by BOTH the currently-pinned engine and the new one, so the
-# invocation is weld-independent. REVIEW_PROMPT_PATH is still passed because the
-# currently-pinned engine reads its rulebook from that file; the weld PR
-# (opencharly/charly#626, plugin-review v2026.264.1425) moves the pin to the
-# embedded-prompt engine, at which point the env becomes vestigial and is dropped
-# in the same step that bumps the pin.
+# form is accepted by BOTH the pre-rewrite engine and the embedded-prompt engine,
+# so the invocation is weld-independent. REVIEW_PROMPT_PATH is still passed
+# because the charly release in the org pin reads its rulebook from that file;
+# the embedded-prompt engine (welded by opencharly/charly#626, merged) ignores it,
+# so once the org CHARLY_VERSION pin moves to that release the env is vestigial
+# and is dropped in the same change that bumps the pin.
 #
 # VERDICT TAXONOMY — these classes are NEVER conflated (a provider that did not
 # answer is not a code finding, and it is not a pass either):
@@ -232,7 +234,7 @@ jobs:
           # must not take the whole org gate down.
           CHARLY_PLUGIN_DIR="$D/plugins" "$D/bin/charly" review --self-test || echo "::warning::bootstrap self-test crashed — continuing (the review step re-validates)"
 
-      - name: Run the review engine (assemble context, one model call, verdict)
+      - name: Run the review engine (assemble context, verdict)
         id: review
         env:
           PR_NUMBER: ${{ inputs.pr-number }}
@@ -311,11 +313,12 @@ jobs:
           # Default 1 org-wide; any repo may opt back to retries via its own var.
           AI_REVIEW_MAX_ATTEMPTS: ${{ vars.AI_REVIEW_MAX_ATTEMPTS || '1' }}
           AI_REVIEW_API_KEY:   ${{ secrets.AI_REVIEW_API_KEY }}
-          # The currently-pinned engine reads its rulebook from REVIEW_PROMPT_PATH;
-          # the new (embedded-rulebook) engine ignores it. Both accept the plain
+          # The charly release in the org pin reads its rulebook from
+          # REVIEW_PROMPT_PATH; the embedded-rulebook engine (welded by
+          # opencharly/charly#626, merged) ignores it. Both accept the plain
           # `charly review --out ...` form, so this env is the only transitional
-          # surface; it is removed when the embedded-rulebook release is welded
-          # (opencharly/charly#626).
+          # surface; it is removed when the org CHARLY_VERSION pin moves to the
+          # embedded-rulebook release.
           REVIEW_PROMPT_PATH:  ${{ github.workspace }}/runner-config/prompt/validator.md
           GITHUB_TOKEN:        ${{ github.token }}
         run: |
