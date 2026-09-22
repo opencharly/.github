@@ -18,12 +18,14 @@ printf 'present\n' >"$STATE/legacy_alpha"
 
 gh() {
   if [[ "$1 $2" == "repo list" ]]; then
-    # A failure in either discovery call must abort. FORCE_REPO_LIST_FAIL targets the
-    # EXCLUDES read specifically (the path the count guard cannot catch); the targets
-    # read always succeeds so the excludes abort is exercised, not the count guard.
+    # Target discovery is the `main`-default filter; exclude discovery is the `!=`
+    # filter. FORCE_TARGETS_FAIL / FORCE_EXCLUDES_FAIL fail the respective read so the
+    # call-site abort on each is exercised independently.
     local jqfilter="${*: -1}"
     if [[ "$jqfilter" == *"!="* ]]; then
       [[ "${FORCE_EXCLUDES_FAIL:-}" == 1 ]] && return 1
+      # EXCLUDE_LIST lets a case exercise exclude_json with real content.
+      printf '%s\n' "${EXCLUDE_LIST:-}"
       return 0
     fi
     [[ "${FORCE_TARGETS_FAIL:-}" == 1 ]] && return 1
@@ -129,10 +131,14 @@ grep -q 'PATCH beta auto'       "$STATE/transcript" || { echo "FAIL: beta auto-m
 [[ "$(cat "$STATE/auto_beta")" == true ]] || { echo "FAIL: beta auto-merge state not true" >&2; exit 1; }
 grep -q 'PATCH alpha' "$STATE/transcript" && { echo "FAIL: alpha auto-merge must not be re-patched" >&2; exit 1; }
 
-# The posted payload must render an EMPTY exclude set as `[]`, not `[""]` (the
-# mapfile-on-empty bug), and must still target `~ALL`.
-grep -q '"exclude": \[\]' "$STATE/payload.json" || { echo "FAIL: empty exclude set must render as [] (got: $(grep -o '"exclude": \[[^]]*\]' "$STATE/payload.json"))" >&2; exit 1; }
-grep -q '"include": \["~ALL"\]' "$STATE/payload.json" || { echo "FAIL: ruleset must include ~ALL" >&2; exit 1; }
+# The posted payload must render the `repository_name.exclude` set as `[]`, not
+# `[""]` (the mapfile-on-empty bug). A plain `grep '"exclude": []'` is INSUFFICIENT —
+# the hardcoded `ref_name` line also contains `"exclude": []`, so it would pass even
+# when repository_name.exclude were `[""]`. Assert the SPECIFIC field via jq.
+jq -e '.conditions.repository_name.exclude == []' "$STATE/payload.json" >/dev/null \
+  || { echo "FAIL: empty exclude set must render repository_name.exclude == [] (got: $(jq -c '.conditions.repository_name.exclude' "$STATE/payload.json"))" >&2; exit 1; }
+jq -e '.conditions.repository_name.include == ["~ALL"]' "$STATE/payload.json" >/dev/null \
+  || { echo "FAIL: ruleset must include ~ALL" >&2; exit 1; }
 
 # verify passes on the fully-migrated state.
 OPENCHARLY_ORG=test "$root/scripts/org-ruleset.sh" verify >/dev/null
@@ -176,5 +182,16 @@ printf 'present\n' >"$STATE/legacy_alpha"
 if FORCE_LEGACY_API_FAIL=1 OPENCHARLY_ORG=test "$root/scripts/org-ruleset.sh" apply >/dev/null 2>&1; then
   echo "FAIL: apply must abort on a non-404 legacy-protection probe failure" >&2; exit 1
 fi
+
+# A failed TARGETS read must ABORT too (the other discovery call site).
+if FORCE_TARGETS_FAIL=1 OPENCHARLY_ORG=test "$root/scripts/org-ruleset.sh" apply >/dev/null 2>&1; then
+  echo "FAIL: apply must abort when the targets read fails" >&2; exit 1
+fi
+
+# exclude_json with REAL content: a non-empty exclude set must round-trip verbatim.
+rm -f "$STATE/legacy_alpha"; rm -f "$STATE/disp_alpha"; rm -f "$STATE/org_ruleset_id"
+EXCLUDE_LIST=$'fork-a\narchived-b' OPENCHARLY_ORG=test "$root/scripts/org-ruleset.sh" apply >/dev/null
+jq -e '.conditions.repository_name.exclude == ["archived-b","fork-a"]' "$STATE/payload.json" >/dev/null \
+  || { echo "FAIL: non-empty exclude set must round-trip (got: $(jq -c '.conditions.repository_name.exclude' "$STATE/payload.json"))" >&2; exit 1; }
 
 echo "org-ruleset_test: all assertions passed (apply/verify/abort)"
