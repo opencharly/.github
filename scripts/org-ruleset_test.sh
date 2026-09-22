@@ -93,6 +93,7 @@ JSON
       if [[ "$method" == DELETE ]]; then
         rm -f "$STATE/legacy_$repo"; printf 'deleted %s legacy\n' "$repo" >>"$STATE/transcript"; return 0
       fi
+      if [[ "$repo" == alpha && "${FORCE_LEGACY_API_FAIL:-}" == 1 ]]; then emit 500 '{}'; return; fi
       if [[ "$(cat "$STATE/legacy_$repo" 2>/dev/null)" == present ]]; then emit 200 '{}'; return; fi
       emit 404 '{}'; return
     fi
@@ -143,6 +144,13 @@ rm -f "$STATE/legacy_beta"
 # forks/archived repos too). This is the path the targets count-guard cannot catch.
 if FORCE_EXCLUDES_FAIL=1 OPENCHARLY_ORG=test "$root/scripts/org-ruleset.sh" apply >/dev/null 2>&1; then
   echo "FAIL: apply must abort when the excludes read fails" >&2; exit 1
+fi
+
+# A non-404 legacy-protection probe failure must ABORT (a transient error must never
+# read as "absent" and silently skip the removal).
+printf 'present\n' >"$STATE/legacy_alpha"
+if FORCE_LEGACY_API_FAIL=1 OPENCHARLY_ORG=test "$root/scripts/org-ruleset.sh" apply >/dev/null 2>&1; then
+  echo "FAIL: apply must abort on a non-404 legacy-protection probe failure" >&2; exit 1
 fi
 
 echo "org-ruleset_test: all assertions passed (apply/verify/abort)"

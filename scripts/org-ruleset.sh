@@ -123,10 +123,14 @@ ruleset_payload() {
 JSON
 }
 
-# All reads below run under `set -e`: a 401/403/rate-limit/network failure ABORTS the
-# script rather than being silently mistaken for an empty result. Only the dispatcher
-# existence check has to tell a real 404 (absent) from an API failure, so it alone
-# inspects the HTTP status.
+# Read-failure policy: a 401/403/rate-limit/network failure must ABORT, never read as
+# an empty/absent result. The plain list reads below (`existing_id`, `repo_ruleset_id`,
+# the allow_auto_merge GET) run under `set -e`, so a non-zero exit aborts the script.
+# The two reads that must distinguish a REAL 404 (legitimately absent) from an API
+# failure — the dispatcher existence check (`has_dispatcher`) and the legacy-protection
+# probe in `apply` — are exempt from that reasoning (a probe inside `if`/`case` is
+# ignored by `set -e`), so they inspect the HTTP status explicitly via `api_status` and
+# abort on anything that is neither 200 nor 404.
 
 existing_id() {
   gh api "orgs/$ORG/rulesets" \
@@ -199,11 +203,18 @@ case "$mode" in
 
     for repo in "${repos[@]}"; do
       # The classic protection blocks the app's changelog write (no bypass) — remove
-      # it wherever it survives (idempotent: absent is a no-op).
-      if gh api "repos/$ORG/$repo/branches/main/protection" >/dev/null 2>&1; then
-        gh api --method DELETE "repos/$ORG/$repo/branches/main/protection" >/dev/null
-        echo "$repo: removed legacy branch protection"
-      fi
+      # it wherever it survives. This must classify the HTTP status exactly like
+      # has_dispatcher: a plain `if gh api …` is exempt from `set -e`, so a 401/403/5xx
+      # would read as "absent" and silently skip the removal. 404 = absent (no-op);
+      # 200 = present (remove); anything else = FATAL.
+      legacy="$(api_status "repos/$ORG/$repo/branches/main/protection")"
+      case "$legacy" in
+        404) ;;
+        200)
+          gh api --method DELETE "repos/$ORG/$repo/branches/main/protection" >/dev/null
+          echo "$repo: removed legacy branch protection" ;;
+        *) echo "FATAL: $repo legacy-protection probe -> HTTP $legacy" >&2; exit 1 ;;
+      esac
     done
 
     for repo in "${repos[@]}"; do
