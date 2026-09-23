@@ -63,19 +63,27 @@ jobs:
               const doy = String(Math.floor((d - new Date(y, 0, 0)) / 86400000)).padStart(3, '0');
               const hh = String(d.getUTCHours()).padStart(2, '0');
               const mm = String(d.getUTCMinutes()).padStart(2, '0');
-              // The ROOT Go-module repos are tagged in Go's form; everything else gets
-              // the plain repo CalVer. `sdk` and `spec` are both root modules resolved
-              // from the proxy at `v0.<YYYYDDD>.<HHMM>` pins (charly/go.mod requires
-              // github.com/opencharly/sdk and github.com/opencharly/spec at exactly
-              // that shape), so a repo CalVer tag is unusable as a module version.
+              // The ROOT Go-module repos that are CONSUMED VIA THE MODULE PROXY
+              // are tagged in Go's form; everything else gets the plain repo
+              // CalVer. A consumer's go.mod pins them at `v0.<YYYYDDD>.<HHMM>`
+              // exactly, so a plain `v<YYYY>.<DDD>.<HHMM>` tag (major >= 2, which
+              // would need a /vN module-path suffix) is unusable as a module
+              // version. The criterion is "root module with an external Go-module
+              // consumer", NOT merely "has a root go.mod": charly-streamer is a
+              // root module (a binary) nobody imports via the proxy and keeps the
+              // plain CalVer.
               //
-              // spec was missing from this list, so its Go-module releases stopped at
-              // v0.2026232.520 while its repo tags kept advancing: every spec change
-              // after that day was merged but UNCONSUMABLE, because no consumer could
-              // name a version containing it. Candy repos are unaffected — they are
-              // tagged separately below in `candy/<repo>/v0.…` form.
-              const goModuleRepos = ['sdk', 'spec'];
-              const tag = goModuleRepos.includes(repo.repo)
+              // spec was missing from this list, so its Go-module releases stopped
+              // at v0.2026232.520 while its repo tags kept advancing: every spec
+              // change after that day merged but was UNCONSUMABLE, because no
+              // consumer could name a version containing it. plugin-gh (a
+              // root-module plugin repo consumed by plugin-review/plugin-pipeline)
+              // was the same trap. ADD A NEW PROXY-CONSUMED ROOT-MODULE REPO HERE.
+              // Candy repos are unaffected — they are tagged separately below in
+              // `candy/<repo>/v0.…` form.
+              const goModuleRepos = ['sdk', 'spec', 'plugin-gh'];
+              const isGoModuleRepo = goModuleRepos.includes(repo.repo);
+              const tag = isGoModuleRepo
                 ? `v0.${y}${doy}.${parseInt(hh + mm)}`
                 : `v${y}.${doy}.${hh}${mm}`;
               const calver = tag.replace(/^v/, '');
@@ -97,7 +105,12 @@ jobs:
               // resolves — which breaks pluginsgen's fetch (TestPluginsGenReproducible).
               // The module tag mirrors the root CalVer in SDK form: v0.<y><doy>.<hhmm>
               // with the leading zero stripped from hhmm (semver patch must not start 0).
-              if (repo.repo.startsWith('plugin-')) {
+              //
+              // `!isGoModuleRepo` guards the exception: plugin-gh is a `plugin-*` repo whose
+              // module is at the ROOT (consumed via a ROOT tag), so a name-prefix rule would
+              // mint a bogus `candy/plugin-gh/v0.…` tag resolving to nothing. Every genuine
+              // subdir-module plugin repo has no root go.mod, so this preserves their tags.
+              if (repo.repo.startsWith('plugin-') && !isGoModuleRepo) {
                 const moduleTag = `candy/${repo.repo}/v0.${y}${doy}.${parseInt(hh + mm)}`;
                 try {
                   await github.rest.git.getRef({ ...repo, ref: `tags/${moduleTag}` });
