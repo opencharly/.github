@@ -78,9 +78,24 @@
 #     plugin-review v2026.265.0505 (opencharly/charly#626, merged). Forwarding
 #     them now is forward-compatible: the engine ignores unknown env, and the
 #     bump is the single lever that activates them.
-#   * The workflow's built-in fallback TAG (v2026.254.1902) is OLDER and lacks
-#     several of these knobs; they are ACTIVE only through the org pin. Bumping
-#     the pin is what carries a new engine.
+#   * There is NO built-in fallback TAG: on the DOWNLOAD path vars.CHARLY_VERSION is
+#     MANDATORY, and a missing/repo-invisible pin FAILS the run loudly (exit 3, the
+#     INCONCLUSIVE exit code — no trustworthy verdict) instead of silently
+#     downgrading to an older bundled engine. See the INCIDENT note below. (A
+#     self-hosted runner whose image already provides `charly` short-circuits
+#     before the pin is read — that path carries its own operator-controlled,
+#     knob-aware engine, so the pin is not required there.)
+#
+# INCIDENT (the silent-fallback outage). An org variable set with GitHub's DEFAULT
+# visibility (`private`) is INVISIBLE to a PUBLIC repo, and the old resolution
+#   TAG="${CHARLY_VERSION:-v2026.254.1902}"
+# silently fell back to a bundled engine whose welded plugin-review does NOT read
+# AI_REVIEW_MAX_TOKENS / AI_REVIEW_REASONING_EFFORT — the measured root-cause
+# generation bound. Result: 3x900s attempt stalls and every validator run cancelled
+# at the 20m job cap, with no visible cause. The fix: a missing or unresolved pin is
+# a HARD FAIL (exit 3) that names the condition and the remedy —
+# `gh variable set CHARLY_VERSION --org opencharly --body <tag> --visibility all`.
+# No silent fallback survives (R4: a default that hides a missing config is forbidden).
 #
 # No non-streaming / whole-generation RCA survives in this workflow (R5): the
 # superseded 2026-09-12 narrative is deleted, not retained as history.
@@ -198,23 +213,35 @@ jobs:
           CHARLY_VERSION: ${{ vars.CHARLY_VERSION || '' }}
         run: |
           if command -v charly >/dev/null 2>&1; then
-            echo "charly present: $(charly version)"; exit 0
+            # SELF-HOSTED ENGINE PATH: the runner image already provides charly, so
+            # the org pin is NOT consulted here. This is an intentionally-kept,
+            # operator-controlled fallback — it must therefore be LOUD (never silent)
+            # and the image's release MUST weld a plugin-review that reads the
+            # AI_REVIEW_* knobs (AI_REVIEW_MAX_TOKENS / AI_REVIEW_REASONING_EFFORT),
+            # or reviews stall exactly as in the silent-fallback incident.
+            present=$(charly version 2>/dev/null | head -1 || echo unknown)
+            echo "::warning::using the PRE-INSTALLED charly on this self-hosted runner: ${present} — the org pin (vars.CHARLY_VERSION=${CHARLY_VERSION:-<unset>}) is NOT applied on this path."
+            echo "::warning::That image must provide a release whose welded plugin-review reads AI_REVIEW_MAX_TOKENS / AI_REVIEW_REASONING_EFFORT, or reviews stall (the silent-fallback incident)."
+            exit 0
           fi
-          # PINNED charly release - the gate is deterministic; bump here per release
-          # (vars.CHARLY_VERSION overrides). No runtime latest-resolution: the
+          # MANDATORY PIN — NO FALLBACK. The gate is deterministic because it runs
+          # the charly release named by vars.CHARLY_VERSION. There is deliberately
+          # NO bundled default: a missing pin (unset, or set `private` and therefore
+          # invisible to this public repo) must FAIL LOUDLY, never silently downgrade
+          # to an older engine that lacks the measured review knobs (the incident
+          # this guard closes). No runtime latest-resolution either: the
           # releases/latest redirect is abuse-limited on shared runner IPs (curl exit 22).
-          # v2026.254.1902 is the first release whose plugin bundle carries
-          # plugin-review's timeout-class taxonomy + the INCONCLUSIVE terminal
-          # marker the Gate (inconclusive) step consumes. VERIFIED against the
-          # published asset, never asserted — strings of the bundled plugin-review
-          # extracted from charly-plugins-linux-amd64.tar.gz; the exact commands
-          # and their full output are in this PR's body, section
-          # "How tested — the pin's strings evidence" (pasted verbatim):
-          #   v2026.254.1902: "inconclusive: all %d attempts timed out " -> 1 hit
-          #                   "AI_REVIEW_ATTEMPT_TIMEOUT"                -> 1 hit
-          #                   "NOT a review verdict"                    -> 1 hit
-          #   v2026.251.1947: all three of the above                   -> 0 hits
-          TAG="${CHARLY_VERSION:-v2026.254.1902}"
+          # The pin is org-level only (the dispatch inputs override PROVIDER / MODEL /
+          # BASE_URL, not the engine). To change the engine, set the org variable with
+          # visibility all:
+          #   gh variable set CHARLY_VERSION --org opencharly --body <tag> --visibility all
+          if [ -z "${CHARLY_VERSION:-}" ]; then
+            echo "::error::CHARLY_VERSION is unset or not visible to this repo (${GITHUB_REPOSITORY})."
+            echo "::error::The validator refuses to silently fall back to a bundled engine whose welded plugin-review may not read the AI_REVIEW_* knobs — that silent downgrade caused the 3x900s-stall → 20m-cancel outage."
+            echo "::error::Fix: gh variable set CHARLY_VERSION --org opencharly --body <tag> --visibility all"
+            exit 3
+          fi
+          TAG="$CHARLY_VERSION"
           # PER-RUN dir (runner.temp, wiped between jobs): on self-hosted runners
           # $HOME persists across jobs and a stale plugin binary there crashes
           # the gate (live evidence: plugin-review parseReviewArgs panic, exit 2,

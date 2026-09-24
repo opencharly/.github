@@ -54,8 +54,9 @@ SCENARIOS ASSERTED END TO END (exit code + classification output + PR comment)
 
   Plus structural guards: the review step contains NO in-job retry (no sleep, no
   for-attempt loop) - the R4 regression guard for the dropped retry band-aid - the
-  workflow pins a charly release WITH the taxonomy marker, never the old one, and
-  the header names the CORRECTED root cause (a NON-STREAMING request under a
+  ensure-charly step carries NO silent fallback TAG and FAILS LOUDLY (exit 3) when
+  vars.CHARLY_VERSION is missing or repo-invisible (the silent-fallback incident),
+  and the header names the CORRECTED root cause (a NON-STREAMING request under a
   whole-generation HTTP deadline that a too-short attempt cap cut off -
   opencharly/.github#91), asserts the superseded throttled-egress RCA is GONE,
   documents the org-settable AI_REVIEW_ATTEMPT_TIMEOUT lever, and carries no
@@ -79,6 +80,7 @@ ENVIRONMENT NOTES
 import fcntl
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -1077,10 +1079,75 @@ def run_harness():
     # expect_comment_contains requires the class in the posted INCONCLUSIVE notice. It is
     # deliberately NOT asserted by a text check (a source-text match is structural, not
     # functional, and must not be labelled the other way).
-    note("${CHARLY_VERSION:-v2026.254.1902}" in text,
-         "structural: the pinned charly default is the taxonomy-marker release v2026.254.1902")
-    note("${CHARLY_VERSION:-v2026.251.1947}" not in text,
-         "structural: the pre-taxonomy release v2026.251.1947 is no longer the pinned default")
+    # FAIL-LOUD PIN GUARD (the silent-fallback incident fix). The ensure-charly step
+    # must FAIL the run when vars.CHARLY_VERSION is missing or not visible to the
+    # repo, never silently downgrade to a bundled engine whose welded plugin-review
+    # may not read the measured AI_REVIEW_* knobs. Asserted STRUCTURALLY (the old
+    # silent-fallback default is gone; the pin is used verbatim) and FUNCTIONALLY
+    # (the real step body is executed with the pin unset and no charly on PATH).
+    ensure_run = find_step(steps, "id", "ensure-charly")["run"]
+    note("v2026.254.1902" not in ensure_run,
+         "structural: the silent fallback default v2026.254.1902 is GONE from the "
+         "resolution (the header quotes it only as the incident narrative)")
+    note("v2026.251.1947" not in ensure_run,
+         "structural: the pre-taxonomy release v2026.251.1947 is not a fallback either")
+    note('TAG="$CHARLY_VERSION"' in ensure_run,
+         "structural: the pin is used VERBATIM (no default expansion) on the download path")
+    note("::error::" in ensure_run and "exit 3" in ensure_run,
+         "structural: a missing pin is a LOUD ::error:: that exits 3 (the INCONCLUSIVE "
+         "class), not a ::warning:: or a fallback")
+    guard_tmp = tempfile.mkdtemp(prefix="validator-pin-guard.")
+    guard_script = os.path.join(guard_tmp, "ensure-charly.sh")
+    # Substitute ${{ ... }} exactly as GitHub does before running the step, so the
+    # executed body is the real one (the guard precedes any expression that matters).
+    guard_ns = build_ns({}, guard_tmp, guard_tmp)
+    with open(guard_script, "w", encoding="utf-8") as fh:
+        fh.write(subst(ensure_run, guard_ns))
+    bash_path = shutil.which("bash")
+    guard_env = dict(os.environ)
+    guard_env["GITHUB_REPOSITORY"] = "opencharly/harness-fixture"
+    guard_env.pop("CHARLY_VERSION", None)
+    # PATH with NO charly: `command -v charly` fails, so the step reaches the guard.
+    # bash is invoked by absolute path (the guard body only uses bash builtins).
+    guard_env["PATH"] = guard_tmp
+    guard_proc = subprocess.run(
+        [bash_path, "--noprofile", "--norc", "-eo", "pipefail", guard_script],
+        cwd=guard_tmp, env=guard_env, stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, universal_newlines=True)
+    guard_out = guard_proc.stdout
+    note(guard_proc.returncode == 3,
+         "functional: with CHARLY_VERSION UNSET the ensure-charly step exits 3 "
+         "(INCONCLUSIVE class, no silent fallback) — got " + str(guard_proc.returncode))
+    note("unset or not visible" in guard_out,
+         "functional: the failure message names the unset/invisible condition")
+    note("--visibility all" in guard_out,
+         "functional: the failure message names the exact recovery command")
+    note("::error::" in guard_out,
+         "functional: the failure is LOUD (::error:: annotations), never a silent pass")
+    # The intentionally-kept SELF-HOSTED fallback must also be LOUD (never silent) and
+    # must name the knob-reading requirement. Exercised by putting a fake `charly` on
+    # PATH: the step short-circuits and must emit ::warning::, exit 0.
+    guard_bin = os.path.join(guard_tmp, "bin")
+    os.makedirs(guard_bin)
+    write_executable(os.path.join(guard_bin, "charly"),
+                     "#!/usr/bin/env bash\necho 'charly v0.0.0-fake'\n")
+    guard2_env = dict(os.environ)
+    guard2_env["GITHUB_REPOSITORY"] = "opencharly/harness-fixture"
+    guard2_env["CHARLY_VERSION"] = "v2026.267.0045"
+    guard2_env["PATH"] = guard_bin
+    guard2_proc = subprocess.run(
+        [bash_path, "--noprofile", "--norc", "-eo", "pipefail", guard_script],
+        cwd=guard_tmp, env=guard2_env, stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, universal_newlines=True)
+    guard2_out = guard2_proc.stdout
+    note(guard2_proc.returncode == 0,
+         "functional: the self-hosted engine path exits 0 when charly is present — got " +
+         str(guard2_proc.returncode))
+    note("::warning::" in guard2_out and "NOT applied on this path" in guard2_out,
+         "functional: the self-hosted fallback is LOUD (::warning:: that the org pin "
+         "is not applied), never a silent no-op")
+    note("AI_REVIEW_MAX_TOKENS" in guard2_out,
+         "functional: the self-hosted warning names the knob-reading requirement")
     parse_run = find_step(steps, "id", "parse")["run"]
     note('"$rc" -ne 0' in review_run and "discarded" in review_run,
          "structural: the review step gates on the CAPTURED rc - a non-zero review "
