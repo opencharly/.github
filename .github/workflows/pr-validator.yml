@@ -53,18 +53,26 @@
 # did — which is why raising the cap only moves the symptom.
 #
 # THE FIX, split by owner:
-#   * engine (opencharly/plugin-review#10): BOUND the generation —
-#     `reasoning_effort: low` + `max_tokens: 65536`. Measured, the same request
-#     returns a verdict in 47-107 s instead of 786 s.
+#   * engine (opencharly/plugin-review#10): the runaway was an UNBOUNDED
+#     generation — the tool loop deleted in plugin-review v2026.264.1425 is the
+#     fix (the model is given the whole PR in ONE message, no fragmented
+#     reasoning). The engine then defaults to `reasoning_effort: high` +
+#     `max_tokens: 262144`, which is the intended quality default.
 #   * this workflow: pass the engine's bounds through from org vars
-#     (AI_REVIEW_REASONING_EFFORT, AI_REVIEW_MAX_TOKENS), pass the stream-idle
-#     bound, and leave the whole-request deadline EMPTY so the engine default
-#     applies unless an org deliberately overrides it. The engine owns the
-#     bound; this workflow no longer hardcodes one.
+#     (AI_REVIEW_REASONING_EFFORT, AI_REVIEW_MAX_TOKENS) when an operator sets
+#     them, pass the stream-idle bound, and leave the whole-request deadline
+#     EMPTY so the engine default applies. No org var is set today, so the gate
+#     runs at the engine default HIGH — measured on the pinned fixed engine:
+#     a small PR returns a verdict in ~70 s, a +370/-108 PR in ~285 s.
+#
+# (A short-lived mitigation set AI_REVIEW_REASONING_EFFORT=low +
+# AI_REVIEW_MAX_TOKENS=65536 during the pre-fix runaway; it was also
+# visibility=private, so every public repo ignored it and ran at HIGH anyway.
+# Both vars are DELETED now that the engine is fixed — R5.)
 #
 # ACTIVE (verified against the pinned bundle with `strings`, never asserted):
-#   * The org pin `vars.CHARLY_VERSION = v2026.263.2131` welds
-#     `plugin-review@v2026.263.1956`. In that bundled plugin, `strings` finds the
+#   * The org pin `vars.CHARLY_VERSION = v2026.267.0045` welds
+#     `plugin-review@v2026.266.1944`. In that bundled plugin, `strings` finds the
 #     generation/idle/context knobs this workflow passes —
 #     AI_REVIEW_STREAM_IDLE_TIMEOUT, AI_REVIEW_TOOL_RESULT_MAX_BYTES,
 #     AI_REVIEW_ATTEMPT_TIMEOUT, AI_REVIEW_MAX_ATTEMPTS,
@@ -73,14 +81,13 @@
 #     so passing them through is effective, not inert.
 #   * The sampling/penalty/stop/prompt knobs this workflow ALSO forwards
 #     (AI_REVIEW_TOP_P, _FREQUENCY_PENALTY, _PRESENCE_PENALTY,
-#     _STOP, _PROMPT_EXTRA, _POST_COMMENT) are ABSENT from the org pin's welded
-#     plugin — they are INERT until the pin moves to the release that welds
-#     plugin-review v2026.265.0505 (opencharly/charly#626, merged). Forwarding
-#     them now is forward-compatible: the engine ignores unknown env, and the
-#     bump is the single lever that activates them.
-#   * The workflow's built-in fallback TAG (v2026.254.1902) is OLDER and lacks
-#     several of these knobs; they are ACTIVE only through the org pin. Bumping
-#     the pin is what carries a new engine.
+#     _STOP, _PROMPT_EXTRA, _POST_COMMENT) are ALSO present in the org pin's
+#     welded plugin (verified with `strings`: each has a hit). Passing them is
+#     effective today, not inert.
+#   * There is NO built-in fallback TAG: ensure-charly uses vars.CHARLY_VERSION
+#     verbatim (it FAILS LOUD, exit 3, when the pin is unset/invisible), and
+#     verifies any on-PATH charly against the pin — downloading the pinned
+#     release when they differ. So the ACTIVE engine is always the org pin.
 #
 # No non-streaming / whole-generation RCA survives in this workflow (R5): the
 # superseded 2026-09-12 narrative is deleted, not retained as history.
@@ -224,20 +231,12 @@ jobs:
             fi
             echo "::warning::on-PATH charly $HAVE != pinned $WANT — downloading the pinned engine (the welded plugin-review differs; a stale engine produces no verdict)"
           fi
-          # PINNED charly release - the gate is deterministic; bump here per release
-          # (vars.CHARLY_VERSION overrides). No runtime latest-resolution: the
-          # releases/latest redirect is abuse-limited on shared runner IPs (curl exit 22).
-          # v2026.254.1902 is the first release whose plugin bundle carries
-          # plugin-review's timeout-class taxonomy + the INCONCLUSIVE terminal
-          # marker the Gate (inconclusive) step consumes. VERIFIED against the
-          # published asset, never asserted — strings of the bundled plugin-review
-          # extracted from charly-plugins-linux-amd64.tar.gz; the exact commands
-          # and their full output are in this PR's body, section
-          # "How tested — the pin's strings evidence" (pasted verbatim):
-          #   v2026.254.1902: "inconclusive: all %d attempts timed out " -> 1 hit
-          #                   "AI_REVIEW_ATTEMPT_TIMEOUT"                -> 1 hit
-          #                   "NOT a review verdict"                    -> 1 hit
-          #   v2026.251.1947: all three of the above                   -> 0 hits
+          # PINNED charly release - the gate is deterministic; bump here per release.
+          # No runtime latest-resolution: the releases/latest redirect is
+          # abuse-limited on shared runner IPs (curl exit 22). TAG is
+          # vars.CHARLY_VERSION verbatim — there is NO fallback default (an
+          # unset/invisible pin fails loud above); and an on-PATH charly is used
+          # ONLY when its version EQUALS the pin.
           # PER-RUN dir (runner.temp, wiped between jobs): on self-hosted runners
           # $HOME persists across jobs and a stale plugin binary there crashes
           # the gate (live evidence: plugin-review parseReviewArgs panic, exit 2,
@@ -280,7 +279,7 @@ jobs:
           # generation (the engine PR) removes the cause. A progressing generation
           # must never be cut off; only a SILENT one should fail — which is what
           # the idle bound is for.
-          # ACTIVE on the org pin v2026.263.2131 (its welded plugin-review has
+          # ACTIVE on the org pin v2026.267.0045 (its welded plugin-review has
           # `strings` hits for all three knobs — evidence in the body).
           # A DEFINED-EMPTY var is treated as UNSET by that engine: getenvAny
           # (candy/plugin-review/parse.go) returns "" for any env whose value is
@@ -314,7 +313,7 @@ jobs:
           AI_REVIEW_POST_COMMENT: ${{ vars.AI_REVIEW_POST_COMMENT || '' }}
           AI_REVIEW_TOOL_RESULT_MAX_BYTES: ${{ vars.AI_REVIEW_TOOL_RESULT_MAX_BYTES || '' }}
           # The GENERATION bounds (the measured root-cause fix, owned by the
-          # engine). ACTIVE on the org pin v2026.263.2131, whose welded
+          # engine). ACTIVE on the org pin v2026.267.0045, whose welded
           # plugin-review reads both (verified with `strings`). Empty means "use
           # the engine default": high thinking plus a max_tokens budget sized
           # above what thinking consumes — the combination measured to return a
