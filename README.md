@@ -130,8 +130,16 @@ gate is charly-native: plugin-review is welded into the charly release, driven b
 `charly review --plan review-plan.yml` (plan + prompt live in
 opencharly/action-review@main — the validator spec's single config source, updated without
 touching the workflow). The gate-mechanism version surface is the pinned charly release
-(`vars.CHARLY_VERSION`; the workflow default `v2026.254.1902` is bumped deliberately per
-release).
+(`vars.CHARLY_VERSION`) — a **mandatory** org variable: the workflow has **no bundled
+fallback**. If the pin is unset or set with visibility narrower than `all` (invisible to
+this public repo), the validator **fails loudly** (`exit 3`, the INCONCLUSIVE class) with
+the recovery command rather than silently downgrading to an older engine. Set it with:
+
+```
+gh variable set CHARLY_VERSION --org opencharly --body <tag> --visibility all
+```
+
+Bump it deliberately per release.
 
 ## Scope & evidence baseline (honest capability statement)
 
