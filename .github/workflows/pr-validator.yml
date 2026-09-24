@@ -197,8 +197,32 @@ jobs:
         env:
           CHARLY_VERSION: ${{ vars.CHARLY_VERSION || '' }}
         run: |
+          # ENGINE PIN ENFORCEMENT (the stale-engine gate defect). The gate must run
+          # the ORG-PINNED engine (vars.CHARLY_VERSION), because the engine's behaviour
+          # lives in the charly binary's WELDED plugin-review: the runaway/empty-completion
+          # fix landed in plugin-review v2026.264.1425 (the tool loop deleted), and any
+          # charly built before it welds the pre-fix engine that produces no verdict.
+          #
+          # The former `if command -v charly; then exit 0` trusted ANY on-PATH charly —
+          # so on a self-hosted runner whose image bakes an OLD charly (live: charly
+          # 2026.256.1316 -> plugin-review v2026.255.1648, the tool-loop engine) the pin
+          # was NEVER downloaded, the gate silently ran the stale engine, and every run
+          # returned no verdict (INCONCLUSIVE, check RED). An on-PATH charly is now used
+          # ONLY when its version EQUALS the pin; otherwise the pinned release is
+          # downloaded and PREPENDED to PATH, so the pinned engine always wins.
+          if [ -z "${CHARLY_VERSION:-}" ]; then
+            echo "::error::vars.CHARLY_VERSION is unset or not visible to this repo — refusing to run an unpinned review engine"
+            exit 3
+          fi
+          TAG="$CHARLY_VERSION"
+          WANT="${TAG#v}"   # the pin tag minus its leading 'v', e.g. v2026.267.0045 -> 2026.267.0045
           if command -v charly >/dev/null 2>&1; then
-            echo "charly present: $(charly version)"; exit 0
+            HAVE="$(charly version 2>/dev/null | grep -oE '[0-9]{4}\.[0-9]{3}\.[0-9]{4}' | head -1)"
+            if [ "$HAVE" = "$WANT" ]; then
+              echo "charly on PATH matches the pin ($HAVE) — using it"
+              exit 0
+            fi
+            echo "::warning::on-PATH charly $HAVE != pinned $WANT — downloading the pinned engine (the welded plugin-review differs; a stale engine produces no verdict)"
           fi
           # PINNED charly release - the gate is deterministic; bump here per release
           # (vars.CHARLY_VERSION overrides). No runtime latest-resolution: the
@@ -214,7 +238,6 @@ jobs:
           #                   "AI_REVIEW_ATTEMPT_TIMEOUT"                -> 1 hit
           #                   "NOT a review verdict"                    -> 1 hit
           #   v2026.251.1947: all three of the above                   -> 0 hits
-          TAG="${CHARLY_VERSION:-v2026.254.1902}"
           # PER-RUN dir (runner.temp, wiped between jobs): on self-hosted runners
           # $HOME persists across jobs and a stale plugin binary there crashes
           # the gate (live evidence: plugin-review parseReviewArgs panic, exit 2,
