@@ -15,11 +15,11 @@ copy inherits the files here — so a change lands **once**, not in every repo.
   it creates ONE org ruleset carrying the `workflows` rule (pointing at this repo's
   required workflow) *and* the ordinary branch rules (required status check, no
   force-push, no deletion, no creation), applied to every active non-fork
-  `main`-default repo. It also enforces the one setting that cannot move to the org
-  (`allow_auto_merge`, a per-repo setting with no org default). `apply` enables the
-  org ruleset, deletes the now-redundant per-repo rulesets, and enforces
-  `allow_auto_merge`; `verify` asserts the whole end state. Its offline mock-`gh`
-  test is `scripts/org-ruleset_test.sh`.
+  `main`-default repo. It also enforces the two settings that cannot move to the org
+  (`allow_auto_merge` and `delete_branch_on_merge`, per-repo settings with no org
+  default). `apply` enables the org ruleset, deletes the now-redundant per-repo
+  rulesets, and enforces both settings; `verify` asserts the whole end state. Its
+  offline mock-`gh` test is `scripts/org-ruleset_test.sh`.
 - **`scripts/retire-per-repo-dispatchers.sh`** +
   **`.github/workflows/retire-per-repo-dispatchers.yml`** — the one-shot cutover
   step that DELETES each repo's redundant `.github/workflows/pr-validator.yml`

@@ -6,11 +6,14 @@ STATE="$(mktemp -d)"
 trap 'rm -rf "$STATE"' EXIT
 
 # Mock state: two target repos. `alpha` carries the per-repo ruleset + dispatcher;
-# `beta` is clean. `allow_auto_merge` is false on beta (the regression the script
-# must fix) and true on alpha. `alpha` also carries legacy branch protection (the
-# script must remove it; verify must assert its absence).
+# `beta` is clean. `allow_auto_merge` and `delete_branch_on_merge` are false on beta
+# (the regressions the script must fix) and true on alpha. `alpha` also carries
+# legacy branch protection (the script must remove it; verify must assert its
+# absence).
 printf 'true\n'  >"$STATE/auto_alpha"
 printf 'false\n' >"$STATE/auto_beta"
+printf 'true\n'  >"$STATE/dbom_alpha"
+printf 'false\n' >"$STATE/dbom_beta"
 printf 'present\n' >"$STATE/ruleset_alpha"
 printf 'present\n' >"$STATE/disp_alpha"
 printf 'present\n' >"$STATE/legacy_alpha"
@@ -33,13 +36,14 @@ gh() {
   fi
   [[ "$1" == api ]] || return 90
   shift
-  local method=GET include=0 input="" path=""
+  local raw="$*"
+  local method=GET include=0 input="" path="" jqexpr=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --method) method="$2"; shift 2 ;;
       --include) include=1; shift ;;
       --input) input="$2"; shift 2 ;;
-      --jq) shift 2 ;;
+      --jq) jqexpr="$2"; shift 2 ;;
       --) shift ;;
       --*) shift ;;
       *) [[ -z "$path" ]] && path="$1"; shift ;;
@@ -87,9 +91,20 @@ JSON
   [[ "$path" =~ ^repos/test/(alpha|beta)(/|$) ]] && repo="${BASH_REMATCH[1]}"
 
   if [[ -n "$repo" ]]; then
-    if [[ "$path" == "repos/test/$repo" && "$method" == GET ]]; then cat "$STATE/auto_$repo"; return; fi
+    if [[ "$path" == "repos/test/$repo" && "$method" == GET ]]; then
+      # The two per-repo settings are read by their own `--jq`. Return the setting the
+      # caller asked for (default = allow_auto_merge) so a single mock endpoint serves
+      # both probes.
+      if [[ "$jqexpr" == *delete_branch_on_merge* ]]; then cat "$STATE/dbom_$repo"; else cat "$STATE/auto_$repo"; fi
+      return
+    fi
     if [[ "$path" == "repos/test/$repo" && "$method" == PATCH ]]; then
-      printf 'true\n' >"$STATE/auto_$repo"; printf 'PATCH %s auto\n' "$repo" >>"$STATE/transcript"; printf 'true\n'; return
+      if [[ "$raw" == *delete_branch_on_merge* ]]; then
+        printf 'true\n' >"$STATE/dbom_$repo"; printf 'PATCH %s dbom\n' "$repo" >>"$STATE/transcript"; printf 'true\n'
+      else
+        printf 'true\n' >"$STATE/auto_$repo"; printf 'PATCH %s auto\n' "$repo" >>"$STATE/transcript"; printf 'true\n'
+      fi
+      return
     fi
     if [[ "$path" == "repos/test/$repo/rulesets" && "$method" == GET ]]; then
       if [[ "$(cat "$STATE/ruleset_$repo" 2>/dev/null)" == present ]]; then printf '99\n'; fi
@@ -129,6 +144,8 @@ grep -q 'deleted alpha ruleset' "$STATE/transcript" || { echo "FAIL: alpha rules
 grep -q 'deleted alpha legacy'  "$STATE/transcript" || { echo "FAIL: alpha legacy protection not removed" >&2; exit 1; }
 grep -q 'PATCH beta auto'       "$STATE/transcript" || { echo "FAIL: beta auto-merge not enabled" >&2; exit 1; }
 [[ "$(cat "$STATE/auto_beta")" == true ]] || { echo "FAIL: beta auto-merge state not true" >&2; exit 1; }
+grep -q 'PATCH beta dbom'       "$STATE/transcript" || { echo "FAIL: beta delete-branch-on-merge not enabled" >&2; exit 1; }
+[[ "$(cat "$STATE/dbom_beta")" == true ]] || { echo "FAIL: beta delete-branch-on-merge state not true" >&2; exit 1; }
 grep -q 'PATCH alpha' "$STATE/transcript" && { echo "FAIL: alpha auto-merge must not be re-patched" >&2; exit 1; }
 
 # The posted payload must render the `repository_name.exclude` set as `[]`, not
@@ -162,6 +179,13 @@ if OPENCHARLY_ORG=test "$root/scripts/org-ruleset.sh" verify >/dev/null 2>&1; th
   echo "FAIL: verify must fail when legacy branch protection reappears" >&2; exit 1
 fi
 rm -f "$STATE/legacy_beta"
+
+# A regression — delete_branch_on_merge drifts false — must fail verify.
+printf 'false\n' >"$STATE/dbom_beta"
+if OPENCHARLY_ORG=test "$root/scripts/org-ruleset.sh" verify >/dev/null 2>&1; then
+  echo "FAIL: verify must fail when delete_branch_on_merge is not true" >&2; exit 1
+fi
+printf 'true\n' >"$STATE/dbom_beta"
 
 # A scope regression — the ruleset's exclude set drifts — must fail verify.
 printf 'true\n' >"$STATE/scope_mismatch"
