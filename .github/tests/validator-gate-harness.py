@@ -975,14 +975,13 @@ def run_harness():
          "structural: header routes the durable generation bound to its owner "
          "(the engine, opencharly/plugin-review#10)")
     note("the generation knobs are INERT" not in text and "INERT until the engine release" not in text,
-         "structural: header no longer claims the generation knobs are INERT — the "
-         "org pin v2026.263.2131 welds an engine that reads them, so claiming "
-         "inert would be a stale divergence")
-    note("v2026.263.2131" in text and "plugin-review@v2026.263.1956" in text and
-         "INERT until the pin moves" in text,
+         "structural: header no longer claims the generation knobs are INERT")
+    note("v2026.267.0045" in text and "plugin-review@v2026.266.1944" in text,
          "structural: header's inventory names the ACTUAL org pin and its welded "
-         "plugin-review, and marks the sampling/penalty knobs INERT until the pin "
-         "moves (verified with `strings`, not asserted)")
+         "plugin-review")
+    note("NO built-in fallback TAG" in text and 'TAG="$CHARLY_VERSION"' in text,
+         "structural: the header states there is NO fallback TAG (the pin is used "
+         "verbatim) — the claim the pin-enforcement fix made true")
     note("the engine is not at fault" not in text.lower(),
          "structural: no emitted narrative exonerates the engine of the unbounded "
          "generation (header and emitted RCA agree)")
