@@ -32,5 +32,7 @@ jobs:
         run: bash scripts/retire-per-repo-dispatchers_test.sh
       - name: Run the repo-bootstrap script test (offline, mock gh)
         run: bash scripts/bootstrap-repo-main_test.sh
-      - name: Run the rerun-listener distributor test (offline, mock gh)
-        run: bash scripts/distribute-rerun-listener_test.sh
+      - name: Run the rerun-sweep test (offline, mock gh)
+        run: bash scripts/sweep-rerun_test.sh
+      - name: Run the rerun-label ensure test (offline, mock gh)
+        run: bash scripts/ensure-rerun-label_test.sh
