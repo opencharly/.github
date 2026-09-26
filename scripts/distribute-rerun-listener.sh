@@ -47,15 +47,22 @@ repos_out="$(discover_repos)" || { echo "FATAL: gh repo list (targets) failed" >
 [[ -n "$repos_out" ]] || { echo "no active repositories discovered for $ORG" >&2; exit 1; }
 mapfile -t repos <<<"$repos_out"
 
-# listener_state <repo> — prints "<sha>\t<content_b64>" (sha empty when absent).
+# listener_state <repo> — prints "<sha>\t<content_b64>" (sha empty when ABSENT). A genuine
+# 404 is "absent" (install); any OTHER non-200 probe result is FATAL (never silently read as
+# absent — that would attempt a CREATE PUT against an existing file).
 listener_state() {
-  local repo="$1" json
-  if ! json="$(gh api "repos/$ORG/$repo/contents/$LISTENER_PATH" 2>/dev/null)"; then
-    printf '\t\n'; return 0
-  fi
-  printf '%s\t%s\n' \
-    "$(printf '%s' "$json" | jq -r '.sha // ""')" \
-    "$(printf '%s' "$json" | jq -r '.content // ""' | tr -d '\n')"
+  local repo="$1" code body
+  code="$(api_status "repos/$ORG/$repo/contents/$LISTENER_PATH")"
+  case "$code" in
+    200)
+      body="$(gh api "repos/$ORG/$repo/contents/$LISTENER_PATH")"
+      printf '%s\t%s\n' \
+        "$(printf '%s' "$body" | jq -r '.sha // ""')" \
+        "$(printf '%s' "$body" | jq -r '.content // ""' | tr -d '\n')"
+      ;;
+    404) printf '\t\n' ;;
+    *)   echo "FATAL: $repo contents probe -> HTTP ${code:-none}" >&2; exit 1 ;;
+  esac
 }
 
 created=0 updated=0 unchanged=0 failed=0
