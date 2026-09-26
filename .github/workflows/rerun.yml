@@ -1,0 +1,78 @@
+# ORG-WIDE `rerun` CHANNEL — the capability-free body-fix path (ONE source).
+#
+# Adding a `rerun` label to a PR re-runs its failed `charly/pr-validator` run: a re-run reuses
+# the SAME GITHUB_SHA and updates THAT run's `validate / validate` check run IN PLACE (no
+# duplicate same-name check run), so it clears the POISON state and re-reads the corrected PR
+# body. No empty commit.
+#
+# This workflow does BOTH halves, org-wide, with NO per-repo file and NO `workflows: write`:
+#   1. ensure-rerun-label  — create the `rerun` label in every repo (needs `issues: write`), so
+#                            an operator can add it to a PR (a label is repo-scoped in GitHub).
+#   2. sweep-rerun         — on a schedule, find open `rerun`-labeled PRs org-wide and re-run
+#                            each one's failed validator run, then remove the label (needs
+#                            `actions: write` + `pull-requests: write`).
+#
+# The charly-auto-merge App already holds all three permissions (issues/actions/pull_requests
+# write) — no capability escalation, no `checks: write`.
+#
+# WHY OUT-OF-BAND: a REQUIRED workflow (org ruleset) acts ONLY on the default push-driven
+# pull_request types and ignores `on.types` — MEASURED (a body edit did not fire it even with
+# `edited` listed; a draft->ready transition did not fire it even with `ready_for_review`
+# listed). An out-of-band label + sweep decouples the channel from that constraint.
+name: rerun
+
+on:
+  schedule:
+    # The sweep runs every 10 minutes; the label-ensure runs on the same tick (idempotent).
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  actions: write
+  pull-requests: write
+
+jobs:
+  ensure-label:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create bot token (charly-auto-merge App)
+        id: app
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547
+        with:
+          app-id: ${{ secrets.CHARLY_AUTO_MERGE_APP_ID }}
+          private-key: ${{ secrets.CHARLY_AUTO_MERGE_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - uses: actions/checkout@v7
+
+      - name: Run the label-ensure test (offline, mock gh)
+        run: bash scripts/ensure-rerun-label_test.sh
+
+      - name: Ensure the `rerun` label exists in every repo (org-wide)
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: bash scripts/ensure-rerun-label.sh
+
+  sweep:
+    needs: ensure-label
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create bot token (charly-auto-merge App)
+        id: app
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547
+        with:
+          app-id: ${{ secrets.CHARLY_AUTO_MERGE_APP_ID }}
+          private-key: ${{ secrets.CHARLY_AUTO_MERGE_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - uses: actions/checkout@v7
+
+      - name: Run the sweep test (offline, mock gh)
+        run: bash scripts/sweep-rerun_test.sh
+
+      - name: Sweep the org for `rerun`-labeled PRs (org-wide)
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: bash scripts/sweep-rerun.sh
