@@ -1,0 +1,62 @@
+# ORG-WIDE RERUN LISTENER — install at .github/workflows/rerun-listener.yml
+#
+# Copy VERBATIM into every repo (scripts/distribute-rerun-listener.sh). It is a PLAIN
+# per-repo workflow, NOT part of the org required workflow: a REQUIRED workflow (the org
+# ruleset `workflows` rule) acts ONLY on the default push-driven pull_request types
+# (`opened`/`synchronize`/`reopened`) and IGNORES `on.types` for anything else — MEASURED: a
+# body edit did not fire the required workflow even with `edited` listed, and a
+# draft->ready transition did not fire it even with `ready_for_review` listed. A PLAIN
+# workflow with the same `types:` DOES fire, so the listener must live here.
+#
+# WHAT IT DOES. Adding a `rerun` label to a PR re-runs that PR head's FAILED
+# `charly/pr-validator` run. A re-run reuses the SAME GITHUB_SHA and updates THAT run's
+# `validate / validate` check run IN PLACE (no duplicate same-name check run), so it clears
+# the POISON state and re-reads the corrected PR body — the sanctioned, capability-free way
+# to clear a body-only BLOCK with NO empty commit.
+#
+# CAPABILITY-FREE: needs only `actions: write` on the repo's own GITHUB_TOKEN (no
+# `checks: write`, no guardrail escalation). The validator fetches the PR LIVE by number, so
+# the re-run reads the body as it is NOW.
+#
+# LOOP-SAFE: this workflow only POSTs a re-run request — it edits no PR body/title and adds
+# no label, so it cannot re-fire itself.
+name: rerun-listener
+
+on:
+  pull_request:
+    types: [labeled]
+
+permissions:
+  actions: write
+  pull-requests: read
+  contents: read
+
+jobs:
+  rerun:
+    if: github.event.label.name == 'rerun' && github.event.pull_request.head.repo.fork == false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Re-run the failed validator run on this PR head (same SHA, same check-run)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          # The PR head SHA — NOT the workflow's merge-branch GITHUB_SHA.
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          echo "rerun label on $REPO#$PR head=$HEAD"
+          # The newest FAILED validator run whose head is exactly this PR head. Re-running
+          # THAT run reuses its GITHUB_SHA and updates its own `validate / validate` check run
+          # in place — no second same-name check run (which would re-poisons the rollup).
+          id="$(gh run list --repo "$REPO" --limit 100 \
+            --json databaseId,headSha,name,conclusion \
+            --jq '.[] | select(.headSha=="'"$HEAD"'") | select(.name=="charly/pr-validator") | select(.conclusion=="failure") | .databaseId' \
+            | head -1)"
+          if [ -z "$id" ]; then
+            echo "no failed charly/pr-validator run for $HEAD — nothing to re-run"
+            exit 0
+          fi
+          echo "re-running validator run $id (head $HEAD)"
+          gh api -X POST "repos/$REPO/actions/runs/$id/rerun" >/dev/null
+          echo "re-run triggered: the same check run re-executes against the corrected body"

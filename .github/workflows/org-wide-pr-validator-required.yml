@@ -21,21 +21,20 @@ name: charly/pr-validator
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review, edited]
+    types: [opened, synchronize, reopened, ready_for_review]
 
-# `edited` is included ON PURPOSE: the validator validates the PR — the diff at the branch
-# head AND the body — when its run is triggered. Without `edited`, a body-only fix never
-# re-runs, so authors were forced to push an EMPTY commit just to re-trigger the gate. With
-# `edited` (a valid `pull_request` activity type; the PR title/body edit), a body fix re-runs
-# the gate on its own — no empty commit. It is LOOP-SAFE: nothing in the org edits a PR body
-# or title (the validator only posts issue comments + `gh pr update-branch`, which fire
-# `issue_comment` / `synchronize`, never `edited`), so no self-trigger.
-#
-# NOTE on a same-head re-run: two runs on ONE head produce two same-name `validate / validate`
-# check runs; GitHub requires them ALL to pass, so a COMPLETED prior FAILURE can keep a green
-# re-run BLOCKED (the POISON state). The capability-free remedy is `gh run rerun <run-id>` on
-# the failed run (same GITHUB_SHA/ref, the SAME run re-executes and updates ITS check run — no
-# duplicate is minted), never a `gh workflow run` re-dispatch (a NEW run = a NEW duplicate).
+# WHY NO `edited` HERE (the dotgithub#119 lesson, MEASURED). A REQUIRED workflow (the org
+# ruleset `workflows` rule) acts ONLY on the default push-driven pull_request types —
+# `opened` / `synchronize` / `reopened`. It IGNORES the `on.types` list for anything else:
+# MEASURED — a body edit did NOT run this workflow even with `edited` listed, and a
+# draft->ready transition did NOT run it even with `ready_for_review` listed (which was
+# already there). A PLAIN per-repo workflow with the same `types:` DOES fire on those events,
+# so the event is delivered — the required-workflow trigger path simply does not act on
+# non-default activity types. A body-only BLOCK is therefore cleared by re-running the
+# EXISTING failed run (`gh run rerun <run-id>`): a re-run reuses the SAME GITHUB_SHA and
+# updates THAT run's check run IN PLACE — no duplicate same-name check run, no POISON. The
+# `rerun`-label channel that automates this lives in a PLAIN per-repo workflow distributed by
+# `.github/workflows/distribute-rerun-listener.yml` (dotgithub#121) — it CANNOT live here.
 
 # ONE run per PR: a re-dispatch/push cancels the in-flight run, so the head can never
 # carry duplicate same-name `validate / validate` check runs (a duplicate FAILED run

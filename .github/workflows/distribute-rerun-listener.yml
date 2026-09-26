@@ -1,0 +1,58 @@
+# DISTRIBUTE THE ORG-WIDE RERUN LISTENER (install/update in every repo).
+#
+# WHY A WORKFLOW: writing `.github/workflows/*` needs GitHub Apps' `workflows: write`
+# permission (distinct from `contents: write`), and the commit lands on a protected `main`, so
+# it must be authored by the ruleset BYPASS actor (the `charly-auto-merge` App). This workflow
+# mints that App token and exports it as GH_TOKEN; the install/update logic lives in
+# scripts/distribute-rerun-listener.sh (a testable script, covered by the offline mock-`gh`
+# test scripts/distribute-rerun-listener_test.sh).
+#
+# WHY IT IS A DISTRIBUTOR, NOT PART OF THE REQUIRED WORKFLOW. The org gate is a REQUIRED
+# workflow (the org ruleset `workflows` rule). MEASURED: a required workflow acts ONLY on the
+# default push-driven pull_request types and IGNORES `on.types` for anything else — a body edit
+# did not fire it even with `edited` listed, and a draft->ready transition did not fire it even
+# with `ready_for_review` listed. A PLAIN per-repo workflow with the same `types:` DOES fire,
+# so the `rerun`-label listener MUST be a plain per-repo file: adding a `rerun` label re-runs a
+# PR's failed validator run (same SHA, same check run — no duplicate, no POISON), the
+# sanctioned, capability-free way to clear a body-only BLOCK with no empty commit.
+#
+# REQUIRED APP PERMISSION: the App MUST hold BOTH `contents: write` (ruleset bypass) AND
+# `workflows: write` (required by a PUT to `.github/workflows/*`). The script aborts with that
+# remediation on a 403 rather than churning.
+#
+# RUN: dispatch this workflow (idempotent — identical content is skipped).
+name: distribute-rerun-listener
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - org-wide-rerun-listener.yml
+      - scripts/distribute-rerun-listener.sh
+
+permissions:
+  contents: write
+
+jobs:
+  distribute:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create bot token (charly-auto-merge App)
+        id: app
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547
+        with:
+          app-id: ${{ secrets.CHARLY_AUTO_MERGE_APP_ID }}
+          private-key: ${{ secrets.CHARLY_AUTO_MERGE_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - uses: actions/checkout@v7
+
+      - name: Run the distributor test (offline, mock gh)
+        run: bash scripts/distribute-rerun-listener_test.sh
+
+      - name: Install/update the rerun listener in every repo (org-wide)
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: bash scripts/distribute-rerun-listener.sh
