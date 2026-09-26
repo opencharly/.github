@@ -58,8 +58,8 @@ copy inherits the files here — so a change lands **once**, not in every repo.
   `scripts/org-ruleset_test.sh` (the owner script's offline mock-`gh` test) so
   the org-ruleset cutover logic is exercised on every `.github` PR. Coverage that
   never runs enforces nothing.
-- **`scripts/sweep-rerun.sh`** +
-  **`.github/workflows/sweep-rerun.yml`** — the org-wide `rerun`-label channel
+- **`scripts/sweep-rerun.sh`** + **`scripts/ensure-rerun-label.sh`** +
+  **`.github/workflows/rerun.yml`** — the org-wide `rerun`-label channel
   that clears a **body-only BLOCK with no empty commit**. Adding a `rerun` label
   to a PR re-runs its FAILED `charly/pr-validator` run; a re-run reuses the SAME
   `GITHUB_SHA` and updates THAT run's `validate / validate` check run IN PLACE

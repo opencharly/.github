@@ -3,13 +3,12 @@ set -euo pipefail
 
 # sweep-rerun.sh — the org-wide `rerun` channel (ONE source, no per-repo files).
 #
-# WHY A SWEEP, NOT A PER-REPO LISTENER. The org ships a plain per-repo `rerun-listener`
-# (scripts/distribute-rerun-listener.sh) that re-runs the validator the instant a `rerun` label
-# is added. It is the FAST path, but installing it org-wide needs a GitHub App with
-# `workflows: write` (a PUT to `.github/workflows/*`). This sweep is the FALLBACK that needs
-# NO per-repo file and NO `workflows: write`: it runs from THIS repo on a schedule, searches
-# the org for open `rerun`-labeled PRs, and re-runs each one's failed validator run with the
-# token's `actions: write`.
+# WHY A SWEEP. The `rerun` channel is a LABEL plus this org-wide sweep — no per-repo
+# workflow file. (An earlier design installed a plain per-repo `rerun-listener`; it was
+# REMOVED because installing a workflow file org-wide needs a GitHub App with `workflows:
+# write`, which charly-auto-merge lacks and GitHub provides no API to grant.) Instead this
+# sweep runs from THIS repo on a schedule, searches the org for open `rerun`-labeled PRs, and
+# re-runs each one's failed validator run with the token's `actions: write`.
 #
 # WHAT IT DOES per matching PR: find the newest FAILED `charly/pr-validator` run whose head is
 # the PR's current head, POST /actions/runs/<id>/rerun (a re-run reuses the SAME GITHUB_SHA and
