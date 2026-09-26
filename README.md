@@ -58,6 +58,21 @@ copy inherits the files here — so a change lands **once**, not in every repo.
   `scripts/org-ruleset_test.sh` (the owner script's offline mock-`gh` test) so
   the org-ruleset cutover logic is exercised on every `.github` PR. Coverage that
   never runs enforces nothing.
+- **`org-wide-rerun-listener.yml`** +
+  **`scripts/distribute-rerun-listener.sh`** +
+  **`.github/workflows/distribute-rerun-listener.yml`** — the `rerun`-label
+  channel that clears a **body-only BLOCK with no empty commit**. Adding a `rerun`
+  label re-runs a PR head's FAILED `charly/pr-validator` run; a re-run reuses the
+  SAME `GITHUB_SHA` and updates THAT run's `validate / validate` check run IN
+  PLACE (no duplicate same-name check run), so it clears the POISON state and
+  re-reads the corrected PR body. It is **capability-free** (`actions: write`
+  only — no `checks: write`). Because a REQUIRED workflow acts ONLY on the default
+  push-driven `pull_request` types and IGNORES `on.types` for anything else
+  (MEASURED: a body edit did not fire it even with `edited` listed; a draft→ready
+  transition did not fire it even with `ready_for_review` listed), the listener
+  MUST be a PLAIN per-repo file — the distributor installs `rerun-listener.yml`
+  into every repo (idempotent, `workflows: write` App token). Its offline
+  mock-`gh` test is `scripts/distribute-rerun-listener_test.sh`.
 
 Future org-wide defaults (issue templates, `CONTRIBUTING.md`, `SECURITY.md`) belong
 here too — one source, inherited everywhere.
