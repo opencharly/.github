@@ -21,21 +21,26 @@ name: charly/pr-validator
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review, edited]
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
 
-# `edited` is included ON PURPOSE: the validator validates the PR — the diff at the branch
-# head AND the body — when its run is triggered. Without `edited`, a body-only fix never
-# re-runs, so authors were forced to push an EMPTY commit just to re-trigger the gate. With
-# `edited` (a valid `pull_request` activity type; the PR title/body edit), a body fix re-runs
-# the gate on its own — no empty commit. It is LOOP-SAFE: nothing in the org edits a PR body
-# or title (the validator only posts issue comments + `gh pr update-branch`, which fire
-# `issue_comment` / `synchronize`, never `edited`), so no self-trigger.
+# WHY `labeled` IS THE RERUN CHANNEL (and `edited` is NOT).
 #
-# NOTE on a same-head re-run: two runs on ONE head produce two same-name `validate / validate`
-# check runs; GitHub requires them ALL to pass, so a COMPLETED prior FAILURE can keep a green
-# re-run BLOCKED (the POISON state). The capability-free remedy is `gh run rerun <run-id>` on
-# the failed run (same GITHUB_SHA/ref, the SAME run re-executes and updates ITS check run — no
-# duplicate is minted), never a `gh workflow run` re-dispatch (a NEW run = a NEW duplicate).
+# The validator validates the PR — the diff at the branch head AND the body — every time it
+# runs, and it fetches the PR LIVE by number. So a body-only fix after a BLOCK needs no new
+# commit: it needs the SAME run re-executed, which re-reads the corrected body. GitHub's re-run
+# reuses the SAME GITHUB_SHA and updates THAT run's check run IN PLACE — no duplicate same-name
+# check run — so it clears the POISON state (a completed same-name FAILURE that keeps a green
+# re-run BLOCKED; see the POISON section in the git-workflow skill).
+#
+# The trigger for that is a `rerun` LABEL. MEASURED: `pull_request: edited` (a body-only change)
+# did NOT fire this required workflow (a plain per-repo `edited` workflow in the same repo DID,
+# so the event is delivered — the required-workflow trigger path simply does not act on it). A
+# `rerun`-label add is the explicit, capability-free channel: the `rerun-validator` job below
+# turns it into `gh run rerun` on THIS head's failed validator run — only `actions: write`
+# (already granted), same SHA, same check run, no duplicate, no POISON.
+#
+# LOOP-SAFE: the rerun job only POSTs a re-run request — it edits no body/title and adds no
+# label, so it cannot re-fire itself.
 
 # ONE run per PR: a re-dispatch/push cancels the in-flight run, so the head can never
 # carry duplicate same-name `validate / validate` check runs (a duplicate FAILED run
@@ -61,7 +66,9 @@ permissions:
 jobs:
   validate:
     name: validate
-    if: github.event.pull_request.head.repo.fork == false
+    # Skip the full AI review on a label-only event: a `rerun` label re-runs the EXISTING run
+    # via `rerun-validator`, it does not review the same head again.
+    if: github.event.pull_request.head.repo.fork == false && github.event.action != 'labeled'
     uses: opencharly/.github/.github/workflows/pr-validator.yml@main
     with:
       pr-number: ${{ github.event.pull_request.number }}
@@ -73,3 +80,37 @@ jobs:
       ai_review_model: ${{ vars.AI_REVIEW_MODEL }}
       ai_review_base_url: ${{ vars.AI_REVIEW_BASE_URL }}
     secrets: inherit
+
+  # The `rerun`-label listener: the sanctioned, capability-free way to clear a body-only BLOCK
+  # after fixing the PR body (no empty commit). It re-runs THIS head's failed
+  # `charly/pr-validator` run, which re-reads the corrected body and updates the SAME
+  # `validate / validate` check run in place (same SHA -> no duplicate, no POISON).
+  rerun-validator:
+    name: rerun-validator
+    if: github.event.pull_request.head.repo.fork == false && github.event.action == 'labeled' && github.event.label.name == 'rerun'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Re-run the failed validator run on this PR head (same SHA, same check-run)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          # The PR head SHA — NOT the workflow's merge-branch GITHUB_SHA.
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          echo "rerun label on $REPO#$PR head=$HEAD"
+          # The newest FAILED validator run whose head is exactly this PR head. A re-run of
+          # THAT run reuses its GITHUB_SHA and updates its own `validate / validate` check run
+          # in place — no second same-name check run (which would re-poisons the rollup).
+          id="$(gh run list --repo "$REPO" --limit 100 \
+            --json databaseId,headSha,name,conclusion \
+            --jq '.[] | select(.headSha=="'"'"'"$HEAD"'"'"'") | select(.name=="charly/pr-validator") | select(.conclusion=="failure") | .databaseId' \
+            | head -1)"
+          if [ -z "$id" ]; then
+            echo "no failed charly/pr-validator run for $HEAD — nothing to re-run"
+            exit 0
+          fi
+          echo "re-running validator run $id (head $HEAD)"
+          gh api -X POST "repos/$REPO/actions/runs/$id/rerun" >/dev/null
+          echo "re-run triggered: the same check run re-executes against the corrected body"
