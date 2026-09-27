@@ -54,9 +54,8 @@ SCENARIOS ASSERTED END TO END (exit code + classification output + PR comment)
 
   Plus structural guards: the review step contains NO in-job retry (no sleep, no
   for-attempt loop) - the R4 regression guard for the dropped retry band-aid - the
-  ensure-charly step carries NO silent fallback TAG and FAILS LOUDLY (exit 3) when
-  vars.CHARLY_VERSION is missing or repo-invisible (the silent-fallback incident),
-  and the header names the CORRECTED root cause (a NON-STREAMING request under a
+  workflow pins a charly release WITH the taxonomy marker, never the old one, and
+  the header names the CORRECTED root cause (a NON-STREAMING request under a
   whole-generation HTTP deadline that a too-short attempt cap cut off -
   opencharly/.github#91), asserts the superseded throttled-egress RCA is GONE,
   documents the org-settable AI_REVIEW_ATTEMPT_TIMEOUT lever, and carries no
@@ -976,14 +975,13 @@ def run_harness():
          "structural: header routes the durable generation bound to its owner "
          "(the engine, opencharly/plugin-review#10)")
     note("the generation knobs are INERT" not in text and "INERT until the engine release" not in text,
-         "structural: header no longer claims the generation knobs are INERT — the "
-         "org pin v2026.263.2131 welds an engine that reads them, so claiming "
-         "inert would be a stale divergence")
-    note("v2026.263.2131" in text and "plugin-review@v2026.263.1956" in text and
-         "INERT until the pin moves" in text,
+         "structural: header no longer claims the generation knobs are INERT")
+    note("v2026.267.0045" in text and "plugin-review@v2026.266.1944" in text,
          "structural: header's inventory names the ACTUAL org pin and its welded "
-         "plugin-review, and marks the sampling/penalty knobs INERT until the pin "
-         "moves (verified with `strings`, not asserted)")
+         "plugin-review")
+    note("NO built-in fallback TAG" in text and 'TAG="$CHARLY_VERSION"' in text,
+         "structural: the header states there is NO fallback TAG (the pin is used "
+         "verbatim) — the claim the pin-enforcement fix made true")
     note("the engine is not at fault" not in text.lower(),
          "structural: no emitted narrative exonerates the engine of the unbounded "
          "generation (header and emitted RCA agree)")
@@ -1079,75 +1077,29 @@ def run_harness():
     # expect_comment_contains requires the class in the posted INCONCLUSIVE notice. It is
     # deliberately NOT asserted by a text check (a source-text match is structural, not
     # functional, and must not be labelled the other way).
-    # FAIL-LOUD PIN GUARD (the silent-fallback incident fix). The ensure-charly step
-    # must FAIL the run when vars.CHARLY_VERSION is missing or not visible to the
-    # repo, never silently downgrade to a bundled engine whose welded plugin-review
-    # may not read the measured AI_REVIEW_* knobs. Asserted STRUCTURALLY (the old
-    # silent-fallback default is gone; the pin is used verbatim) and FUNCTIONALLY
-    # (the real step body is executed with the pin unset and no charly on PATH).
+    # ENGINE PIN ENFORCEMENT (the stale-engine gate defect). The former ensure-charly
+    # trusted ANY on-PATH charly (`if command -v charly; then exit 0`), so on a
+    # self-hosted runner whose image bakes an OLD charly the org pin was never
+    # downloaded and the gate silently ran the STALE welded plugin-review (the
+    # pre-fix tool-loop engine -> no verdict, check RED). The step must now refuse an
+    # unpinned run AND verify the on-PATH charly against the pin.
     ensure_run = find_step(steps, "id", "ensure-charly")["run"]
-    note("v2026.254.1902" not in ensure_run,
-         "structural: the silent fallback default v2026.254.1902 is GONE from the "
-         "resolution (the header quotes it only as the incident narrative)")
-    note("v2026.251.1947" not in ensure_run,
-         "structural: the pre-taxonomy release v2026.251.1947 is not a fallback either")
+    note("${CHARLY_VERSION:-v2026.254.1902}" not in ensure_run and
+         "${CHARLY_VERSION:-v2026.251.1947}" not in ensure_run,
+         "structural: the silent-fallback default VALUE is GONE from ensure-charly "
+         "(an unset pin must never downgrade to a bundled engine)")
+    note('if [ -z "${CHARLY_VERSION:-}" ]' in ensure_run,
+         "structural: the emptiness check is the -z GUARD (exit 3), not a default value")
     note('TAG="$CHARLY_VERSION"' in ensure_run,
-         "structural: the pin is used VERBATIM (no default expansion) on the download path")
+         "structural: the pin is used VERBATIM (no `:-default` expansion)")
     note("::error::" in ensure_run and "exit 3" in ensure_run,
          "structural: a missing pin is a LOUD ::error:: that exits 3 (the INCONCLUSIVE "
-         "class), not a ::warning:: or a fallback")
-    guard_tmp = tempfile.mkdtemp(prefix="validator-pin-guard.")
-    guard_script = os.path.join(guard_tmp, "ensure-charly.sh")
-    # Substitute ${{ ... }} exactly as GitHub does before running the step, so the
-    # executed body is the real one (the guard precedes any expression that matters).
-    guard_ns = build_ns({}, guard_tmp, guard_tmp)
-    with open(guard_script, "w", encoding="utf-8") as fh:
-        fh.write(subst(ensure_run, guard_ns))
-    bash_path = shutil.which("bash")
-    guard_env = dict(os.environ)
-    guard_env["GITHUB_REPOSITORY"] = "opencharly/harness-fixture"
-    guard_env.pop("CHARLY_VERSION", None)
-    # PATH with NO charly: `command -v charly` fails, so the step reaches the guard.
-    # bash is invoked by absolute path (the guard body only uses bash builtins).
-    guard_env["PATH"] = guard_tmp
-    guard_proc = subprocess.run(
-        [bash_path, "--noprofile", "--norc", "-eo", "pipefail", guard_script],
-        cwd=guard_tmp, env=guard_env, stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT, universal_newlines=True)
-    guard_out = guard_proc.stdout
-    note(guard_proc.returncode == 3,
-         "functional: with CHARLY_VERSION UNSET the ensure-charly step exits 3 "
-         "(INCONCLUSIVE class, no silent fallback) — got " + str(guard_proc.returncode))
-    note("unset or not visible" in guard_out,
-         "functional: the failure message names the unset/invisible condition")
-    note("--visibility all" in guard_out,
-         "functional: the failure message names the exact recovery command")
-    note("::error::" in guard_out,
-         "functional: the failure is LOUD (::error:: annotations), never a silent pass")
-    # The intentionally-kept SELF-HOSTED fallback must also be LOUD (never silent) and
-    # must name the knob-reading requirement. Exercised by putting a fake `charly` on
-    # PATH: the step short-circuits and must emit ::warning::, exit 0.
-    guard_bin = os.path.join(guard_tmp, "bin")
-    os.makedirs(guard_bin)
-    write_executable(os.path.join(guard_bin, "charly"),
-                     "#!/usr/bin/env bash\necho 'charly v0.0.0-fake'\n")
-    guard2_env = dict(os.environ)
-    guard2_env["GITHUB_REPOSITORY"] = "opencharly/harness-fixture"
-    guard2_env["CHARLY_VERSION"] = "v2026.267.0045"
-    guard2_env["PATH"] = guard_bin
-    guard2_proc = subprocess.run(
-        [bash_path, "--noprofile", "--norc", "-eo", "pipefail", guard_script],
-        cwd=guard_tmp, env=guard2_env, stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT, universal_newlines=True)
-    guard2_out = guard2_proc.stdout
-    note(guard2_proc.returncode == 0,
-         "functional: the self-hosted engine path exits 0 when charly is present — got " +
-         str(guard2_proc.returncode))
-    note("::warning::" in guard2_out and "NOT applied on this path" in guard2_out,
-         "functional: the self-hosted fallback is LOUD (::warning:: that the org pin "
-         "is not applied), never a silent no-op")
-    note("AI_REVIEW_MAX_TOKENS" in guard2_out,
-         "functional: the self-hosted warning names the knob-reading requirement")
+         "class), not a ::warning:: or a silent fallback")
+    note("command -v charly" in ensure_run and 'WANT="${TAG#v}"' in ensure_run,
+         "structural: the on-PATH charly is verified against the pin's version, not trusted")
+    note("::warning::on-PATH charly" in ensure_run,
+         "structural: a mismatched on-PATH engine is LOUD (::warning::) and the pinned "
+         "release is downloaded so the pinned engine always wins")
     parse_run = find_step(steps, "id", "parse")["run"]
     note('"$rc" -ne 0' in review_run and "discarded" in review_run,
          "structural: the review step gates on the CAPTURED rc - a non-zero review "
@@ -1165,6 +1117,56 @@ def run_harness():
         note(".github/tests/validator-gate-harness.py" in harness_wf,
              "structural: .github/workflows/validator-harness.yml RUNS this harness "
              "(coverage that never runs enforces nothing)")
+
+    # FUNCTIONAL: the ensure-charly pin-enforcement behaviour, executed as the real
+    # step body (GitHub expressions substituted) against a controlled PATH. Three
+    # cases prove the stale-engine defect can never recur silently:
+    #   (a) pin UNSET          -> ::error:: + exit 3 (INCONCLUSIVE; never a fallback)
+    #   (b) on-PATH == pin     -> exit 0 (uses the on-PATH binary)
+    #   (c) on-PATH != pin     -> ::warning:: + downloads the pinned release
+    pin_tmp = tempfile.mkdtemp(prefix="validator-pin-guard.")
+    pin_ns = build_ns({}, pin_tmp, pin_tmp)
+    pin_script = os.path.join(pin_tmp, "ensure-charly.sh")
+    with open(pin_script, "w", encoding="utf-8") as fh:
+        fh.write(subst(ensure_run, pin_ns))
+    bash_path = shutil.which("bash") or "/bin/bash"
+
+    def run_pin_step(env_path, charly_version):
+        env = dict(os.environ)
+        # PREPEND the fake bin to the real PATH (as the runner does), so coreutils
+        # (grep/mkdir/…) resolve while `charly` comes from the fake bin.
+        env["PATH"] = env_path + ":" + os.environ.get("PATH", "/usr/bin:/bin")
+        if charly_version is None:
+            env.pop("CHARLY_VERSION", None)
+        else:
+            env["CHARLY_VERSION"] = charly_version
+        proc = subprocess.run([bash_path, "--noprofile", "--norc", "-eo", "pipefail", pin_script],
+                              cwd=pin_tmp, env=env, stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, universal_newlines=True)
+        return proc.returncode, proc.stdout
+
+    # (a) pin unset: a PATH with no charly anywhere on it.
+    empty_bin = os.path.join(pin_tmp, "empty"); os.makedirs(empty_bin)
+    rc, out = run_pin_step(empty_bin, None)
+    note(rc == 3 and "::error::" in out,
+         "functional: ensure-charly with the pin UNSET exits 3 with ::error:: (no silent "
+         "fallback to a bundled engine) — got rc=" + str(rc))
+    # (b) on-PATH matches the pin.
+    match_bin = os.path.join(pin_tmp, "match"); os.makedirs(match_bin)
+    write_executable(os.path.join(match_bin, "charly"),
+                     "#!/usr/bin/env bash\necho 2026.267.0045\n")
+    rc, out = run_pin_step(match_bin, "v2026.267.0045")
+    note(rc == 0 and "matches the pin" in out,
+         "functional: ensure-charly uses an on-PATH charly whose version EQUALS the pin "
+         "(rc=0) — got rc=" + str(rc))
+    # (c) on-PATH differs (the live stale-runner case): it warns and downloads the pin.
+    stale_bin = os.path.join(pin_tmp, "stale"); os.makedirs(stale_bin)
+    write_executable(os.path.join(stale_bin, "charly"),
+                     "#!/usr/bin/env bash\necho 2026.256.1316\n")
+    rc, out = run_pin_step(stale_bin, "v2026.267.0045")
+    note("::warning::on-PATH charly" in out and "downloading" in out,
+         "functional: ensure-charly LOUDLY warns and downloads the pinned engine when the "
+         "on-PATH charly DIFFERS from the pin (the stale-engine defect)")
 
     tmpdir = tempfile.mkdtemp(prefix="validator-gate-harness.")
     fakedir = os.path.join(tmpdir, "fakebin")

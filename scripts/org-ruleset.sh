@@ -26,10 +26,14 @@ set -euo pipefail
 #     `apply` here REFUSES until that retirement has run.
 # Nothing is copied into any repo; there is no per-repo validator config to drift.
 #
-# THE ONE SETTING THAT CANNOT MOVE: `allow_auto_merge` is a per-repository setting
-# with no org-level default (the org endpoint exposes none). The validator enables
-# GitHub native auto-merge on a PASS, which fails and leaves the check red when the
-# repo setting is off — so this script still enforces it per repo.
+# THE SETTINGS THAT CANNOT MOVE TO THE ORG: `allow_auto_merge` and
+# `delete_branch_on_merge` are per-repository settings with no org-level default
+# (the org endpoint exposes neither). `allow_auto_merge` is load-bearing: the
+# validator enables GitHub native auto-merge on a PASS, which fails and leaves the
+# check red when the repo setting is off. `delete_branch_on_merge` keeps `feat/`
+# branches from accumulating after their squash merge (the git-workflow contract:
+# `feat/` is deleted at merge). Both are enforced per repo — there is no org-wide
+# toggle for either, so this script is their single owner.
 #
 # THE RULESET CARRIES ONLY THE SAME BYPASS THE OLD PER-REPO RULESETS DID: the
 # `charly-auto-merge` app, whose protected-main CHANGELOG writes must land. It
@@ -37,7 +41,8 @@ set -euo pipefail
 #
 # usage: $0 {apply|verify}
 #   apply  — enable the org ruleset, delete the now-redundant per-repo rulesets, and
-#            enforce the per-repo `allow_auto_merge` setting. Idempotent.
+#            enforce the per-repo `allow_auto_merge` AND `delete_branch_on_merge`
+#            settings. Idempotent.
 #   verify — read-only; assert the whole end state.
 
 readonly RULESET_NAME="org-wide required workflow & main protection"
@@ -179,7 +184,8 @@ case "$mode" in
     #      protection). Org rulesets are additive and do NOT remove it, and the
     #      classic protection has no bypass slot for `charly-auto-merge`, so it would
     #      block the App's protected-main CHANGELOG writes.
-    #   5. enforce the per-repo `allow_auto_merge` setting.
+    #   5. enforce the per-repo `allow_auto_merge` and `delete_branch_on_merge`
+    #      settings (neither has an org-level default).
     stragglers=0
     for repo in "${repos[@]}"; do
       has_dispatcher "$repo" && { echo "REFUSING: $repo still carries a dispatcher" >&2; stragglers=$((stragglers+1)); }
@@ -226,6 +232,11 @@ case "$mode" in
       if [[ "$auto" != "true" ]]; then
         gh api --method PATCH "repos/$ORG/$repo" -f allow_auto_merge=true --jq .allow_auto_merge >/dev/null
         echo "$repo: enabled repo-level allow_auto_merge"
+      fi
+      dbom="$(gh api "repos/$ORG/$repo" --jq '.delete_branch_on_merge')"
+      if [[ "$dbom" != "true" ]]; then
+        gh api --method PATCH "repos/$ORG/$repo" -f delete_branch_on_merge=true --jq .delete_branch_on_merge >/dev/null
+        echo "$repo: enabled repo-level delete_branch_on_merge"
       fi
     done
     ;;
@@ -278,6 +289,8 @@ case "$mode" in
       [[ "$legacy" == "404" ]] || { echo "$repo: legacy branch protection still present (HTTP $legacy)" >&2; fail=1; }
       auto="$(gh api "repos/$ORG/$repo" --jq '.allow_auto_merge')"
       [[ "$auto" == "true" ]] || { echo "$repo: allow_auto_merge must be true" >&2; fail=1; }
+      dbom="$(gh api "repos/$ORG/$repo" --jq '.delete_branch_on_merge')"
+      [[ "$dbom" == "true" ]] || { echo "$repo: delete_branch_on_merge must be true" >&2; fail=1; }
     done
     [[ "$fail" == 0 ]] && echo "org-wide required workflow + main protection verified"
     exit "$fail"

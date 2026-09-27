@@ -23,6 +23,19 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
 
+# WHY NO `edited` HERE (the dotgithub#119 lesson, MEASURED). A REQUIRED workflow (the org
+# ruleset `workflows` rule) acts ONLY on the default push-driven pull_request types —
+# `opened` / `synchronize` / `reopened`. It IGNORES the `on.types` list for anything else:
+# MEASURED — a body edit did NOT run this workflow even with `edited` listed, and a
+# draft->ready transition did NOT run it even with `ready_for_review` listed (which was
+# already there). A PLAIN per-repo workflow with the same `types:` DOES fire on those events,
+# so the event is delivered — the required-workflow trigger path simply does not act on
+# non-default activity types. A body-only BLOCK is therefore cleared by re-running the
+# EXISTING failed run (`gh run rerun <run-id>`): a re-run reuses the SAME GITHUB_SHA and
+# updates THAT run's check run IN PLACE — no duplicate same-name check run, no POISON. The
+# `rerun`-label channel that automates this lives in a PLAIN per-repo workflow distributed by
+# `.github/workflows/distribute-rerun-listener.yml` (dotgithub#121) — it CANNOT live here.
+
 # ONE run per PR: a re-dispatch/push cancels the in-flight run, so the head can never
 # carry duplicate same-name `validate / validate` check runs (a duplicate FAILED run
 # kept `mergeable_state: blocked` despite PASS — measured on opencharly #38,

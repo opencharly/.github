@@ -15,11 +15,11 @@ copy inherits the files here — so a change lands **once**, not in every repo.
   it creates ONE org ruleset carrying the `workflows` rule (pointing at this repo's
   required workflow) *and* the ordinary branch rules (required status check, no
   force-push, no deletion, no creation), applied to every active non-fork
-  `main`-default repo. It also enforces the one setting that cannot move to the org
-  (`allow_auto_merge`, a per-repo setting with no org default). `apply` enables the
-  org ruleset, deletes the now-redundant per-repo rulesets, and enforces
-  `allow_auto_merge`; `verify` asserts the whole end state. Its offline mock-`gh`
-  test is `scripts/org-ruleset_test.sh`.
+  `main`-default repo. It also enforces the two settings that cannot move to the org
+  (`allow_auto_merge` and `delete_branch_on_merge`, per-repo settings with no org
+  default). `apply` enables the org ruleset, deletes the now-redundant per-repo
+  rulesets, and enforces both settings; `verify` asserts the whole end state. Its
+  offline mock-`gh` test is `scripts/org-ruleset_test.sh`.
 - **`scripts/retire-per-repo-dispatchers.sh`** +
   **`.github/workflows/retire-per-repo-dispatchers.yml`** — the one-shot cutover
   step that DELETES each repo's redundant `.github/workflows/pr-validator.yml`
@@ -58,6 +58,22 @@ copy inherits the files here — so a change lands **once**, not in every repo.
   `scripts/org-ruleset_test.sh` (the owner script's offline mock-`gh` test) so
   the org-ruleset cutover logic is exercised on every `.github` PR. Coverage that
   never runs enforces nothing.
+- **`scripts/sweep-rerun.sh`** + **`scripts/ensure-rerun-label.sh`** +
+  **`.github/workflows/rerun.yml`** — the org-wide `rerun`-label channel
+  that clears a **body-only BLOCK with no empty commit**. Adding a `rerun` label
+  to a PR re-runs its FAILED `charly/pr-validator` run; a re-run reuses the SAME
+  `GITHUB_SHA` and updates THAT run's `validate / validate` check run IN PLACE
+  (no duplicate same-name check run), so it clears the POISON state and re-reads
+  the corrected PR body. The workflow runs on a schedule (and on dispatch),
+  searches the org for open `rerun`-labeled PRs with the token, re-runs each
+  one's failed run, and removes the label (idempotent). It is **capability-free**
+  (`actions: write` + `pull-requests: write` — the charly-auto-merge App already
+  has both; NO `checks: write` and NO `workflows: write`). A REQUIRED workflow
+  acts ONLY on the default push-driven `pull_request` types and IGNORES `on.types`
+  (MEASURED: a body edit did not fire it even with `edited` listed; a draft→ready
+  transition did not fire it even with `ready_for_review` listed), which is why
+  this is an out-of-band scheduled sweep rather than a trigger on the required
+  workflow. Its offline mock-`gh` test is `scripts/sweep-rerun_test.sh`.
 
 Future org-wide defaults (issue templates, `CONTRIBUTING.md`, `SECURITY.md`) belong
 here too — one source, inherited everywhere.
