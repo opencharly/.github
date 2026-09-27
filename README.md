@@ -125,6 +125,45 @@ from, so it is safe and idempotent. The ref creation needs only the App's
 change the App cannot make (`403 Resource not accessible by integration`), so that
 final step uses the operator's admin token.
 
+## Setting up a new repository — what is automatic, what you add
+
+The org ruleset targets every **active, non-fork, `main`-default** repo
+(`discover_repos` in `scripts/lib-org.sh`), so most of the gate is inherited with
+**nothing copied into the repo**:
+
+| Concern | Automatic (the org / this repo) | The repo must add |
+|---|---|---|
+| PR validation (`validate / validate`) | The org ruleset's `workflows` rule runs `org-wide-pr-validator-required.yml` (definition here) → the reusable `pr-validator.yml`. No per-repo file. | nothing |
+| Branch protection (no force-push / delete / create; strict required check) | The ONE org ruleset. | nothing |
+| Native auto-merge (squash) | Armed by the validator on PASS; needs the per-repo setting `allow_auto_merge=true` (enforced by `scripts/org-ruleset.sh apply`). | nothing (the script sets it) |
+| Remote branch cleanup at merge | `delete_branch_on_merge=true` (enforced by the same script). | nothing |
+| CalVer tag + `CHANGELOG/<CalVer>.md` | The org reusable `tag-on-merge.yml`. | **`.github/workflows/tag-on-merge.yml`** — the per-repo caller (fires on `workflow_run` of `charly/pr-validator` + `push` to `main`) |
+| The repo's own build/validate CI | — | the repo's `.github/workflows/` (e.g. `deploy.yml`) |
+
+**Checklist for a brand-new repo:**
+
+1. Create `opencharly/<name>` (non-fork). Bootstrap `main` with
+   `bootstrap-repo-main.yml`, then set the default branch (above).
+2. Add `.github/workflows/tag-on-merge.yml` (copy an existing repo's caller) — WITHOUT
+   it the repo merges via the org validator but **never gets a CalVer tag or a
+   CHANGELOG**. Add the repo's own CI (`deploy.yml`) too.
+3. Run `scripts/org-ruleset.sh apply` so `allow_auto_merge` and
+   `delete_branch_on_merge` are enforced for the new repo (the org ruleset itself covers
+   it automatically once it is active + non-fork + `main`-default).
+4. Land the first change via a PR; the org validator is the gate (never a direct push).
+5. Add it to the umbrella as a submodule and bump the pin via `charly task sync` + PR.
+
+**Excluded by design** (no org workflow, no CalVer tags): forks
+(`gst-wayland-display`), archived repos (`pi-review-action`), and non-`main` defaults
+(`pixelflux` → `av1`, `omarchy-eval-artifacts` → `runs`). A repo in this set that should
+be tagged/validated must first become non-fork / active / `main`-default.
+
+**Measured gap.** `layer-nerdctl` and `plugin-nerdctl` were created with **no `.github`
+directory at all** (so no `tag-on-merge.yml` caller): they validate via the org ruleset,
+but the tag-on-merge mechanism cannot have minted their two `v2026.266.*` tags (the caller
+it fires through is absent), so those tags are out-of-band and future merges will not tag.
+Adding the caller is the fix.
+
 ## Required org-level configuration
 
 Nothing is hardcoded and no credential is committed. The workflow reads
