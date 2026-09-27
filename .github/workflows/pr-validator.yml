@@ -11,11 +11,11 @@
 # The engine invoked is whatever the pinned charly release (vars.CHARLY_VERSION)
 # welds. This workflow passes no plan path: the plain `charly review --out ...`
 # form is accepted by BOTH the pre-rewrite engine and the embedded-prompt engine,
-# so the invocation is weld-independent. REVIEW_PROMPT_PATH is still passed
-# because the charly release in the org pin reads its rulebook from that file;
-# the embedded-prompt engine (welded by opencharly/charly#626, merged) ignores it,
-# so once the org CHARLY_VERSION pin moves to that release the env is vestigial
-# and is dropped in the same change that bumps the pin.
+# so the invocation is weld-independent. The rulebook is supplied ENTIRELY from
+# configuration: AI_REVIEW_PROMPT (an opencharly org variable) REPLACES the
+# engine's generic embedded default, so no project-specific rule is baked into
+# the binary. There is no REVIEW_PROMPT_PATH file mechanism and no
+# AI_REVIEW_PROMPT_EXTRA append knob — ONE prompt mechanism.
 #
 # VERDICT TAXONOMY — these classes are NEVER conflated (a provider that did not
 # answer is not a code finding, and it is not a pass either):
@@ -309,7 +309,7 @@ jobs:
           AI_REVIEW_STOP: ${{ vars.AI_REVIEW_STOP || '' }}
           AI_REVIEW_CONTEXT_TOKENS: ${{ vars.AI_REVIEW_CONTEXT_TOKENS || '' }}
           AI_REVIEW_CONTEXT_MARGIN: ${{ vars.AI_REVIEW_CONTEXT_MARGIN || '' }}
-          AI_REVIEW_PROMPT_EXTRA: ${{ vars.AI_REVIEW_PROMPT_EXTRA || '' }}
+          AI_REVIEW_PROMPT: ${{ vars.AI_REVIEW_PROMPT }}
           AI_REVIEW_POST_COMMENT: ${{ vars.AI_REVIEW_POST_COMMENT || '' }}
           AI_REVIEW_TOOL_RESULT_MAX_BYTES: ${{ vars.AI_REVIEW_TOOL_RESULT_MAX_BYTES || '' }}
           # The GENERATION bounds (the measured root-cause fix, owned by the
@@ -337,13 +337,6 @@ jobs:
           # Default 1 org-wide; any repo may opt back to retries via its own var.
           AI_REVIEW_MAX_ATTEMPTS: ${{ vars.AI_REVIEW_MAX_ATTEMPTS || '1' }}
           AI_REVIEW_API_KEY:   ${{ secrets.AI_REVIEW_API_KEY }}
-          # The charly release in the org pin reads its rulebook from
-          # REVIEW_PROMPT_PATH; the embedded-rulebook engine (welded by
-          # opencharly/charly#626, merged) ignores it. Both accept the plain
-          # `charly review --out ...` form, so this env is the only transitional
-          # surface; it is removed when the org CHARLY_VERSION pin moves to the
-          # embedded-rulebook release.
-          REVIEW_PROMPT_PATH:  ${{ github.workspace }}/runner-config/prompt/validator.md
           GITHUB_TOKEN:        ${{ github.token }}
         run: |
           cd "$GITHUB_WORKSPACE/runner-config"
@@ -635,7 +628,13 @@ jobs:
             echo '<details><summary>Diagnostics (tail of the review log)</summary>'
             echo
             echo '~~~'
-            tail -n 25 /tmp/review.log 2>/dev/null || echo '(no review log captured)'
+            # BOUNDED. The review log can carry ONE degenerate-repetition line of
+            # hundreds of KB (a model decode collapse), which pushes the comment
+            # body past GitHub's 65536-character limit — the notice then FAILS to
+            # post and the red required check has NO explanation (live evidence:
+            # `GraphQL: Body is too long (maximum is 65536 characters)`). Cap the
+            # line count, each line, AND the total so the notice always posts.
+            tail -n 40 /tmp/review.log 2>/dev/null | cut -c1-2000 | tail -c 16000 || echo '(no review log captured)'
             echo '~~~'
             echo
             echo '</details>'

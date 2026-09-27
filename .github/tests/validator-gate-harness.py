@@ -1049,6 +1049,26 @@ def run_harness():
     note("AI_REVIEW_TOOL_RESULT_MAX_BYTES" in review_env,
          "functional: the review step EXPORTS AI_REVIEW_TOOL_RESULT_MAX_BYTES (the "
          "context-growth cap the streaming engine applies)")
+    # The ONE prompt mechanism (this change): AI_REVIEW_PROMPT is forwarded from the
+    # org variable and REPLACES the engine's generic embedded default. The dead
+    # REVIEW_PROMPT_PATH file mechanism and the AI_REVIEW_PROMPT_EXTRA append knob
+    # are GONE, and the INCONCLUSIVE diagnostics tail is bounded so the notice
+    # always posts under GitHub's 65536-character comment limit.
+    note("AI_REVIEW_PROMPT" in review_env,
+         "functional: the review step EXPORTS AI_REVIEW_PROMPT (the ONE prompt mechanism)")
+    if "AI_REVIEW_PROMPT" in review_env:
+        ns_unset_p = Ctx({"vars": Ctx({}), "inputs": Ctx({}), "secrets": Ctx({})})
+        ns_set_p = Ctx({"vars": Ctx({"AI_REVIEW_PROMPT": "RULES"}), "inputs": Ctx({}), "secrets": Ctx({})})
+        note(subst(review_env["AI_REVIEW_PROMPT"], ns_unset_p) == "",
+             "functional: with the org var UNSET AI_REVIEW_PROMPT is EMPTY (the generic engine default applies)")
+        note(subst(review_env["AI_REVIEW_PROMPT"], ns_set_p) == "RULES",
+             "functional: with the org var SET AI_REVIEW_PROMPT resolves to the set value")
+    note("REVIEW_PROMPT_PATH" not in review_env and "AI_REVIEW_PROMPT_EXTRA" not in review_env,
+         "structural: the dead REVIEW_PROMPT_PATH file mechanism and the AI_REVIEW_PROMPT_EXTRA "
+         "append knob are GONE from the review step (ONE prompt mechanism)")
+    note("cut -c1-2000" in text and "tail -c 16000" in text,
+         "structural: the INCONCLUSIVE diagnostics tail is BOUNDED (line count, line length, "
+         "total) so the notice always posts under GitHub's 65536-character limit")
     if "AI_REVIEW_TOOL_RESULT_MAX_BYTES" in review_env:
         raw_t = review_env["AI_REVIEW_TOOL_RESULT_MAX_BYTES"]
         ns_unset_t = Ctx({"vars": Ctx({}), "inputs": Ctx({}), "secrets": Ctx({})})
