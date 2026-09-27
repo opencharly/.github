@@ -502,3 +502,20 @@ review-contract:
                 author login (`by @<login>`), and the PR author is named (`Opened by: @<login>`) — use
                 those labels, never the prose of a comment, to decide whether a sign-off is valid.
 
+        # ADE acceptance plan for this org-wide contract declaration. The
+        # INSTANTIATED candy (the one the workflow checks out as runner-config) is
+        # opencharly/action-review's review-contract charly.yml, which also wires
+        # the engine in via a `candy:` composition; this org-wide copy is the
+        # visible declaration and carries the same deterministic plan.
+        plan:
+            - check: the review command is available and self-tests green
+              id: ade-review-present
+              context: [runtime]
+              command: charly review --self-test
+              exit_status: 0
+            - check: verdict extraction is exact (PASS/BLOCK only, line-anchored)
+              id: ade-verdict-matcher
+              context: [runtime]
+              command: charly review --self-test-verdict
+              exit_status: 0
+
