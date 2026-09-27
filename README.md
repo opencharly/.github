@@ -160,7 +160,8 @@ be tagged/validated must first become non-fork / active / `main`-default.
 
 **Measured gap.** `layer-nerdctl` and `plugin-nerdctl` were created with **no `.github`
 directory at all** (so no `tag-on-merge.yml` caller): they validate via the org ruleset,
-but their two `v2026.266.*` tags were minted manually and future merges will not tag.
+but the tag-on-merge mechanism cannot have minted their two `v2026.266.*` tags (the caller
+it fires through is absent), so those tags are out-of-band and future merges will not tag.
 Adding the caller is the fix.
 
 ## Required org-level configuration
