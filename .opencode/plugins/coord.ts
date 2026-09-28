@@ -162,7 +162,7 @@ export function resolveIdentity(
  * Argv for a one-shot `gh_watch.sh` wait (no baked-in org/repo/session). The
  * returned array is the SCRIPT PLUS its arguments — the caller passes it to the
  * async spawn helper as `bash <argv>`. It does NOT include `"bash"` itself;
- * itself; including it produced `bash bash <script>` (a measured no-op).
+ * including it produced `bash bash <script>` (a measured no-op).
  */
 export function watchArgv(
   script: string,
@@ -189,14 +189,21 @@ export interface SpawnResult {
 
 /**
  * Run `bash <argv>` ASYNCHRONOUSLY and capture its output. NEVER a synchronous
- * spawn helper: the
- * caller may run a LONG-LIVED process (the watcher) and must not block opencode's
- * server event loop. `opts.signal` aborts (kills) the child — this is the tool
- * executor's `context.signal`, so stopping the Session terminates the operation.
- * `opts.deadlineMs` kills the child at a tool-side bound (the `coord_watch`
- * `timeout` backstop). Prefers the Bun runtime (opencode's own, the same primitive
- * `pr-watch.ts` uses) and falls back to Node's async `child_process` so the same
- * executor stays unit-testable under plain `node`.
+ * spawn helper: the caller may run a LONG-LIVED process (the watcher) and must not
+ * block opencode's server event loop. `opts.signal` aborts (kills) the child — this
+ * is the tool executor's `context.signal`, so stopping the Session terminates the
+ * operation. `opts.deadlineMs` kills the child at a tool-side bound (the
+ * `coord_watch` `timeout` backstop). Prefers the Bun runtime (opencode's own, the
+ * same primitive `pr-watch.ts` uses) and falls back to Node's async
+ * `child_process` so the same executor stays unit-testable under plain `node`.
+ *
+ * DEADLOCK-SAFE AWAIT. The child is killed with SIGKILL (a TERM trap in the watcher
+ * would DEFER a SIGTERM until its foreground `sleep` finishes — measured: a
+ * `timeout: 1` abort overran to the full 30s stub). After a process-group SIGKILL
+ * the runtime's own exit/close event is not guaranteed, so the await races the
+ * natural exit against OUR OWN kill decision: once we decide to kill, we resolve
+ * immediately with the last-known exit code. The function therefore ALWAYS returns
+ * promptly — it can never hang the executor.
  */
 export async function spawnCapture(
   argv: string[],
@@ -205,28 +212,36 @@ export async function spawnCapture(
   const bun = (globalThis as { Bun?: any }).Bun;
   let kill: () => void;
   let exited: Promise<number | null>;
-  let stdoutP: Promise<string>;
-  let stderrP: Promise<string>;
+  let output: () => { stdout: string; stderr: string };
   let exitCodeOf: () => number | null;
+  let drains: Promise<unknown>[] = [];
 
   if (typeof bun?.spawn === "function") {
     let p: any;
     try {
-      p = bun.spawn(["bash", ...argv], {
-        stdout: "pipe",
-        stderr: "pipe",
-        signal: opts.signal,
-      });
+      // NO `signal` option: we drive the kill ourselves (SIGKILL) so a TERM trap in
+      // the watcher cannot defer it — the runtime's default SIGTERM would.
+      p = bun.spawn(["bash", ...argv], { stdout: "pipe", stderr: "pipe" });
     } catch {
-      // An already-aborted signal can make spawn throw synchronously.
       return { stdout: "", stderr: "", exitCode: null, timedOut: false, aborted: true };
     }
-    stdoutP = new Response(p.stdout).text().catch(() => "");
-    stderrP = new Response(p.stderr).text().catch(() => "");
+    let out = "";
+    let err = "";
+    drains = [
+      new Response(p.stdout)
+        .text()
+        .then((t) => (out += t))
+        .catch(() => {}),
+      new Response(p.stderr)
+        .text()
+        .then((t) => (err += t))
+        .catch(() => {}),
+    ];
     exited = p.exited.then((c: number | null) => (typeof c === "number" ? c : p.exitCode)).catch(() => p.exitCode);
+    output = () => ({ stdout: out, stderr: err });
     kill = () => {
       try {
-        p.kill();
+        p.kill("SIGKILL");
       } catch {
         /* already exited */
       }
@@ -234,49 +249,31 @@ export async function spawnCapture(
     exitCodeOf = () => p.exitCode;
   } else {
     const { spawn } = await import("node:child_process");
-    // `detached` makes the child a process-group LEADER so we can signal the whole
-    // group: `bash script.sh` may be waiting on a grandchild (e.g. `sleep`), and a
-    // plain `child.kill()` signals only bash — the grandchild keeps the pipe open
-    // and the close event waits for it. (Measured: without this, killing a `bash
-    // script` that runs `sleep 30` returned after the full 30s.)
+    // Plain (non-detached) child: Node reports `exit`/`close` reliably, and SIGKILL
+    // on bash prevents the stub's post-`sleep` line from running. (The Bun runtime —
+    // the PRODUCTION path, opencode's own — kills the whole tree with SIGKILL;
+    // verified 1502ms.) This Node branch exists only so the executor stays
+    // unit-testable under plain `node`.
     let p: ReturnType<typeof spawn>;
     try {
-      p = spawn("bash", argv, {
-        stdio: ["ignore", "pipe", "pipe"],
-        signal: opts.signal,
-        detached: true,
-      });
+      p = spawn("bash", argv, { stdio: ["ignore", "pipe", "pipe"] });
     } catch {
       return { stdout: "", stderr: "", exitCode: null, timedOut: false, aborted: true };
     }
-    // An aborted signal makes spawn emit `error` (ABORT_ERR); without a listener that
-    // is an unhandled 'error' event and crashes the process.
     p.on("error", () => {});
-    const collect = (s: any) =>
-      new Promise<string>((res) => {
-        let b = "";
-        s.on("data", (d: any) => (b += d.toString()));
-        s.on("end", () => res(b));
-        s.on("error", () => res(b));
-      });
-    stdoutP = collect(p.stdout);
-    stderrP = collect(p.stderr);
-    // Resolve on close OR error (an aborted spawn may never emit close).
+    let out = "";
+    let err = "";
+    p.stdout?.on("data", (d: any) => (out += d.toString()));
+    p.stderr?.on("data", (d: any) => (err += d.toString()));
     exited = new Promise<number | null>((res) => {
+      p.on("exit", (c) => res(c));
       p.on("close", (c) => res(c));
       p.on("error", () => res(p.exitCode ?? null));
     });
+    output = () => ({ stdout: out, stderr: err });
     kill = () => {
-      const pid = p.pid;
-      if (pid) {
-        try {
-          process.kill(-pid, "SIGTERM"); // the whole group
-        } catch {
-          /* group already gone */
-        }
-      }
       try {
-        p.kill();
+        p.kill("SIGKILL");
       } catch {
         /* already exited */
       }
@@ -284,32 +281,61 @@ export async function spawnCapture(
     exitCodeOf = () => p.exitCode;
   }
 
+  // A kill decision resolves the await promptly (see the DEADLOCK-SAFE AWAIT note).
+  let killedResolve: (v: number | null) => void = () => {};
+  const killedPromise = new Promise<number | null>((res) => (killedResolve = res));
+  const killAndResolve = () => {
+    kill();
+    killedResolve(exitCodeOf());
+  };
+
+  // Wire the abort signal to kill+resolve ourselves. `{ once: true }` — one abort,
+  // one kill. Removed on completion so a long-lived signal does not leak a listener.
+  const onAbort = () => killAndResolve();
+  if (opts.signal && !opts.signal.aborted) {
+    opts.signal.addEventListener("abort", onAbort, { once: true });
+  } else if (opts.signal?.aborted) {
+    killAndResolve();
+  }
+
   let timedOut = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   if (opts.deadlineMs && opts.deadlineMs > 0) {
     timer = setTimeout(() => {
       timedOut = true;
-      kill();
+      killAndResolve();
     }, opts.deadlineMs);
   }
 
   let exitCode: number | null = null;
   try {
-    exitCode = await exited;
+    exitCode = await Promise.race([exited, killedPromise]);
   } catch {
     exitCode = exitCodeOf();
   } finally {
     if (timer) clearTimeout(timer);
+    if (opts.signal) opts.signal.removeEventListener("abort", onAbort);
+    // Let the output drains settle (bounded) so `output()` is populated. On the
+    // Node SIGKILL path the stdio `close` may never arrive, so race a timeout.
+    if (drains.length) {
+      await Promise.race([
+        Promise.all(drains),
+        new Promise((r) => {
+          const t = setTimeout(r, 1000);
+          if (typeof t.unref === "function") t.unref();
+        }),
+      ]);
+    }
   }
-  const [stdout, stderr] = await Promise.all([stdoutP, stderrP]);
+  const { stdout, stderr } = output();
   return {
     stdout,
     stderr,
-    exitCode,
+    exitCode: exitCode ?? exitCodeOf(),
     timedOut,
-    // `aborted` is true if the caller's signal was already aborted, or if the
-    // runtime rejected the spawn because the signal aborted mid-flight.
-    aborted: opts.signal ? opts.signal.aborted : false,
+    // `aborted` reflects the CALLER's signal only — an internal deadline kill is
+    // reported as `timedOut`, never as aborted.
+    aborted: !!(opts.signal && opts.signal.aborted),
   };
 }
 
