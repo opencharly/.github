@@ -11,7 +11,7 @@ set -euo pipefail
 # reconciliation gate, a rule edited in one surface silently collides with or drifts
 # from the same rule in another — MEASURED (issue opencharly/opencharly#282): the
 # identity-footer ORDER, the takeover WINDOW (30 vs 60 min), a stale AI_REVIEW_PROMPT
-# mirror, and a dangling rerun-listener reference.
+# mirror, and a dangling reference to a retired CI channel.
 #
 # This gate makes the class non-silent. A committed MANIFEST (`governance-claims.tsv`)
 # declares, per claim, the canonical phrase EVERY surface must carry and the LEGACY
