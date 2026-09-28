@@ -33,11 +33,11 @@ signoff_account_gate	git-workflow skill source	layer-charly-internals/charly.yml
 signoff_account_gate	git-workflow skill source	layer-charly-internals/charly.yml	forbid	labelled delegated and carrying
 signoff_account_gate	marketplace projection	marketplace/internals/skills/git-workflow/references/multi-repo-coordination.md	require	posting ACCOUNT is the entire gate
 signoff_account_gate	marketplace projection	marketplace/internals/skills/git-workflow/references/multi-repo-coordination.md	forbid	labelled delegated and carrying
-rerun_channel	git-workflow skill source	layer-charly-internals/charly.yml	require	rerun.yml. sweep
-rerun_channel	git-workflow skill source	layer-charly-internals/charly.yml	forbid	distribute-rerun-listener
-rerun_channel	marketplace projection	marketplace/internals/skills/git-workflow/SKILL.md	require	rerun.yml. sweep
-rerun_channel	marketplace projection	marketplace/internals/skills/git-workflow/SKILL.md	forbid	distribute-rerun-listener
-rerun_channel	org-wide required workflow	dotgithub/.github/workflows/org-wide-pr-validator-required.yml	forbid	distribute-rerun-listener
+rerun_manual	git-workflow skill source	layer-charly-internals/charly.yml	require	gh run rerun
+rerun_manual	git-workflow skill source	layer-charly-internals/charly.yml	forbid	rerun.yml. sweep
+rerun_manual	marketplace projection	marketplace/internals/skills/git-workflow/SKILL.md	require	gh run rerun
+rerun_manual	marketplace projection	marketplace/internals/skills/git-workflow/SKILL.md	forbid	rerun.yml. sweep
+rerun_manual	org-wide required workflow	dotgithub/.github/workflows/org-wide-pr-validator-required.yml	forbid	distribute-rerun-listener
 auto_close_threshold	validator workflow	dotgithub/.github/workflows/pr-validator.yml	require	AI_REVIEW_AUTO_CLOSE_AFTER .. .5.
 auto_close_threshold	umbrella AGENTS.md	AGENTS.md	require	AI_REVIEW_AUTO_CLOSE_AFTER., default 5
 auto_close_threshold	git-workflow skill source	layer-charly-internals/charly.yml	require	AI_REVIEW_AUTO_CLOSE_AFTER., (effective )?default 5

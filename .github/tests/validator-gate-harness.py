@@ -76,6 +76,7 @@ ENVIRONMENT NOTES
   therefore safe (serialized), not merely discouraged.
 """
 
+import atexit
 import fcntl
 import os
 import re
@@ -103,6 +104,28 @@ PATH_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)((?:[.][A-Za-z0-9_-]+)+)")
 
 RUNNER_PATHS = ["/tmp/review.txt", "/tmp/review.untrusted.txt", "/tmp/review.log",
                 "/tmp/inconclusive-comment.md"]
+
+# Temp dirs this harness creates. One functional test — the ensure-charly pin guard —
+# downloads a ~383 MB pinned charly release into its temp dir; when these are never
+# removed they accumulate across runs and exhaust the runner's disk quota (a measured
+# EDQUOT after ~30 runs, which then fails EVERY scenario with "Disk quota exceeded"
+# and looks like a code regression). Register every harness temp dir for removal at
+# process exit so the coverage is self-cleaning and cannot poison later runs (R1).
+_TMP_DIRS = []
+
+
+def make_tmpdir(prefix):
+    path = tempfile.mkdtemp(prefix=prefix)
+    _TMP_DIRS.append(path)
+    return path
+
+
+def cleanup_tmpdirs():
+    while _TMP_DIRS:
+        shutil.rmtree(_TMP_DIRS.pop(), ignore_errors=True)
+
+
+atexit.register(cleanup_tmpdirs)
 
 
 class HarnessError(Exception):
@@ -402,18 +425,43 @@ FAKE_GH = NL.join([
     "  fi",
     "  echo \"=== end comment ===\" >> \"$FAKE_COMMENT_LOG\"",
     "fi",
-    # `gh api --paginate ...` — the auto-close step counts the PR's BLOCK verdict
-    # comments. Emit REAL JSON pages (the workflow pipes to `jq -s`, which collects
-    # the pages into one array), so the multi-page path is genuinely exercised.
-    # FAKE_BLOCK_COUNT bot BLOCK comments + FAKE_OTHER_COUNT other comments are
-    # emitted in pages of FAKE_PAGE_SIZE (default 30, GitHub's page size) so a
-    # multi-page thread is reproducible. This is the ONLY gh api call the workflow
-    # makes, so answering it here is exact, not a blanket stub.
+    # `gh api --paginate ...` — the auto-close step counts the PR's non-PASS
+    # verdict comments (BLOCK and INCONCLUSIVE). Emit REAL JSON pages (the workflow
+    # pipes to `jq -s`, which collects the pages into one array), so the multi-page
+    # path is genuinely exercised. This is the ONLY gh api call the workflow makes,
+    # so answering it here is exact, not a blanket stub.
+    #
+    # END-TO-END (the anti-tautology contract): the api answer REPLAYS the machine
+    # notices the gate really posted to $FAKE_COMMENT_LOG (recorded by the `gh pr
+    # comment` branch above), as `github-actions[bot]` comments. So the counter is
+    # exercised against the EMITTED artifact — a rename of the gate's header (or of
+    # the counter's own literal) drops the notice from the replay, the count falls to
+    # 0, and the seeded scenario's `expect_closed` fails LOUD. The synthetic
+    # FAKE_BLOCK_COUNT / FAKE_INCONCLUSIVE_COUNT injections remain for the pure
+    # threshold scenarios; FAKE_OTHER_COUNT + FAKE_PAGE_SIZE keep the multi-page
+    # thread reproducible.
     "if [ \"$1\" = \"api\" ]; then",
-    "  python3 - \"${FAKE_BLOCK_COUNT:-0}\" \"${FAKE_OTHER_COUNT:-0}\" \"${FAKE_PAGE_SIZE:-30}\" <<'PYEOF'",
+    "  python3 - \"${FAKE_BLOCK_COUNT:-0}\" \"${FAKE_INCONCLUSIVE_COUNT:-0}\" \"${FAKE_OTHER_COUNT:-0}\" \"${FAKE_PAGE_SIZE:-30}\" \"${FAKE_COMMENT_LOG:-}\" <<'PYEOF'",
     "import json, sys",
-    "blocks, other, size = int(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3])",
-    "items = [{\"user\": {\"login\": \"github-actions[bot]\"}, \"body\": \"## Review — BLOCK\\n\\nblocked\"}] * blocks",
+    "blocks, inconcl, other, size = int(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])",
+    "comment_log = sys.argv[5]",
+    "# Replay the REAL bot notices captured from `gh pr comment` so the counter is",
+    "# exercised against the gate's EMITTED artifact, not a re-typed literal. Only",
+    "# the machine notices the counter is meant to match are replayed as the bot.",
+    "replayed = []",
+    "if comment_log:",
+    "    try:",
+    "        with open(comment_log, \"r\", encoding=\"utf-8\") as fh:",
+    "            captured = fh.read()",
+    "    except OSError:",
+    "        captured = \"\"",
+    "    for block in captured.split(\"=== gh pr comment (fake gh) ===\")[1:]:",
+    "        body = block.split(\"=== end comment ===\")[0].strip(\"\\n\")",
+    "        if body.startswith(\"## validator INCONCLUSIVE\") or body.startswith(\"## Auto-closed:\"):",
+    "            replayed.append({\"user\": {\"login\": \"github-actions[bot]\"}, \"body\": body})",
+    "items = list(replayed)",
+    "items += [{\"user\": {\"login\": \"github-actions[bot]\"}, \"body\": \"## Review — BLOCK\\n\\nblocked\"}] * blocks",
+    "items += [{\"user\": {\"login\": \"github-actions[bot]\"}, \"body\": \"## validator INCONCLUSIVE — no review verdict\\n\\nno answer\"}] * inconcl",
     "items += [{\"user\": {\"login\": \"someone\"}, \"body\": \"a normal comment\"}] * other",
     "for i in range(0, max(len(items), 1), size):",
     "    print(json.dumps(items[i:i+size]))",
@@ -466,7 +514,7 @@ TARGETS = [
     # Auto-close runs BEFORE the Gate (BLOCK) in the workflow, so the close +
     # notice land before the gate fails the check. The harness executes in this
     # order, so it must mirror the workflow's.
-    ("name", "Auto-close after N BLOCKs"),
+    ("name", "Auto-close after N BLOCK/INCONCLUSIVE verdicts"),
     ("name", "Gate (BLOCK)"),
     ("name", "Gate (inconclusive)"),
     ("name", "Gate (ambiguous)"),
@@ -498,7 +546,7 @@ SCENARIOS = [
         "name": "block",
         "fake": "block",
         "expect_exit": 1,
-        "expect_steps": ["review", "parse", "Auto-close after N BLOCKs", "Gate (BLOCK)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close after N BLOCK/INCONCLUSIVE verdicts", "Gate (BLOCK)", "evidence"],
         "expect_verdict": "BLOCK",
         "expect_comment": False,
         "expect_auto_merge": False,
@@ -513,7 +561,7 @@ SCENARIOS = [
         "fake": "block",
         "block_count": 5,
         "expect_exit": 1,
-        "expect_steps": ["review", "parse", "Auto-close after N BLOCKs", "Gate (BLOCK)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close after N BLOCK/INCONCLUSIVE verdicts", "Gate (BLOCK)", "evidence"],
         "expect_verdict": "BLOCK",
         "expect_comment": True,
         "expect_comment_contains": ["Auto-closed", "open a **NEW** pull request"],
@@ -534,7 +582,7 @@ SCENARIOS = [
         "other_count": 60,
         "page_size": 30,
         "expect_exit": 1,
-        "expect_steps": ["review", "parse", "Auto-close after N BLOCKs", "Gate (BLOCK)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close after N BLOCK/INCONCLUSIVE verdicts", "Gate (BLOCK)", "evidence"],
         "expect_verdict": "BLOCK",
         "expect_comment": True,
         "expect_comment_contains": ["Auto-closed", "open a **NEW** pull request"],
@@ -543,19 +591,19 @@ SCENARIOS = [
         "expect_review_outputs": {"provider_unanswered": "false", "review_rc": "0"},
     },
     {
-        # AUTO-CLOSE (over threshold): the notice MUST render the ACTUAL BLOCK count,
+        # AUTO-CLOSE (over threshold): the notice MUST render the ACTUAL verdict-count,
         # not the threshold. `blocks=8` against the default threshold 5 fired the
-        # headline "Auto-closed: 5 unanswered BLOCK verdicts" while the body said
+        # headline "Auto-closed: 5 unanswered …" while the body said
         # "received **8**" — a false statement from the gate. The scenario asserts
         # the real count appears (and the threshold-only count does not).
         "name": "auto-close-over-threshold-count",
         "fake": "block",
         "block_count": 8,
         "expect_exit": 1,
-        "expect_steps": ["review", "parse", "Auto-close after N BLOCKs", "Gate (BLOCK)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close after N BLOCK/INCONCLUSIVE verdicts", "Gate (BLOCK)", "evidence"],
         "expect_verdict": "BLOCK",
         "expect_comment": True,
-        "expect_comment_contains": ["Auto-closed: 8 unanswered BLOCK verdicts", "received **8**"],
+        "expect_comment_contains": ["Auto-closed: 8 unanswered BLOCK/INCONCLUSIVE verdicts", "received **8**"],
         "expect_comment_excludes": ["Auto-closed: 5 unanswered"],
         "expect_auto_merge": False,
         "expect_closed": True,
@@ -568,7 +616,7 @@ SCENARIOS = [
         "fake": "block",
         "block_count": 2,
         "expect_exit": 1,
-        "expect_steps": ["review", "parse", "Auto-close after N BLOCKs", "Gate (BLOCK)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close after N BLOCK/INCONCLUSIVE verdicts", "Gate (BLOCK)", "evidence"],
         "expect_verdict": "BLOCK",
         "expect_comment": False,
         "expect_auto_merge": False,
@@ -576,15 +624,40 @@ SCENARIOS = [
         "expect_review_outputs": {"provider_unanswered": "false", "review_rc": "0"},
     },
     {
+        # AUTO-CLOSE (INCONCLUSIVE): a PR that keeps producing NO review verdict
+        # (the provider never answers) must ALSO be auto-closed at the threshold —
+        # otherwise an unreviewable PR loops forever, growing its own thread and
+        # driving the reviewer into the runaway this feature bounds. The count is
+        # the validator's own INCONCLUSIVE comments; the notice is the policy bound,
+        # not a code finding.
+        "name": "auto-close-inconclusive-at-threshold",
+        "fake": "provider-unanswered",
+        "inconclusive_count": 5,
+        "expect_exit": 3,
+        "expect_steps": ["review", "parse", "Auto-close after N BLOCK/INCONCLUSIVE verdicts", "Gate (inconclusive)", "evidence"],
+        "expect_verdict": "INCONCLUSIVE",
+        "expect_comment": True,
+        "expect_comment_contains": ["Auto-closed", "BLOCK/INCONCLUSIVE"],
+        "expect_auto_merge": False,
+        "expect_closed": True,
+        "expect_review_outputs": {"provider_unanswered": "true", "review_rc": "1",
+                                  "discarded_verdict": "false"},
+    },
+    {
         "name": "provider-unanswered",
         "fake": "provider-unanswered",
         "expect_exit": 3,
-        "expect_steps": ["review", "parse", "Gate (inconclusive)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close after N BLOCK/INCONCLUSIVE verdicts", "Gate (inconclusive)", "evidence"],
         "expect_verdict": "INCONCLUSIVE",
         "expect_comment": True,
         "expect_auto_merge": False,
+        # END-TO-END anti-tautology: the EXACT literal the auto-close counter matches
+        # (the workflow's `contains("## validator INCONCLUSIVE")`) must be present in
+        # the comment the gate REALLY posts. A rename of the notice header fails HERE.
+        # The post-loop replay check below ties the same emitted body back through the
+        # REAL counter, so a rename of the counter's literal fails THERE.
         "expect_comment_contains": [
-            "validator INCONCLUSIVE",
+            "## validator INCONCLUSIVE",
             "provider unanswered",
             "in-job retries: none",
             "AI_REVIEW_STREAM_IDLE_TIMEOUT",
@@ -601,7 +674,7 @@ SCENARIOS = [
         "name": "engine-defective",
         "fake": "engine-defective",
         "expect_exit": 3,
-        "expect_steps": ["review", "parse", "Gate (inconclusive)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close after N BLOCK/INCONCLUSIVE verdicts", "Gate (inconclusive)", "evidence"],
         "expect_verdict": "INCONCLUSIVE",
         "expect_comment": True,
         "expect_auto_merge": False,
@@ -622,7 +695,7 @@ SCENARIOS = [
         "name": "provider-error",
         "fake": "provider-error",
         "expect_exit": 3,
-        "expect_steps": ["review", "parse", "Gate (inconclusive)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close after N BLOCK/INCONCLUSIVE verdicts", "Gate (inconclusive)", "evidence"],
         "expect_verdict": "INCONCLUSIVE",
         "expect_comment": True,
         "expect_auto_merge": False,
@@ -657,7 +730,7 @@ SCENARIOS = [
         "name": "unanswered-plus-error",
         "fake": "unanswered-plus-error",
         "expect_exit": 3,
-        "expect_steps": ["review", "parse", "Gate (inconclusive)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close after N BLOCK/INCONCLUSIVE verdicts", "Gate (inconclusive)", "evidence"],
         "expect_verdict": "INCONCLUSIVE",
         "expect_comment": True,
         "expect_auto_merge": False,
@@ -697,7 +770,7 @@ SCENARIOS = [
         "name": "mixed-signals",
         "fake": "mixed-signals",
         "expect_exit": 3,
-        "expect_steps": ["review", "parse", "Gate (inconclusive)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close after N BLOCK/INCONCLUSIVE verdicts", "Gate (inconclusive)", "evidence"],
         "expect_verdict": "INCONCLUSIVE",
         "expect_comment": True,
         "expect_auto_merge": False,
@@ -722,7 +795,7 @@ SCENARIOS = [
         "name": "non-error-status",
         "fake": "non-error-status",
         "expect_exit": 3,
-        "expect_steps": ["review", "parse", "Gate (inconclusive)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close after N BLOCK/INCONCLUSIVE verdicts", "Gate (inconclusive)", "evidence"],
         "expect_verdict": "INCONCLUSIVE",
         "expect_comment": True,
         "expect_auto_merge": False,
@@ -742,7 +815,7 @@ SCENARIOS = [
         "name": "verdict-less",
         "fake": "verdict-less",
         "expect_exit": 3,
-        "expect_steps": ["review", "parse", "Gate (inconclusive)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close after N BLOCK/INCONCLUSIVE verdicts", "Gate (inconclusive)", "evidence"],
         "expect_verdict": "INCONCLUSIVE",
         "expect_comment": True,
         "expect_auto_merge": False,
@@ -777,7 +850,7 @@ SCENARIOS = [
         "name": "pass-with-error",
         "fake": "pass-with-error",
         "expect_exit": 3,
-        "expect_steps": ["review", "parse", "Gate (inconclusive)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close after N BLOCK/INCONCLUSIVE verdicts", "Gate (inconclusive)", "evidence"],
         "expect_verdict": "INCONCLUSIVE",
         "expect_comment": True,
         "expect_auto_merge": False,
@@ -798,7 +871,7 @@ SCENARIOS = [
         "name": "block-with-error",
         "fake": "block-with-error",
         "expect_exit": 1,
-        "expect_steps": ["review", "parse", "Auto-close after N BLOCKs", "Gate (BLOCK)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close after N BLOCK/INCONCLUSIVE verdicts", "Gate (BLOCK)", "evidence"],
         "expect_verdict": "BLOCK",
         "expect_comment": False,
         "expect_auto_merge": False,
@@ -857,9 +930,10 @@ def run_scenario(spec, ordered, tmpdir, fakedir, workspace):
         env["FAKE_LOG"] = log_path
         env["FAKE_COMMENT_LOG"] = comment_path
         env["FAKE_SCENARIO"] = spec["fake"]
-        # The auto-close step counts the PR's BLOCK comments via `gh api`; the
+        # The auto-close step counts the PR's BLOCK/INCONCLUSIVE comments via `gh api`; the
         # scenario supplies the count so the threshold branch is exercised.
         env["FAKE_BLOCK_COUNT"] = str(spec.get("block_count", 0))
+        env["FAKE_INCONCLUSIVE_COUNT"] = str(spec.get("inconclusive_count", 0))
         env["FAKE_OTHER_COUNT"] = str(spec.get("other_count", 0))
         env["FAKE_PAGE_SIZE"] = str(spec.get("page_size", 30))
         stem = label + "." + re.sub("[^A-Za-z0-9]+", "_", name)
@@ -919,6 +993,14 @@ def run_scenario(spec, ordered, tmpdir, fakedir, workspace):
         comment = fh.read()
     with open(log_path, "r", encoding="utf-8") as fh:
         calls = fh.read()
+    # The fake gh pr comment appends every posted body to comment_path; the auto-close
+    # replay below needs it to survive this function, so it is captured here (the CONTENT
+    # is returned) and the file is removed — no leftover per-scenario artifact.
+    comment_log = comment
+    try:
+        os.remove(comment_path)
+    except OSError:
+        pass
     for path in RUNNER_PATHS:
         if os.path.exists(path):
             os.remove(path)
@@ -933,6 +1015,7 @@ def run_scenario(spec, ordered, tmpdir, fakedir, workspace):
         "skipped": skipped,
         "outputs": step_outputs,
         "comment": comment,
+        "comment_log": comment_log,
         "calls": calls,
         "summary": summary,
     }
@@ -1066,9 +1149,38 @@ def run_harness():
     note("REVIEW_PROMPT_PATH" not in review_env and "AI_REVIEW_PROMPT_EXTRA" not in review_env,
          "structural: the dead REVIEW_PROMPT_PATH file mechanism and the AI_REVIEW_PROMPT_EXTRA "
          "append knob are GONE from the review step (ONE prompt mechanism)")
-    note("cut -c1-2000" in text and "tail -c 16000" in text,
-         "structural: the INCONCLUSIVE diagnostics tail is BOUNDED (line count, line length, "
-         "total) so the notice always posts under GitHub's 65536-character limit")
+    note(("cut -c1-2000" not in text and "tail -c 16000" not in text
+          and "tail -n 40 /tmp/review.log" not in text),
+         "structural: the INCONCLUSIVE notice does NOT embed the review-log diagnostics "
+         "(a degenerate-repetition log is hundreds of KB; embedding it feeds the runaway "
+         "back into the NEXT review's context and deepens the collapse — opencharly/charly#712)")
+    note("evidence artifact" in text,
+         "structural: the INCONCLUSIVE notice points at the run's evidence artifact + job log "
+         "for the full diagnostics, instead of embedding them")
+    # The auto-close counter matches the EXACT header the INCONCLUSIVE gate posts.
+    # The previous guard counted the literal in the workflow TEXT (>= 2) — a TAUTOLOGY:
+    # the literal also occurs in the counter's own jq filter and its explanatory comment,
+    # so a rename of the notice header would make the production count 0 while this guard
+    # still passed. Derive the literal from the COUNTER, then require it in the GATE's
+    # emitted notice, so the two surfaces are tied rather than counted.
+    auto_close_run = find_step(steps, "name", "Auto-close after N BLOCK/INCONCLUSIVE verdicts")["run"]
+    concl_run = find_step(steps, "name", "Gate (inconclusive)")["run"]
+    inconclusive_literal = "## validator INCONCLUSIVE"
+    if inconclusive_literal in auto_close_run:
+        note(inconclusive_literal in concl_run,
+             "structural: the auto-close counter's literal (" + repr(inconclusive_literal) +
+             ") is the SAME header the INCONCLUSIVE gate posts — the literal the counter "
+             "MATCHES is present in the gate's notice body, so a rename of the notice fails HERE")
+        note("echo '## validator INCONCLUSIVE" in concl_run,
+             "structural: the INCONCLUSIVE notice's first echoed line IS the counter's literal "
+             "(the exact header, not a substring of prose)")
+    else:
+        note(False,
+             "structural: the auto-close counter no longer matches " + repr(inconclusive_literal) +
+             " — the harness cannot tie the count to the emitted notice (update this guard "
+             "together with the counter)")
+    note("## Review — BLOCK" in auto_close_run,
+         "structural: the auto-close counter still matches the BLOCK verdict's exact header")
     if "AI_REVIEW_TOOL_RESULT_MAX_BYTES" in review_env:
         raw_t = review_env["AI_REVIEW_TOOL_RESULT_MAX_BYTES"]
         ns_unset_t = Ctx({"vars": Ctx({}), "inputs": Ctx({}), "secrets": Ctx({})})
@@ -1144,7 +1256,7 @@ def run_harness():
     #   (a) pin UNSET          -> ::error:: + exit 3 (INCONCLUSIVE; never a fallback)
     #   (b) on-PATH == pin     -> exit 0 (uses the on-PATH binary)
     #   (c) on-PATH != pin     -> ::warning:: + downloads the pinned release
-    pin_tmp = tempfile.mkdtemp(prefix="validator-pin-guard.")
+    pin_tmp = make_tmpdir("validator-pin-guard.")
     pin_ns = build_ns({}, pin_tmp, pin_tmp)
     pin_script = os.path.join(pin_tmp, "ensure-charly.sh")
     with open(pin_script, "w", encoding="utf-8") as fh:
@@ -1188,7 +1300,7 @@ def run_harness():
          "functional: ensure-charly LOUDLY warns and downloads the pinned engine when the "
          "on-PATH charly DIFFERS from the pin (the stale-engine defect)")
 
-    tmpdir = tempfile.mkdtemp(prefix="validator-gate-harness.")
+    tmpdir = make_tmpdir("validator-gate-harness.")
     fakedir = os.path.join(tmpdir, "fakebin")
     os.makedirs(fakedir)
     write_executable(os.path.join(fakedir, "charly"), FAKE_CHARLY)
@@ -1198,8 +1310,10 @@ def run_harness():
     open(os.path.join(workspace, "runner-config", "review-plan.yml"), "w").close()
     open(os.path.join(workspace, "runner-config", "prompt", "validator.md"), "w").close()
 
+    scenario_results = []
     for spec in SCENARIOS:
         result = run_scenario(spec, ordered, tmpdir, fakedir, workspace)
+        scenario_results.append((spec, result))
         log.append("")
         log.append("=== scenario: " + spec["name"] + "   (fake charly scenario: " + spec["fake"] + ") ===")
         log.extend(result["transcript"])
@@ -1244,6 +1358,90 @@ def run_harness():
         for needle in spec.get("expect_summary_contains", []):
             note(needle in result["summary"],
                  prefix + "run Summary contains " + repr(needle))
+
+    # ==== END-TO-END: tie the auto-close counter to the gate's EMITTED artifact ====
+    # The validator's block-2 finding: the old guard counted the counter's literal in the
+    # workflow TEXT (`text.count(...) >= 2`), but that literal also occurs in the counter's
+    # own jq filter and its explanatory comment — so it was a TAUTOLOGY and a rename of the
+    # notice header would silently zero the production count while the guard still passed.
+    # The tie is now made against the ARTIFACT: take the EXACT comment body the real
+    # `Gate (inconclusive)` step posted (captured in $FAKE_COMMENT_LOG), replay it through the
+    # REAL Auto-close step, and require it to CLOSE. A rename of either surface fails here.
+    auto_close_step = find_step(steps, "name", "Auto-close after N BLOCK/INCONCLUSIVE verdicts")
+    replay_ns = build_ns({}, workspace, tmpdir)
+    replay_bin = os.path.join(tmpdir, "replay-bin")
+    os.makedirs(replay_bin)
+    write_executable(os.path.join(replay_bin, "gh"), FAKE_GH)
+    write_executable(os.path.join(replay_bin, "charly"), FAKE_CHARLY)
+    auto_close_script = os.path.join(tmpdir, "replay-auto-close.sh")
+    with open(auto_close_script, "w", encoding="utf-8") as fh:
+        fh.write(subst(auto_close_step["run"], replay_ns))
+
+    def run_auto_close(comment_log_body):
+        """Replay a captured comment log through the REAL auto-close step (threshold 1)."""
+        clog = os.path.join(tmpdir, "replay.comment.log")
+        with open(clog, "w", encoding="utf-8") as fh:
+            fh.write(comment_log_body)
+        calls = os.path.join(tmpdir, "replay.calls.log")
+        open(calls, "w").close()
+        genv = dict(os.environ)
+        genv["PATH"] = replay_bin + os.pathsep + genv.get("PATH", "")
+        for key, value in auto_close_step["env"].items():
+            genv[key] = subst(value, replay_ns)
+        genv["THRESHOLD"] = "1"          # force the close branch on a single verdict
+        genv["FAKE_LOG"] = calls
+        genv["FAKE_COMMENT_LOG"] = clog
+        # ZERO synthetic counts: the ONLY way the counter reaches 1 is by matching the body
+        # REPLAYED from the gate's own emitted notice — never a seeded literal.
+        genv["FAKE_BLOCK_COUNT"] = "0"
+        genv["FAKE_INCONCLUSIVE_COUNT"] = "0"
+        genv["FAKE_OTHER_COUNT"] = "0"
+        genv["FAKE_PAGE_SIZE"] = "30"
+        proc = subprocess.run(
+            ["bash", "--noprofile", "--norc", "-eo", "pipefail", auto_close_script],
+            cwd=workspace, env=genv, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, universal_newlines=True)
+        with open(calls, "r", encoding="utf-8") as fh:
+            return proc.returncode, proc.stdout, fh.read()
+
+    pu_result = dict((s["name"], r) for s, r in scenario_results).get("provider-unanswered")
+    emitted_log = pu_result["comment_log"] if pu_result else ""
+    first_notice = emitted_log.split("=== gh pr comment (fake gh) ===", 1)[-1].lstrip("\n")
+    note(first_notice.startswith("## validator INCONCLUSIVE"),
+         "functional: the EXACT literal the auto-close counter matches "
+         "('## validator INCONCLUSIVE') opens the gate's EMITTED notice — the emitted "
+         "artifact and the counter's filter are TIED, not counted (renaming the notice fails HERE)")
+    rc, out, calls = run_auto_close(emitted_log)
+    note("BLOCK/INCONCLUSIVE verdicts on this PR: 1" in out,
+         "functional: replaying the gate's REAL emitted notice through the REAL auto-close step "
+         "yields count == 1 with ZERO synthetic injections (the counter read the emitted artifact)")
+    note("pr close" in calls,
+         "functional: the replayed emitted notice CLOSES the PR at threshold=1 — the "
+         "INCONCLUSIVE auto-close is exercised end-to-end against the gate's own header")
+    # NEGATIVE CONTROL — the exact break the tautology hid: rename the emitted header and
+    # prove the REAL counter drops to 0 and does NOT close. Without this the positive replay
+    # could pass on any text the counter happened to match.
+    renamed_log = emitted_log.replace("## validator INCONCLUSIVE", "## validator VERDICT-MISSING", 1)
+    rc2, out2, calls2 = run_auto_close(renamed_log)
+    note("pr close" not in calls2 and "BLOCK/INCONCLUSIVE verdicts on this PR: 0" in out2,
+         "functional: NEGATIVE CONTROL — renaming the gate's header to "
+         "'## validator VERDICT-MISSING' drops the REAL counter to 0 and does NOT close "
+         "(the counter is genuinely bound to the emitted header, so a rename cannot silently "
+         "disable the INCONCLUSIVE auto-close) — got: " +
+         " | ".join(line for line in out2.splitlines() if "verdicts on this PR" in line))
+
+    # SELF-CLEANING COVERAGE (R1): every temp dir this run created is removed here, and
+    # the removal is ASSERTED. One functional test (the ensure-charly pin guard) downloads
+    # a ~383 MB release; uncleaned dirs accumulate across runs and exhaust the runner's
+    # quota (measured: ~30 runs -> EDQUOT, which then fails EVERY scenario and masquerades
+    # as a code regression). Removing cleanup must FAIL this assertion, so the leak cannot
+    # silently return.
+    dirs_created = list(_TMP_DIRS)
+    cleanup_tmpdirs()
+    leaked = [d for d in dirs_created if os.path.exists(d)]
+    note(len(dirs_created) >= 2 and not leaked,
+         "functional: the harness removes EVERY temp dir it created (no disk-quota leak) "
+         "— created=" + str(len(dirs_created)) + " leaked=" + str(leaked))
 
     print(NL.join(log))
     failed = [message for ok, message in checks if not ok]

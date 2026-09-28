@@ -310,6 +310,18 @@ jobs:
           AI_REVIEW_CONTEXT_TOKENS: ${{ vars.AI_REVIEW_CONTEXT_TOKENS || '' }}
           AI_REVIEW_CONTEXT_MARGIN: ${{ vars.AI_REVIEW_CONTEXT_MARGIN || '' }}
           AI_REVIEW_PROMPT: ${{ vars.AI_REVIEW_PROMPT }}
+          # MAINTAINER SET — the configured, account-gated sign-off control. The
+          # review rulebook (AI_REVIEW_PROMPT) declares the project's maintainer set
+          # as CONFIGURATION (the env `AI_REVIEW_MAINTAINER`), NOT as PR content a
+          # change asserts for itself: the rulebook's "Maintainer sign-off" section
+          # names `AI_REVIEW_MAINTAINER` as the set for this run. The org variable of
+          # the same name carries `atrawog,aitrawog`. `vars` resolves in the TARGET
+          # repo's context (exact parity with the other AI_REVIEW_* knobs), so a repo
+          # may narrow or broaden its own set per-repo; empty means the engine keeps
+          # its generic default ("no designated maintainers configured"). The
+          # engine's getenvAny resolves an empty forward to "", so `|| ''` means
+          # "no override", never "empty set".
+          AI_REVIEW_MAINTAINER: ${{ vars.AI_REVIEW_MAINTAINER || '' }}
           AI_REVIEW_POST_COMMENT: ${{ vars.AI_REVIEW_POST_COMMENT || '' }}
           AI_REVIEW_TOOL_RESULT_MAX_BYTES: ${{ vars.AI_REVIEW_TOOL_RESULT_MAX_BYTES || '' }}
           # The GENERATION bounds (the measured root-cause fix, owned by the
@@ -489,17 +501,22 @@ jobs:
           fi
           echo "verdict=$distinct" >> "$GITHUB_OUTPUT"
 
-      # AUTO-CLOSE after N BLOCK verdicts (workflow policy, AI_REVIEW_AUTO_CLOSE_AFTER,
-      # default 5). A PR that keeps collecting BLOCKs — because the author re-pushes
-      # without fixing the raised findings — inflates the reviewer's context with its
-      # own comment thread and risks a runaway review. Counting BLOCKs and closing at
-      # the threshold, with a message telling the author to open a NEW fully-fixed PR,
-      # bounds that loop. Runs BEFORE the BLOCK gate so the close + message land, then
-      # the gate still fails the check (the close is a policy action, not a verdict).
-      # 0 disables it. The count is the PR's own review comments, so it survives
-      # across runs with no external state.
-      - name: Auto-close after N BLOCKs
-        if: steps.parse.outputs.verdict == 'BLOCK'
+      # AUTO-CLOSE after N non-PASS verdicts (workflow policy,
+      # AI_REVIEW_AUTO_CLOSE_AFTER, default 5). A PR that keeps collecting verdicts —
+      # because the author re-pushes without fixing the raised findings, OR because the
+      # provider keeps producing no answer (INCONCLUSIVE) — inflates the reviewer's own
+      # context with its comment thread and risks a runaway review. Counting the
+      # validator's OWN non-PASS verdict comments (BLOCK **and** INCONCLUSIVE) and
+      # closing at the threshold, with a message telling the author to open a NEW
+      # fully-fixed PR, bounds that loop for BOTH classes. An INCONCLUSIVE is not a code
+      # finding, so the "fix every finding" advice applies to any BLOCK in the thread;
+      # the close is the bounded loop-terminator either way. Runs BEFORE the BLOCK and
+      # INCONCLUSIVE gates so the close + message land, then the matching gate still
+      # fails the check (the close is a policy action, not a verdict). 0 disables it.
+      # The count is the PR's own review comments, so it survives across runs with no
+      # external state.
+      - name: Auto-close after N BLOCK/INCONCLUSIVE verdicts
+        if: steps.parse.outputs.verdict == 'BLOCK' || steps.parse.outputs.verdict == 'INCONCLUSIVE'
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ inputs.pr-number }}
@@ -513,24 +530,25 @@ jobs:
             echo "auto-close disabled (threshold=$THRESHOLD)"
             exit 0
           fi
-          # Count the validator's OWN BLOCK verdict comments (the exact
-          # "## Review — BLOCK" header every review comment carries). The count
-          # MUST be page-correct: `gh api --paginate ... --jq` applies the filter
-          # PER PAGE (so a >30-comment thread yields several numbers), which the
-          # guard below would reject and silently disable auto-close on exactly
-          # the long threads this feature exists to bound. `--paginate | jq -s`
-          # collects the pages into ONE array first.
-          blocks=$(gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments?per_page=100" 2>/dev/null \
-            | jq -s '[.[][] | select(.user.login=="github-actions[bot]") | select(.body | contains("## Review — BLOCK"))] | length' 2>/dev/null || true)
-          case "$blocks" in
-            ''|*[!0-9]*) echo "::warning::could not count BLOCK comments (got '$blocks') — not auto-closing"; exit 0;;
+          # Count the validator's OWN non-PASS verdict comments — the exact
+          # "## Review — BLOCK" header AND the exact "## validator INCONCLUSIVE"
+          # header every review comment carries. The count MUST be page-correct:
+          # `gh api --paginate ... --jq` applies the filter PER PAGE (so a
+          # >30-comment thread yields several numbers), which the guard below would
+          # reject and silently disable auto-close on exactly the long threads this
+          # feature exists to bound. `--paginate | jq -s` collects the pages into ONE
+          # array first.
+          nonpass=$(gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments?per_page=100" 2>/dev/null \
+            | jq -s '[.[][] | select(.user.login=="github-actions[bot]") | select((.body | contains("## Review — BLOCK")) or (.body | contains("## validator INCONCLUSIVE")))] | length' 2>/dev/null || true)
+          case "$nonpass" in
+            ''|*[!0-9]*) echo "::warning::could not count BLOCK/INCONCLUSIVE comments (got '$nonpass') — not auto-closing"; exit 0;;
           esac
-          echo "BLOCK verdicts on this PR: $blocks (threshold $THRESHOLD)"
-          if [ "$blocks" -lt "$THRESHOLD" ]; then
+          echo "BLOCK/INCONCLUSIVE verdicts on this PR: $nonpass (threshold $THRESHOLD)"
+          if [ "$nonpass" -lt "$THRESHOLD" ]; then
             echo "below threshold — not closing"
             exit 0
           fi
-          msg=$(printf '## Auto-closed: %s unanswered BLOCK verdicts\n\nThis PR has received **%s** validator `BLOCK` verdicts without the raised findings being fixed, so the gate is auto-closing it (threshold `AI_REVIEW_AUTO_CLOSE_AFTER=%s`).\n\n**Why:** re-running the validator against the same unfixed head only adds another BLOCK and grows this PR'\''s comment thread, which is what drives the reviewer into a runaway. The loop is bounded here instead.\n\n**What to do:** open a **NEW** pull request from a fresh branch with **every** finding from the BLOCK verdicts below already fixed, rather than continuing on this head. Each BLOCK comment lists the exact findings; read them all and fix them before opening the new PR.\n\nThis is a policy action, not a code finding — the validator verdict on this run stands.' "$blocks" "$blocks" "$THRESHOLD")
+          msg=$(printf '## Auto-closed: %s unanswered BLOCK/INCONCLUSIVE verdicts\n\nThis PR has received **%s** non-PASS validator verdicts — `BLOCK` (findings not fixed) and/or `INCONCLUSIVE` (the provider produced no answer) — so the gate is auto-closing it (threshold `AI_REVIEW_AUTO_CLOSE_AFTER=%s`).\n\n**Why:** re-running the validator against the same unfixed head only adds another verdict and grows this PR'\''s comment thread, which is what drives the reviewer into a runaway. The loop is bounded here instead.\n\n**What to do:** open a **NEW** pull request from a fresh branch. Fix **every** finding from any `BLOCK` verdict below before opening it. If the thread is all `INCONCLUSIVE` (no findings — the provider never answered), the close is a policy bound, not a code finding: re-open a fresh PR once the provider/engine condition is resolved.\n\nThis is a policy action, not a code finding — the validator verdict on this run stands.' "$nonpass" "$nonpass" "$THRESHOLD")
           gh pr comment "$PR_NUMBER" --repo "$REPO" --body "$msg" || echo "::warning::could not post the auto-close notice (non-fatal)"
           gh pr close "$PR_NUMBER" --repo "$REPO" || echo "::warning::could not close the PR (non-fatal)"
 
@@ -625,19 +643,15 @@ jobs:
             echo
             echo 'A run that produced no verdict keeps this required check **RED**: unreviewed code must never merge.'
             echo
-            echo '<details><summary>Diagnostics (tail of the review log)</summary>'
-            echo
-            echo '~~~'
-            # BOUNDED. The review log can carry ONE degenerate-repetition line of
-            # hundreds of KB (a model decode collapse), which pushes the comment
-            # body past GitHub's 65536-character limit — the notice then FAILS to
-            # post and the red required check has NO explanation (live evidence:
-            # `GraphQL: Body is too long (maximum is 65536 characters)`). Cap the
-            # line count, each line, AND the total so the notice always posts.
-            tail -n 40 /tmp/review.log 2>/dev/null | cut -c1-2000 | tail -c 16000 || echo '(no review log captured)'
-            echo '~~~'
-            echo
-            echo '</details>'
+            # The review-log diagnostics are deliberately NOT embedded in this comment.
+            # A degenerate-repetition run carries hundreds of KB of "Hmm." noise (measured:
+            # ~467 KB / 83k lines on the real context), and THIS comment is re-ingested into
+            # the NEXT review's context (the engine reads every PR comment), so embedding the
+            # runaway made the next review collapse harder — a positive feedback loop. The
+            # full diagnostics live in this run's uploaded EVIDENCE artifact and the job log,
+            # neither of which a later review reads. Keeping this notice short is the durable
+            # fix for the loop; see opencharly/charly#712.
+            echo "_Full diagnostics: this run's **evidence artifact** + job log (not embedded here — embedding a runaway log would feed it into the next review and deepen the collapse)._"
           } > /tmp/inconclusive-comment.md
           gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file /tmp/inconclusive-comment.md || echo "::warning::could not post the INCONCLUSIVE comment (non-fatal)"
           echo "::error::validator INCONCLUSIVE — no review verdict was produced (not a BLOCK; no code finding) — see the PR comment"
