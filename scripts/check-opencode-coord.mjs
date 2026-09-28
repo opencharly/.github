@@ -188,7 +188,13 @@ if (mod) {
   // coord_watch watcher is long-lived → the supervisor restarts the server), and a
   // missing `signal` means an interrupted Session cannot stop the operation.
   ok(!/spawnSync/.test(src), "coord.ts contains NO synchronous spawn helper (spawnSync)");
-  ok(/signal/.test(src), "coord.ts references the abort `signal` (cancellable executors)");
+  // Match the actual abort WIRING, not prose: an `abort` listener that kills, and
+  // the executor's `toolCtx.signal` read. The word "signal" in a doc comment must
+  // not satisfy this.
+  ok(
+    /addEventListener\(\s*["']abort["']/.test(src) && /toolCtx\?\.signal/.test(src),
+    "coord.ts wires the abort (an `abort` listener + toolCtx?.signal), not merely mentions 'signal'",
+  );
   // Match the actual CALL SITE, not prose: the Bun branch calls the local `p.kill`
   // from `bun.spawn(...)`; the doc comment mentioning "Bun.spawn" must not satisfy
   // this on its own.
