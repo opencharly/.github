@@ -30,6 +30,8 @@ jobs:
         run: bash scripts/org-ruleset_test.sh
       - name: Run the dispatcher-retirement script test (offline, mock gh)
         run: bash scripts/retire-per-repo-dispatchers_test.sh
+      - name: Run the candy-gate-retirement script test (offline, mock gh)
+        run: bash scripts/retire-per-repo-candy-gates_test.sh
       - name: Run the repo-bootstrap script test (offline, mock gh)
         run: bash scripts/bootstrap-repo-main_test.sh
       - name: Run the governance-reconcile self-test (offline, fixtures)

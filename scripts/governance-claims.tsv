@@ -39,5 +39,7 @@ rerun_manual	marketplace projection	marketplace/internals/skills/git-workflow/SK
 rerun_manual	marketplace projection	marketplace/internals/skills/git-workflow/SKILL.md	forbid	rerun.yml. sweep
 rerun_manual	org-wide required workflow	dotgithub/.github/workflows/org-wide-pr-validator-required.yml	forbid	distribute-rerun-listener
 auto_close_threshold	validator workflow	dotgithub/.github/workflows/pr-validator.yml	require	AI_REVIEW_AUTO_CLOSE_AFTER .. .5.
+candy_gate_single_pin	org-wide candy validate reusable	dotgithub/.github/workflows/candy-validate.yml	require	vars.CHARLY_VERSION
+candy_gate_no_hand_pin	org-wide candy validate reusable	dotgithub/.github/workflows/candy-validate.yml	forbid	--branch v20
 auto_close_threshold	umbrella AGENTS.md	AGENTS.md	require	AI_REVIEW_AUTO_CLOSE_AFTER., default 5
 auto_close_threshold	git-workflow skill source	layer-charly-internals/charly.yml	require	AI_REVIEW_AUTO_CLOSE_AFTER., (effective )?default 5
