@@ -3,8 +3,10 @@
 # WHY THIS EXISTS. ~376 opencharly repos carried a HAND-ROLLED per-repo
 # `.github/workflows/deploy.yml` (`name: candy`, job `build`) that CI-time-cloned
 # `opencharly/charly` at a HAND-PINNED tag and ran `charly box validate`. 298 of the
-# 376 were frozen at `v2026.238.1242` and 15 distinct charly pins existed; nothing
-# advanced them. That is a per-repo copy of a shared gate: a schema/pin change becomes a
+# 376 were frozen at `v2026.238.1242`, and 16 distinct charly pins existed: 374 stubs
+# named an inline `v2026.*` tag (15 distinct tags), and plugin-herdr/pod-herdr pinned
+# charly via a git-submodule gitlink at `v2026.251.0841` (the 16th). Nothing advanced
+# them. That is a per-repo copy of a shared gate: a schema/pin change becomes a
 # 376-repo sweep instead of one edit.
 #
 # The schema-versioning-removal cutover made this acute — the retired authoured

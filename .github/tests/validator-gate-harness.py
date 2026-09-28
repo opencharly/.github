@@ -52,6 +52,13 @@ SCENARIOS ASSERTED END TO END (exit code + classification output + PR comment)
   prove the merge was not armed - a fail-closed classification must be proven,
   not inferred.
 
+  It ALSO drives the REAL `run:` bodies of the org-wide candy-manifest reusable
+  `.github/workflows/candy-validate.yml` offline (see run_harness()'s candy-validate
+  section): the clean-skip branch (no `charly.yml` -> `present=false` -> the
+  pin-required step's `if` resolves false -> GREEN) and the fail-loud branch
+  (`charly.yml` present + `vars.CHARLY_VERSION` unset -> non-zero `::error::`). The
+  happy path (clone + build the pinned charly) needs network and is not run offline.
+
   Plus structural guards: the review step contains NO in-job retry (no sleep, no
   for-attempt loop) - the R4 regression guard for the dropped retry band-aid - the
   workflow pins a charly release WITH the taxonomy marker, never the old one, and
@@ -95,6 +102,11 @@ WORKFLOW_PATH = os.path.join(REPO_ROOT, ".github", "workflows", "pr-validator.ym
 # silently regress into "present but invoked by nothing" (R10).
 HARNESS_WORKFLOW_PATH = os.path.join(REPO_ROOT, ".github", "workflows",
                                      "validator-harness.yml")
+# The org-wide candy-manifest reusable. Its skip / fail-loud branches are BEHAVIOUR, so
+# they are driven offline here too (the same real-`run:`-body technique) instead of a
+# static text check — see run_harness()'s candy-validate section.
+CANDY_WORKFLOW_PATH = os.path.join(REPO_ROOT, ".github", "workflows",
+                                   "candy-validate.yml")
 
 STEP_PREFIX = "      - "   # a step marker in this workflow
 KEY_INDENT = 8             # name: / id: / if: / run: / env:
@@ -1429,6 +1441,86 @@ def run_harness():
          "(the counter is genuinely bound to the emitted header, so a rename cannot silently "
          "disable the INCONCLUSIVE auto-close) — got: " +
          " | ".join(line for line in out2.splitlines() if "verdicts on this PR" in line))
+
+    # ==== org-wide candy-validate reusable: the skip + fail-loud branches (R10) ====
+    # The reusable `.github/workflows/candy-validate.yml` ships BEHAVIOUR — a repo with
+    # no `charly.yml` must skip GREEN, and an unset org pin must fail LOUD (no bundled
+    # fallback). Those branches are exercised here by running the REAL `run:` bodies
+    # offline (the same technique as the pr-validator scenarios); a static text match
+    # would not fail if the branch logic regressed. The happy path (git clone + go
+    # build of the pinned charly) needs network and is out of scope for an offline
+    # harness; the two guard branches are the new behaviour this reusable adds.
+    candy_text, candy_steps = parse_workflow(CANDY_WORKFLOW_PATH)
+    note("workflow_call" in candy_text,
+         "structural: candy-validate.yml is an `on: workflow_call` reusable (no trigger "
+         "of its own, so it never self-runs)")
+    candy_detect = find_step(candy_steps, "id", "detect")["run"]
+    candy_require = find_step(
+        candy_steps, "name",
+        "Require the org charly pin (fail loud, never fall back)")
+    candy_tmp = make_tmpdir("candy-validate.")
+    candy_bash = shutil.which("bash") or "/bin/bash"
+
+    def candy_detect_run(ws):
+        """Run the REAL detect step body against a workspace; return (rc, out, outputs)."""
+        out_path = os.path.join(ws, "detect.out")
+        open(out_path, "w").close()
+        denv = dict(os.environ)
+        denv["GITHUB_OUTPUT"] = out_path
+        proc = subprocess.run(
+            [candy_bash, "--noprofile", "--norc", "-eo", "pipefail", "-c", candy_detect],
+            cwd=ws, env=denv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            universal_newlines=True)
+        return proc.returncode, proc.stdout, read_outputs(out_path)
+
+    # (a) NO charly.yml -> detect emits present=false, and the pin-required step's `if`
+    #     resolves FALSE, so it is skipped and the job stays GREEN (the skip contract).
+    ws_absent = os.path.join(candy_tmp, "absent")
+    os.makedirs(ws_absent)
+    rc, out, outs = candy_detect_run(ws_absent)
+    note(rc == 0 and outs.get("present") == "false",
+         "functional: candy-validate detect with NO charly.yml emits present=false "
+         "(the clean-skip contract) — got present=" + repr(outs.get("present")))
+    ns_absent = build_ns({"detect": outs}, ws_absent, candy_tmp)
+    note(subst("${{ " + candy_require["if"] + " }}", ns_absent) == "false",
+         "functional: candy-validate's pin-required step `if` resolves FALSE when "
+         "charly.yml is absent (the fail-loud step is SKIPPED, never run on a "
+         "non-candy repo)")
+
+    # (b) charly.yml PRESENT, org pin UNSET -> the require step exits non-zero LOUD.
+    ws_present = os.path.join(candy_tmp, "present")
+    os.makedirs(ws_present)
+    with open(os.path.join(ws_present, "charly.yml"), "w", encoding="utf-8") as fh:
+        fh.write("name: probe\n")
+    rc, out, outs = candy_detect_run(ws_present)
+    note(rc == 0 and outs.get("present") == "true",
+         "functional: candy-validate detect WITH charly.yml emits present=true")
+    ns_present = build_ns({"detect": outs}, ws_present, candy_tmp)
+    ns_present["vars"] = Ctx({})  # vars.CHARLY_VERSION unset
+    req_script = os.path.join(candy_tmp, "require.sh")
+    with open(req_script, "w", encoding="utf-8") as fh:
+        fh.write(subst(candy_require["run"], ns_present))
+    req_env = dict(os.environ)
+    for key, value in candy_require["env"].items():
+        req_env[key] = subst(value, ns_present)
+    proc = subprocess.run(
+        [candy_bash, "--noprofile", "--norc", "-eo", "pipefail", req_script],
+        cwd=ws_present, env=req_env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        universal_newlines=True)
+    note(proc.returncode != 0 and "::error::" in proc.stdout,
+         "functional: candy-validate with charly.yml present and vars.CHARLY_VERSION "
+         "UNSET exits non-zero with ::error:: (fail loud; NO bundled fallback) — got "
+         "rc=" + str(proc.returncode))
+
+    # (c) pin SET -> the guard passes (rc 0). Proves the fail is the UNSET pin, not the step.
+    req_env_set = dict(req_env)
+    req_env_set["CHARLY_VERSION"] = "v2026.271.0950"
+    proc = subprocess.run(
+        [candy_bash, "--noprofile", "--norc", "-eo", "pipefail", req_script],
+        cwd=ws_present, env=req_env_set, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        universal_newlines=True)
+    note(proc.returncode == 0,
+         "functional: candy-validate with the org pin SET passes the pin guard (rc=0)")
 
     # SELF-CLEANING COVERAGE (R1): every temp dir this run created is removed here, and
     # the removal is ASSERTED. One functional test (the ensure-charly pin guard) downloads
