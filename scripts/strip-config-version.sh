@@ -60,7 +60,7 @@ set -euo pipefail
 # vocabulary — carries `alpine:`/`debian:`/`fedora:`/`ubuntu:` -> `distro:` ->
 # `version:` (`#Distro.version`, a live schema/distro.cue field; charly's own
 # distro_cascade_test.go asserts debian=13, ubuntu=24.04, fedora=43), and the merged
-# host leg charly#716 removed ONLY that file's line-1 stamp, leaving the four
+# host leg charly#716 (auto-closed; its successor carries the work forward) removed ONLY that file's line-1 stamp, leaving the four
 # versions intact. A `version:` line INDENTED 16 OR MORE is a fenced YAML example
 # INSIDE a `description: |` block scalar and is PRESERVED (measured: 9 repos, e.g.
 # layer-charly-hermes's `                version: 2026.156.1921   # mandatory CalVer`,

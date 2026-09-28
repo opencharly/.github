@@ -44,7 +44,7 @@ would also delete a LIVE `version:` field that happens to sit at indent 4/8 — 
 `charly/charly.yml`, the binary's `go:embed`-ed DEFAULT build vocabulary. Those are
 `#Distro.version` (a live `schema/distro.cue` field; charly's own
 `distro_cascade_test.go` asserts `debian version=13`, `ubuntu version=24.04`,
-`fedora version=43`), and the merged host leg charly#716 deleted ONLY that file's
+`fedora version=43`), and the host leg charly#716 (auto-closed; its successor carries it forward) deleted ONLY that file's
 line-1 stamp, leaving the four distro versions intact.
 
   * indent 0, a `version:` key                     -> DELETE (document stamp)
