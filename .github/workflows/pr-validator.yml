@@ -310,6 +310,18 @@ jobs:
           AI_REVIEW_CONTEXT_TOKENS: ${{ vars.AI_REVIEW_CONTEXT_TOKENS || '' }}
           AI_REVIEW_CONTEXT_MARGIN: ${{ vars.AI_REVIEW_CONTEXT_MARGIN || '' }}
           AI_REVIEW_PROMPT: ${{ vars.AI_REVIEW_PROMPT }}
+          # MAINTAINER SET — the configured, account-gated sign-off control. The
+          # review rulebook (AI_REVIEW_PROMPT) declares the project's maintainer set
+          # as CONFIGURATION (the env `AI_REVIEW_MAINTAINER`), NOT as PR content a
+          # change asserts for itself: the rulebook's "Maintainer sign-off" section
+          # names `AI_REVIEW_MAINTAINER` as the set for this run. The org variable of
+          # the same name carries `atrawog,aitrawog`. `vars` resolves in the TARGET
+          # repo's context (exact parity with the other AI_REVIEW_* knobs), so a repo
+          # may narrow or broaden its own set per-repo; empty means the engine keeps
+          # its generic default ("no designated maintainers configured"). The
+          # engine's getenvAny resolves an empty forward to "", so `|| ''` means
+          # "no override", never "empty set".
+          AI_REVIEW_MAINTAINER: ${{ vars.AI_REVIEW_MAINTAINER || '' }}
           AI_REVIEW_POST_COMMENT: ${{ vars.AI_REVIEW_POST_COMMENT || '' }}
           AI_REVIEW_TOOL_RESULT_MAX_BYTES: ${{ vars.AI_REVIEW_TOOL_RESULT_MAX_BYTES || '' }}
           # The GENERATION bounds (the measured root-cause fix, owned by the
