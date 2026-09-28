@@ -5,7 +5,7 @@ merges it. FILL EVERY SECTION with EVIDENCE, not promises — the pr-validator
 FAILS a body that leaves any applicable section blank, answers a rule with a
 bare checkbox instead of HOW it was satisfied, or pastes no R10 output. Mark a
 line `N/A — <reason>` where the change class genuinely excludes it (docs-only
-skips the runtime rules). See CLAUDE.md "Ground Truth Rules" + "Post-Execution
+skips the runtime rules). See AGENTS.md "Ground Truth Rules" + "Post-Execution
 Policies" + /charly-internals:git-workflow + /charly-check:check "R10 gate by
 change class". Do NOT compute the release CalVer: use a placeholder
 CHANGELOG/<CalVer>.md; the pr-validator finalizes the merge-time version.
@@ -90,7 +90,7 @@ FAILS** — applicable or not, an empty block is never a valid answer.
 - **R7 runtime gate:** <!-- a runtime-affecting change ran the end-to-end bed gate, not just `go test` — or N/A -->
 - **R8 artifact invariants:** <!-- a generation change asserted the emitted Containerfile sections + `ai.opencharly.*` labels post-build — or N/A -->
 - **R9 binary == source + deps:** <!-- deployed binary rebuilt + `charly version` matches; new runtime OS deps in the charly candy's `packaging:` section (`candy/charly/charly.yml`) — or N/A -->
-- **R10 disposable + coverage:** <!-- proven on `disposable: true` only, fresh rebuild, zero warnings; ships the check/test coverage that would FAIL without this change. For a DOCS-ONLY change this branches, per CLAUDE.md R10: run the non-runtime standards and NO bed. Say so plainly, and do not invent a runtime-shaped answer to fill a runtime-shaped demand. -->
+- **R10 disposable + coverage:** <!-- proven on `disposable: true` only, fresh rebuild, zero warnings; ships the check/test coverage that would FAIL without this change. For a DOCS-ONLY change this branches, per AGENTS.md R10: run the non-runtime standards and NO bed. Say so plainly, and do not invent a runtime-shaped answer to fill a runtime-shaped demand. -->
 - **RDD / ADE / SDD:** <!-- RDD: high-risk assumptions (esp. composition-at-latest-versions) bed-proven, not doc-read. ADE: every new/changed candy has `description:` + `plan:` with ≥1 deterministic `check:` (`charly box validate` passes). SDD: a schema/`.cue` edit regenerated its `*_gen.go` and `charly task cue-gen` is a no-op — or N/A -->
 - **Hard cutover:** <!-- ONE atomic commit per repo; no "Phase 2/TODO/deferred" left in scope; an approved plan executed as written -->
 - **Kernel/plugin boundary law:** <!-- a core/`sdk` change is only a generic Envelope/Mechanism/Bootstrap-root/kind-Data — no concrete-kind schema/switch/per-kind-map leaked into the kernel; a new capability is a plugin — or N/A -->
@@ -118,7 +118,7 @@ without opening five skills first. These DEFINE terms; they do not relax any rul
                  merge, not by the author. Use a placeholder `CHANGELOG/<CalVer>.md`.
                  The sdk is the one exception: Go modules forbid a leading-zero segment,
                  so it tags `v0.<YYYYDDD>.<HHMM zeros-stripped>`.
-  R0–R10         The Ground Truth Rules in CLAUDE.md / AGENTS.md. R0 skills-first;
+  R0–R10         The Ground Truth Rules in AGENTS.md. R0 skills-first;
                  R1 RCA every anomaly (a warning is a failure); R2 no "out of scope";
                  R3 no duplication; R4 no workarounds; R4a fix the product before the
                  prose; R5 delete legacy completely; R6 git safety; R7 prove behaviour
