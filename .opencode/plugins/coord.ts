@@ -59,11 +59,13 @@
  *     server log showed a reload); and
  *   - ignores `context.signal`, so stopping the Session did not stop the watch.
  * Both executors now use the SAME async, abortable primitive `pr-watch.ts` already
- * uses (`Bun.spawn`): the child is spawned with `signal: toolCtx.signal`, its
- * stdout/stderr are captured asynchronously, and abort KILLS it. `timeout` on
- * `coord_watch` is enforced from the TOOL (the watcher's own `--timeout` bounds it
- * internally; a tool-side deadline additionally aborts the child), so an
- * interrupted session terminates the watcher.
+ * uses (`Bun.spawn`): the child's stdout/stderr are captured asynchronously, and the
+ * tool executor's `context.signal` is wired to a `kill()` on abort (via the signal's
+ * `abort` event, not a spawn option) so stopping the Session terminates the watch.
+ * The kill is SIGKILL because the watcher's `trap '…' TERM` defers a SIGTERM until
+ * its foreground child finishes. `timeout` on `coord_watch` is additionally enforced
+ * from the TOOL as a deadline that triggers the same kill, so an interrupted session
+ * terminates the watcher.
  *
  * Defensive: a missing `coord.sh`/`gh_watch.sh` (marketplace pin too old), a
  * missing `gh`, or a missing required identity returns a clear message to the

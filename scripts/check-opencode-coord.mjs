@@ -430,23 +430,24 @@ if (process.env.LIVE_OPENCODE === "1") {
         'items=["acme/widget#1"] and timeout=2. Do NOT answer from memory — actually ' +
         "invoke the tool, then report its result.";
       let wlog = "";
-      let wallMs = 0;
       let watchTimedOut = false;
       for (let attempt = 1; attempt <= 2; attempt++) {
-        const w0 = Date.now();
         const wout = run("opencode", ["run", "--standalone", "--print-logs", "--auto", watchPrompt], {
           cwd: proj,
           timeout: 120000,
         });
-        wallMs = Date.now() - w0;
         wlog += `\n${wout.stdout ?? ""}\n${wout.stderr ?? ""}`;
         if (wout.signal || wout.error) watchTimedOut = true;
         if (/coord_watch/.test(wlog)) break;
       }
       ok(/coord_watch/.test(wlog), "real opencode: coord_watch was the tool exercised live");
+      // The DISCRIMINATING assertion is START/not-FULL below — NOT wall-clock. The
+      // run's ~40s wall time is opencode's own startup + one model turn; the watch
+      // itself was killed at its 2s deadline (proven by FULL being absent). A
+      // blocking spawn would let the 30s stub reach FULL.
       ok(
-        !watchTimedOut && wallMs > 0 && wallMs < 90000,
-        `real opencode: the coord_watch run COMPLETED (${wallMs}ms, no timeout) — the server was not frozen`,
+        !watchTimedOut,
+        "real opencode: the coord_watch run stayed within its subprocess budget (no 120s hang)",
       );
       // The discriminating assertion: the 30s stub began (START) but was KILLED
       // before it could finish (FULL). A blocking spawn would reach FULL.
