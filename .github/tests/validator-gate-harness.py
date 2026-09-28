@@ -1089,9 +1089,14 @@ def run_harness():
     note("REVIEW_PROMPT_PATH" not in review_env and "AI_REVIEW_PROMPT_EXTRA" not in review_env,
          "structural: the dead REVIEW_PROMPT_PATH file mechanism and the AI_REVIEW_PROMPT_EXTRA "
          "append knob are GONE from the review step (ONE prompt mechanism)")
-    note("cut -c1-2000" in text and "tail -c 16000" in text,
-         "structural: the INCONCLUSIVE diagnostics tail is BOUNDED (line count, line length, "
-         "total) so the notice always posts under GitHub's 65536-character limit")
+    note(("cut -c1-2000" not in text and "tail -c 16000" not in text
+          and "tail -n 40 /tmp/review.log" not in text),
+         "structural: the INCONCLUSIVE notice does NOT embed the review-log diagnostics "
+         "(a degenerate-repetition log is hundreds of KB; embedding it feeds the runaway "
+         "back into the NEXT review's context and deepens the collapse — opencharly/charly#712)")
+    note("evidence artifact" in text,
+         "structural: the INCONCLUSIVE notice points at the run's evidence artifact + job log "
+         "for the full diagnostics, instead of embedding them")
     if "AI_REVIEW_TOOL_RESULT_MAX_BYTES" in review_env:
         raw_t = review_env["AI_REVIEW_TOOL_RESULT_MAX_BYTES"]
         ns_unset_t = Ctx({"vars": Ctx({}), "inputs": Ctx({}), "secrets": Ctx({})})
