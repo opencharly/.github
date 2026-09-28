@@ -511,7 +511,10 @@ review-contract:
 
                 ## Agent identity & coordination (this project)
 
-                Agents coordinate on the live thread; the following are coordination metadata, NOT findings:
+                Agents coordinate on the live thread. On a TRIGGERED scope — two or more agents work the
+                same issue/PR, OR the scope is a blocking dependency (`BLOCKS`/`UNBLOCKS` in play) — the
+                footer and verb grammar below are MANDATORY; on an uncontended solo scope they are
+                optional. The following are coordination metadata, not themselves findings:
 
                 - Identity footer. An agent comment may end with two italic lines, in THIS order — first the
                   `*Agent: ` + backtick + `slug` + backtick + ` · session ses_…` + `*` identity line on its own
