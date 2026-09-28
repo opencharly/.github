@@ -8,7 +8,7 @@ set -euo pipefail
 #
 # WHY THIS EXISTS. ~376 repos carried a copy-pasted deploy.yml that CI-time-cloned
 # `opencharly/charly` at a HAND-PINNED tag and ran `charly box validate`. 298 were
-# frozen at `v2026.238.1242` and 16 distinct pins existed; nothing advanced them,
+# frozen at `v2026.238.1242` and 15 distinct charly pins existed; nothing advanced them,
 # so the schema-versioning-removal cutover left every version-strip PR failing its
 # OWN repo CI (`schema … is required (found ""). Run: charly migrate`). The fix is
 # ONE org-level source: the reusable `candy-validate.yml`, whose single knob is the

@@ -100,7 +100,7 @@ copy inherits the files here — so a change lands **once**, not in every repo.
 The candy/box validate gate used to be a hand-rolled per-repo
 `.github/workflows/deploy.yml` (`name: candy`, job `build`) that CI-time-cloned
 `opencharly/charly` at a HAND-PINNED tag. ~376 repos carried a copy, 298 frozen at
-`v2026.238.1242`, 16 distinct pins, nothing advancing them — so the
+`v2026.238.1242`, 15 distinct charly pins, nothing advancing them — so the
 schema-versioning-removal cutover left every version-strip PR failing its OWN repo CI.
 It is now ONE org-level source:
 
