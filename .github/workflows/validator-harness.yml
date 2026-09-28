@@ -36,3 +36,14 @@ jobs:
         run: bash scripts/sweep-rerun_test.sh
       - name: Run the rerun-label ensure test (offline, mock gh)
         run: bash scripts/ensure-rerun-label_test.sh
+      - name: Run the governance-reconcile self-test (offline, fixtures)
+        run: bash scripts/governance-reconcile.sh --self-test
+      - name: Reconcile the governance surfaces (org-wide; skips absent sibling repos)
+        # The cross-surface claims (footer order, the 60-min comment-first takeover window,
+        # the account-gated sign-off, the successor protocol, the rerun channel) must agree
+        # across the umbrella AGENTS.md, the git-workflow skill source, the generated
+        # marketplace corpus, and this repo's own workflows. Only this repo's surfaces exist
+        # in a standalone .github checkout, so the sibling rows SKIP visibly (the run is still
+        # non-silent); run with --root <umbrella checkout> to assert every row. A drift
+        # reddens the check.
+        run: bash scripts/governance-reconcile.sh
