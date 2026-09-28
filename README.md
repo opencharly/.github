@@ -48,6 +48,28 @@ copy inherits the files here — so a change lands **once**, not in every repo.
   and it carries the per-PR `concurrency` dedupe + `actions: write` (the #163
   constraint — see the file header). This file replacing the per-repo dispatcher
   is why no repo carries validator config of its own.
+- **`.github/workflows/candy-validate.yml`** — the ONE org-level candy/box manifest
+  gate (`on: workflow_call`). It clones `opencharly/charly` at the org variable
+  `vars.CHARLY_VERSION` — the single knob — builds the binary, and runs
+  `charly box validate`, skipping cleanly (green) when a repo has no `charly.yml`.
+  Called from a job named `candy` with this workflow's job `validate`, its check
+  context is `candy / validate`. It replaces the class of ~376 hand-rolled per-repo
+  `.github/workflows/deploy.yml` candy gates (298 frozen at `v2026.238.1242`), whose
+  stale pins failed every schema-versioning-removal PR's OWN repo CI. The pin is
+  mandatory (fail-loud; no bundled fallback). **Activation as a required gate is
+  deliberately deferred** until `vars.CHARLY_VERSION` names a release carrying the
+  schema-versioning removal: the pre-removal pin still *requires* the retired stamp,
+  so a required gate at the current pin would re-break the very PRs this replaces.
+- **`scripts/retire-per-repo-candy-gates.sh`** +
+  **`.github/workflows/retire-per-repo-candy-gates.yml`** — the one-shot org cutover
+  that DELETES those stale hand-rolled stubs (the `retire-per-repo-dispatchers.sh`
+  precedent). It runs as a workflow because a delete on a protected `main` needs a
+  ruleset-bypass commit author — the `charly-auto-merge` App (the workflow mints that
+  token). **Safety rule:** a `deploy.yml` is deleted ONLY when its parsed top-level
+  `name:` is exactly `candy`; `name: marketplace`, `name: docs`, and every other real
+  gate are SKIPPED, never touched (the parsed name, not the path, is the gate).
+  Idempotent (absent files skipped); its offline mock-`gh` test is
+  `scripts/retire-per-repo-candy-gates_test.sh`.
 - **`.github/workflows/validator-harness.yml`** +
   **`.github/tests/validator-gate-harness.py`** — the gate's own R10 coverage.
   The harness (python3 stdlib only, offline, fakes for charly and gh) drives the
@@ -55,9 +77,11 @@ copy inherits the files here — so a change lands **once**, not in every repo.
   classification, the INCONCLUSIVE comment and whether auto-merge was armed; the
   workflow runs it on every `pull_request` and on `workflow_dispatch`, so a
   non-zero harness exit reddens the check. The workflow also runs
-  `scripts/org-ruleset_test.sh` (the owner script's offline mock-`gh` test) so
-  the org-ruleset cutover logic is exercised on every `.github` PR. Coverage that
-  never runs enforces nothing.
+  `scripts/org-ruleset_test.sh`, `scripts/retire-per-repo-dispatchers_test.sh`,
+  `scripts/retire-per-repo-candy-gates_test.sh`, `scripts/bootstrap-repo-main_test.sh`
+  (the owner scripts' offline mock-`gh` tests) and the governance-reconcile gate, so
+  every cutover script is exercised on every `.github` PR. Coverage that never runs
+  enforces nothing.
 - **Body-only fix after a push — MANUAL (`gh run rerun`).** A REQUIRED workflow acts ONLY on
   the default push-driven `pull_request` types and IGNORES `on.types` — MEASURED *and* confirmed
   by the GitHub docs ("Troubleshooting rules": ruleset workflows ignore `branches`/`paths`/
@@ -70,6 +94,45 @@ copy inherits the files here — so a change lands **once**, not in every repo.
   POISON state without an empty re-freeze commit. There is **no automatic `rerun`-label channel**
   any more: the `rerun` label + scheduled sweep was RETIRED because a label added for any reason
   — including a comment — re-ran the gate without a body change.
+
+## The candy-manifest gate (ONE reusable, no per-repo copy)
+
+The candy/box validate gate used to be a hand-rolled per-repo
+`.github/workflows/deploy.yml` (`name: candy`, job `build`) that CI-time-cloned
+`opencharly/charly` at a HAND-PINNED tag. ~376 repos carried a copy, 298 frozen at
+`v2026.238.1242`, 16 distinct charly pins (374 at an inline tag — 15 distinct tags —
+plus plugin-herdr/pod-herdr at a submodule gitlink `v2026.251.0841`), nothing advancing
+them — so the schema-versioning-removal cutover left every version-strip PR failing its
+OWN repo CI.
+It is now ONE org-level source:
+
+- **`.github/workflows/candy-validate.yml`** — the reusable (`on: workflow_call`) that
+  clones charly at the org variable `vars.CHARLY_VERSION` (the single knob) and runs
+  `charly box validate`, skipping cleanly when a repo has no `charly.yml`. It is called
+  from a job named `candy`; this workflow's job is `validate`, so the check context is
+  **`candy / validate`** (the name a per-repo caller's job produces). Advancing the gate
+  is one `gh variable set CHARLY_VERSION --org opencharly …`, never a 376-repo sweep.
+- **`scripts/retire-per-repo-candy-gates.sh`** +
+  **`.github/workflows/retire-per-repo-candy-gates.yml`** — the one-shot cutover that
+  deletes the stale stubs. A `deploy.yml` is deleted ONLY when its parsed top-level
+  `name:` is `candy` AND its body carries the `charly box validate` signature;
+  `name: marketplace`, `name: docs`, and every other real gate are SKIPPED. Needs the
+  same `charly-auto-merge` App with `contents: write` **and** `workflows: write`.
+
+```console
+$ gh workflow run retire-per-repo-candy-gates.yml   # delete the per-repo stubs
+```
+
+**Activation is deliberately deferred.** The reusable is NOT yet named by the org ruleset
+as a required workflow. `vars.CHARLY_VERSION` currently names a release whose `box
+validate` still *requires* the retired `version:` stamp (measured against the live pin:
+`schema 2026.261.1747 is required (found ""). Run: charly migrate`), so making it
+required now would re-break the very PRs this replacement exists to unblock. Once the pin
+names a release carrying the schema-versioning removal (the `charly#716` host leg), the
+reusable may be named org-wide exactly as the validator is (a `workflows` ruleset rule
+pointing at a thin `candy-validate-required.yml` caller, or per-repo callers). Until then
+it is available for explicit opt-in and the retirement of the stale pins stands on its
+own (the deadlock is removed whether or not a new gate is required).
 
 Future org-wide defaults (issue templates, `CONTRIBUTING.md`, `SECURITY.md`) belong
 here too — one source, inherited everywhere.
@@ -134,7 +197,8 @@ The org ruleset targets every **active, non-fork, `main`-default** repo
 | Native auto-merge (squash) | Armed by the validator on PASS; needs the per-repo setting `allow_auto_merge=true` (enforced by `scripts/org-ruleset.sh apply`). | nothing (the script sets it) |
 | Remote branch cleanup at merge | `delete_branch_on_merge=true` (enforced by the same script). | nothing |
 | CalVer tag + `CHANGELOG/<CalVer>.md` | The org reusable `tag-on-merge.yml`. | **`.github/workflows/tag-on-merge.yml`** — the per-repo caller (fires on `workflow_run` of `charly/pr-validator` + `push` to `main`) |
-| The repo's own build/validate CI | — | the repo's `.github/workflows/` (e.g. `deploy.yml`) |
+| Candy/box manifest validation (`candy / validate`) | The org reusable `candy-validate.yml` (clones charly at `vars.CHARLY_VERSION`; skips repos with no `charly.yml`). No per-repo file. | nothing (an optional thin caller if a repo wants the check to run outside the org path) |
+| The repo's own build/deploy CI (a real gate) | — | the repo's `.github/workflows/` (e.g. `deploy.yml` where it is NOT the hand-rolled candy stub) |
 
 **Checklist for a brand-new repo:**
 
