@@ -70,6 +70,28 @@ copy inherits the files here — so a change lands **once**, not in every repo.
   gate are SKIPPED, never touched (the parsed name, not the path, is the gate).
   Idempotent (absent files skipped); its offline mock-`gh` test is
   `scripts/retire-per-repo-candy-gates_test.sh`.
+- **`scripts/strip-config-version.sh`** +
+  **`.github/workflows/strip-config-version.yml`** — the one-shot org cutover that
+  DELETES the schema-versioning-removal cutover's retired authored `version:` stamp
+  from every repo's `charly.yml` (393 repos still carry it). It runs as a workflow
+  because a commit to a protected `main` needs a ruleset-bypass commit author — the
+  `charly-auto-merge` App (the workflow mints that token), the same authorization the
+  candy-gate retirement uses; charly.yml is not a workflow file, so only the App's
+  `contents: write` is needed. Because the host leg of the removal
+  (`opencharly/charly#716`) is not landed and `charly migrate` reformats the whole
+  file (~100 cosmetic lines of churn, incl. trailing-whitespace changes INSIDE
+  `description:` block scalars), the strip is a MINIMAL-DIFF, parser-safe line filter
+  (`scripts/_strip-filter.py`) that touches ONLY the stamp lines. **Safety rule:** a
+  line is deleted ONLY when it matches `^ {0,8}version:` — the document stamp (indent
+  0) or an entity-body stamp (indent 8, and indent 4 in the two 2-space manifests); a
+  `version:` line indented 16+ is a fenced YAML example inside a `description: |`
+  block scalar and is PRESERVED (9 repos — deleting it would corrupt documentation,
+  e.g. layer-charly-hermes's `version: 2026.156.1921   # mandatory CalVer`). The
+  filter additionally refuses LOUDLY if a matched line ever sits inside a block
+  scalar. Idempotent (nothing to strip → never written); `DRY_RUN=1` reports what
+  WOULD change without committing; its offline mock-`gh` test is
+  `scripts/strip-config-version_test.sh` (which locks the real layer-charly-hermes
+  charly.yml as a committed fixture in `scripts/fixtures/`).
 - **`.github/workflows/validator-harness.yml`** +
   **`.github/tests/validator-gate-harness.py`** — the gate's own R10 coverage.
   The harness (python3 stdlib only, offline, fakes for charly and gh) drives the
@@ -79,7 +101,9 @@ copy inherits the files here — so a change lands **once**, not in every repo.
   non-zero harness exit reddens the check. The workflow also runs
   `scripts/org-ruleset_test.sh`, `scripts/retire-per-repo-dispatchers_test.sh`,
   `scripts/retire-per-repo-candy-gates_test.sh`, `scripts/bootstrap-repo-main_test.sh`
-  (the owner scripts' offline mock-`gh` tests) and the governance-reconcile gate, so
+  (the owner scripts' offline mock-`gh` tests), `scripts/strip-config-version_test.sh`
+  (the version-strip cutover's test, including the committed layer-charly-hermes
+  fixture that pins the block-scalar-preservation rule), and the governance-reconcile gate, so
   every cutover script is exercised on every `.github` PR. Coverage that never runs
   enforces nothing.
 - **Body-only fix after a push — MANUAL (`gh run rerun`).** A REQUIRED workflow acts ONLY on
