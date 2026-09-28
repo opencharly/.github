@@ -1,0 +1,52 @@
+# RETIRE THE PER-REPO HAND-ROLLED CANDY GATES (one-shot org cutover).
+#
+# ~376 repos carried a copy-pasted `.github/workflows/deploy.yml` (`name: candy`,
+# job `build`) that CI-time-cloned `opencharly/charly` at a HAND-PINNED tag and ran
+# `charly box validate`. 298 were frozen at `v2026.238.1242`; nothing advanced them,
+# so the schema-versioning-removal cutover left every version-strip PR failing its
+# OWN repo CI. The ONE org reusable `.github/workflows/candy-validate.yml` (cloning
+# at the single org knob `vars.CHARLY_VERSION`) replaces that class; this workflow
+# deletes the stale per-repo copies.
+#
+# WHY IT IS A WORKFLOW: deleting a file on a protected `main` needs a commit
+# authored by a ruleset BYPASS actor. The `charly-auto-merge` App IS that actor, so
+# it does the deletion; the operator-run scripts/org-ruleset.sh deliberately adds NO
+# human bypass to the ruleset (that would loosen main protection).
+#
+# SAFETY: the script deletes ONLY a deploy.yml whose parsed top-level `name:` is
+# exactly `candy`. `name: marketplace`, `name: docs`, and every other real gate are
+# never touched (a mismatch is SKIPPED). Matching the parsed name, not the path, is
+# what keeps a repo whose real gate lives at deploy.yml safe.
+#
+# REQUIRED APP PERMISSION: the App MUST hold BOTH `contents: write` (the ruleset
+# bypass, for the protected-main commit) AND `workflows: write` (GitHub Apps
+# permission, required by DELETE on `.github/workflows/*` — distinct from
+# `contents: write`). Without `workflows: write` every delete returns 403 "Resource
+# not accessible by integration"; the script aborts immediately with that
+# remediation rather than churning.
+name: retire-per-repo-candy-gates
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  retire:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create bot token (charly-auto-merge App)
+        id: app
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547
+        with:
+          app-id: ${{ secrets.CHARLY_AUTO_MERGE_APP_ID }}
+          private-key: ${{ secrets.CHARLY_AUTO_MERGE_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - uses: actions/checkout@v7
+
+      - name: Retire the per-repo candy gates (org-wide)
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: bash scripts/retire-per-repo-candy-gates.sh

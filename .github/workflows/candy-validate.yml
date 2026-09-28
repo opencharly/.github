@@ -1,0 +1,88 @@
+# ORG-WIDE CANDY VALIDATE — the reusable single source for the candy-manifest gate.
+#
+# WHY THIS EXISTS. ~376 opencharly repos carried a HAND-ROLLED per-repo
+# `.github/workflows/deploy.yml` (`name: candy`, job `build`) that CI-time-cloned
+# `opencharly/charly` at a HAND-PINNED tag and ran `charly box validate`. 298 of the
+# 376 were frozen at `v2026.238.1242` and 16 distinct pins existed; nothing advanced
+# them. That is a per-repo copy of a shared gate: a schema/pin change becomes a
+# 376-repo sweep instead of one edit.
+#
+# The schema-versioning-removal cutover made this acute — the retired authoured
+# `version:` field is REQUIRED by the old pinned charly, so every version-strip PR
+# failed its OWN repo CI with `schema … is required (found ""). Run: charly migrate`.
+#
+# This reusable replaces that class with ONE org-level source. It clones charly at
+# the ORG variable `vars.CHARLY_VERSION` — the single knob — so advancing the gate
+# to a new release is one variable change, never a 376-repo sweep.
+#
+# INVOCATION. It is an `on: workflow_call` reusable (no trigger of its own, so it
+# never self-runs). It is called from a caller job named `candy`; with this
+# workflow's job named `validate`, the produced check context is
+# `candy / validate`. The caller is either an org-wide required workflow named by
+# the org ruleset's `workflows` rule (org-wide, zero per-repo copies) or a repo's
+# thin caller. Do NOT activate it as a required gate until `vars.CHARLY_VERSION`
+# names a release that carries the schema-versioning removal — the pre-removal pin
+# still requires the retired stamp and would fail the very PRs this leg unblocks.
+#
+# SKIP CONTRACT. A repo with no `charly.yml` is not a candy/box project. The job
+# reports the skip and exits GREEN — never a false red on the ~repo corpus that
+# carries only candy/ dirs or unrelated manifests.
+#
+# THE PIN IS MANDATORY. There is no bundled fallback: an unset or non-`all`-visible
+# `vars.CHARLY_VERSION` fails LOUD (exit non-zero) rather than silently validating
+# against an unpinned engine (the same fail-closed contract as the org validator).
+name: candy-validate
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Detect charly.yml (skip cleanly when absent)
+        id: detect
+        run: |
+          if [ -f charly.yml ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "no charly.yml in ${GITHUB_REPOSITORY} — not a candy/box project; nothing to validate (skipped)"
+          fi
+
+      - name: Require the org charly pin (fail loud, never fall back)
+        if: steps.detect.outputs.present == 'true'
+        env:
+          CHARLY_VERSION: ${{ vars.CHARLY_VERSION || '' }}
+        run: |
+          if [ -z "${CHARLY_VERSION:-}" ]; then
+            echo "::error::vars.CHARLY_VERSION is unset or not visible to this repo — refusing to run an unpinned validate engine"
+            exit 1
+          fi
+
+      - name: Fetch the pinned charly source (CI-time temp checkout)
+        if: steps.detect.outputs.present == 'true'
+        run: |
+          git clone --depth 1 --branch "${{ vars.CHARLY_VERSION }}" https://github.com/opencharly/charly.git /tmp/charly
+
+      - uses: actions/setup-go@v5
+        if: steps.detect.outputs.present == 'true'
+        with:
+          go-version-file: /tmp/charly/charly/go.mod
+          cache-dependency-path: /tmp/charly/charly/go.sum
+
+      - name: Build the charly binary from the pinned checkout
+        if: steps.detect.outputs.present == 'true'
+        run: |
+          mkdir -p /tmp/charly/bin
+          cd /tmp/charly/charly && go build -buildvcs=false -ldflags "-X main.BuildCalVer=candy-ci" -o /tmp/charly/bin/charly .
+
+      - name: The candy manifest validates at the pinned charly
+        if: steps.detect.outputs.present == 'true'
+        run: /tmp/charly/bin/charly box validate
