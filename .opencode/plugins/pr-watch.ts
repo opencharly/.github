@@ -1,51 +1,40 @@
 /**
- * pr-watch.ts — opencode delivery binding for the GENERIC, harness-independent PR watcher.
+ * pr-watch.ts — OpenCode-native delivery binding for the PR/issue watcher.
  *
- * The watcher itself is `marketplace/scripts/gh_watch.sh` (pure shell, no opencode
- * imports). This file is the HARNESS BINDING: it starts a DETACHED re-arm loop that
- * runs the watcher with `Bun.spawn` and, on each wake, delivers the alert with
- * opencode's OWN in-process primitives — never an `opencode run` subprocess (which
- * starts a separate headless run, can race the live session, and interrupts the
- * in-flight turn).
+ * HARNESS SPLIT (operator directive, 2026-09-29). The harness-INDEPENDENT watcher is
+ * the SHELL family (`marketplace/scripts/gh_watch.sh` + `pr_watch_many.sh` +
+ * `pr_state_watch.sh` + `_watch_common.sh`) — usable from any harness. This OpenCode
+ * plugin is PURE TypeScript: it polls the GitHub API NATIVELY (via `../lib/watch.ts`,
+ * the ONE shared engine) and NEVER spawns a `.sh`, so it depends on NO script and NO
+ * `marketplace` pin. It shares the watcher CONTRACT with the shell family (event
+ * vocabulary, wake-line format, item grammar), asserted by `scripts/check-opencode-coord.mjs`.
  *
- * DELIVERY — measured 2026-09-28 against the REAL v2.0.18 binary. The V2
- * `setup(ctx)` context does NOT carry `client` (only opencode 1.x's `server(input)`
- * does). The V2 "inject context without starting a turn" primitive is the Session
- * domain:
- *
- *     await ctx.session.synthetic({ sessionID, text: alert });
- *
- * `session.synthetic` enqueues a synthetic message; its default `delivery` is
- * "steer", which ADDS the alert to the running session rather than starting a new
- * turn — the same interruption-safe intent as 1.x's `client.session.prompt({
- * noReply: true })`. The session id is not known at setup time and `session.list`
- * does not exist on V2, so it is CAPTURED from the first tool call
- * (`ctx.tool.hook("execute.before", e => e.sessionID)`) or the first prompt
- * (`ctx.session.hook("prompt", e => e.sessionID)`) — by the time a watcher fires the
- * running session has done both. If no id is captured yet, the wake is a logged
- * warning (never a silent drop).
- *
- * The earlier revision called `client.tui.showToast` / `client.session.list` on the
- * V2 path; `client` is `undefined` there, so the V2 delivery silently no-opped and
- * the plugin warned "SDK client unavailable". That was a MEASURED defect (R1); the
- * V2 path now uses `ctx.session.synthetic`. The V1 `server(input)` path keeps the
- * documented 1.x SDK-client shape.
+ * DELIVERY — measured 2026-09-28 against the REAL v2.0.18 binary. The V2 `setup(ctx)`
+ * context does NOT carry `client`; the V2 "inject context without starting a turn"
+ * primitive is `ctx.session.synthetic({ sessionID, text })` (default `delivery: steer`,
+ * so the alert is ADDED to the running session). The session id is CAPTURED from the
+ * first tool call (`ctx.tool.hook("execute.before", …)`) or the first prompt
+ * (`ctx.session.hook("prompt", …)`). The 1.x `server(input)` path keeps the documented
+ * SDK-client shape (`client.tui.showToast` + `noReply: true`).
  *
  * Config: one item per line in `.opencode/pr-watch.items` (blank lines and `#`
- * comments ignored), e.g. `acme/widget#12`. Absent or comment-only → the plugin
- * watches nothing (inert). opencode loads plugins ONCE at startup — RESTART after
- * editing. `setup()` starts the loop detached and returns immediately.
+ * comments ignored). Absent or comment-only → the plugin watches nothing (inert).
+ * opencode loads plugins ONCE at startup — RESTART after editing.
+ * `setup()` starts the loop detached and returns immediately.
  *
- * Defensive: if the `Bun` runtime, the session domain, or the watcher script is
- * unavailable, the plugin logs a warning and no-ops; opencode keeps running.
+ * Defensive: if the session domain is unavailable or a poll fails transiently, the
+ * plugin logs/skips and no-ops; opencode keeps running.
  */
 import { wakeLine } from "../lib/wake-line.ts";
-import { resolveScript } from "./coord.ts";
+import { parseEvents, parseItem, pollOnce, seedAll, sleepAbortable, type Item, type Snap } from "../lib/watch.ts";
 
 // The ONE shared "last non-empty stdout line" helper (R3) — the same module
 // `coord.ts` imports. Re-exported under the historical name this plugin's own
 // check asserts.
 export const lastWakeLine = wakeLine;
+
+/** The watcher event set delivered to the session (delta + terminal outcomes). */
+export const WATCH_EVENTS = "comment,merged,closed";
 
 export function parseItems(text: string): string[] {
   return text
@@ -64,8 +53,7 @@ export function pickSessionID(sessions: any[], directory: string): string | unde
 
 export default {
   id: "pr-watch",
-  // opencode >= 2.0 definition form: the context carries `session` + `location`
-  // (NOT a `client` — see the header).
+  // opencode >= 2.0 definition form: the context carries `session` + `location`.
   async setup(ctx: any) {
     await watchV2(ctx, ctx?.location?.directory ?? ctx?.directory ?? process.cwd());
   },
@@ -82,59 +70,56 @@ function warn(message: string) {
   console.warn(`pr-watch: ${message}`);
 }
 
-// --- shared watcher loop ----------------------------------------------------
+// --- shared native watcher loop ---------------------------------------------
 
 async function loop(dir: string, deliver: (line: string) => Promise<void>) {
-  if (typeof Bun === "undefined") {
-    warn("Bun runtime unavailable — watcher disabled");
-    return;
-  }
-
-  let items: string[] = [];
+  const file = `${dir}/.opencode/pr-watch.items`;
+  let raw: string;
   try {
-    items = parseItems(await Bun.file(`${dir}/.opencode/pr-watch.items`).text());
+    raw = await readText(file);
   } catch {
     return; // no config → watch nothing (inert by default)
   }
+  const items: Item[] = [];
+  for (const line of parseItems(raw)) {
+    const it = parseItem(line);
+    if (!it) {
+      warn(`ignoring malformed item '${line}' (want owner/repo#num)`);
+      continue;
+    }
+    items.push(it);
+  }
   if (items.length === 0) return;
 
-  // The watcher script is resolved exactly like coord.ts resolves its scripts
-  // (env override → <dir>/marketplace/scripts → <dir>/../marketplace/scripts), so a
-  // repo without a marketplace submodule still finds the sibling worktree's copy.
-  const script = resolveScript(dir, process.env.GH_WATCH_SH, [
-    "marketplace/scripts/gh_watch.sh",
-    "../marketplace/scripts/gh_watch.sh",
-  ]);
-  if (!(await Bun.file(script).exists())) {
-    warn(`watcher script missing at ${script} — sync the marketplace pin`);
-    return;
-  }
+  const events = parseEvents(WATCH_EVENTS, WATCH_EVENTS);
+  const wf = "charly/pr-validator";
+  const stallMin = 60;
+  const intervalMs = 30_000;
+  const armEpoch = Math.floor(Date.now() / 1000);
+  const seeds: Map<string, Snap> = await seedAll(items, { wf });
 
-  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-  const once = async () => {
-    const proc = Bun.spawn(["bash", script, "--events", "comment,merged,closed", ...items], {
-      cwd: dir,
-      stdout: "pipe",
-      stderr: "ignore",
-    });
-    const out = (await new Response(proc.stdout).text()).trim();
-    await proc.exited;
-    return out;
-  };
-
-  // re-arm loop, detached so the plugin's setup/server returns at once
   void (async () => {
     for (;;) {
       try {
-        const line = lastWakeLine(await once());
-        if (line) await deliver(line);
+        const fire = await pollOnce(items, seeds, { events, wf, armEpoch, stallMin });
+        // `pollOnce` updates `seeds` in place for every item it observed (up to and
+        // including the fired one), so the SAME comment/verdict is never delivered
+        // twice — no manual re-seed needed.
+        if (fire) await deliver(fire.line);
       } catch {
-        /* transient (gh/network) — skip this wake, keep watching */
+        /* transient (network) — skip this poll, keep watching */
       }
-      await sleep(30000);
+      await sleepAbortable(intervalMs);
     }
   })();
+}
+
+/** Read a file as text under both runtimes (Bun's `Bun.file`, else `node:fs`). */
+async function readText(path: string): Promise<string> {
+  const bun = (globalThis as { Bun?: any }).Bun;
+  if (bun?.file) return bun.file(path).text();
+  const { readFileSync } = await import("node:fs");
+  return readFileSync(path, "utf8");
 }
 
 // --- V2 binding (measured opencode >= 2.0) ----------------------------------
