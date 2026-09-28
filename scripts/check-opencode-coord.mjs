@@ -182,6 +182,25 @@ if (mod) {
   // `../marketplace/scripts/…` instead of forking it — R3).
   const src = readFileSync(pluginPath, "utf8");
   ok(/COORD_SH/.test(src) && /GH_WATCH_SH/.test(src), "the plugin resolves its scripts via COORD_SH/GH_WATCH_SH overrides");
+
+  // Static guard for the R1 fix: the executors MUST be async + abortable. A
+  // synchronous spawn helper would block opencode's server event loop (the
+  // coord_watch watcher is long-lived → the supervisor restarts the server), and a
+  // missing `signal` means an interrupted Session cannot stop the operation.
+  ok(!/spawnSync/.test(src), "coord.ts contains NO synchronous spawn helper (spawnSync)");
+  // Match the actual abort WIRING, not prose: an `abort` listener that kills, and
+  // the executor's `toolCtx.signal` read. The word "signal" in a doc comment must
+  // not satisfy this.
+  ok(
+    /addEventListener\(\s*["']abort["']/.test(src) && /toolCtx\?\.signal/.test(src),
+    "coord.ts wires the abort (an `abort` listener + toolCtx?.signal), not merely mentions 'signal'",
+  );
+  // Match the actual CALL SITE, not prose: the Bun branch calls the local `p.kill`
+  // from `bun.spawn(...)`; the doc comment mentioning "Bun.spawn" must not satisfy
+  // this on its own.
+  ok(/bun\.spawn\(/.test(src) && /globalThis as \{ Bun\?: any \}\)\.Bun/.test(src), "coord.ts spawns via the Bun runtime at the CALL SITE (async, not a comment)");
+  ok(/SIGKILL/.test(src), "coord.ts kills with SIGKILL (a TERM trap in the watcher would defer SIGTERM)");
+
   ok(typeof mod.resolveScript === "function", "resolveScript is exported (script resolution is unit-testable)");
   if (typeof mod.resolveScript === "function") {
     const { resolveScript } = mod;
@@ -243,6 +262,41 @@ if (mod) {
           "MERGED acme/widget#1",
           "coord_watch.execute RUNS the watcher via bash (double-`bash` regression) and returns the wake line",
         );
+
+        // The executors MUST be async + non-blocking, and the abort MUST be
+        // untrappable: the stub installs a TERM trap (like the real gh_watch.sh),
+        // so a SIGTERM-to-bash kill would be DEFERRED until its foreground sleep
+        // finishes (measured: a `timeout: 1` abort overran to the full 30s). Only a
+        // SIGKILL stops it immediately.
+        const slowWatch = join(d, "stub-gh-watch-slow.sh");
+        writeFileSync(slowWatch, "#!/bin/sh\ntrap 'exit 0' TERM\nsleep 30\necho \"MERGED late\"\n");
+        process.env.GH_WATCH_SH = slowWatch;
+        const ctx2 = {
+          location: { directory: d },
+          tool: { transform: async (cb) => cb({ add: (t) => (tools["slow_" + t.name] = t) }) },
+          session: { hook: async () => ({}) },
+        };
+        await plugin.setup(ctx2);
+        const t0 = Date.now();
+        const timed = await tools.slow_coord_watch.execute({ items: ["acme/widget#1"], timeout: 1 });
+        const elapsed = Date.now() - t0;
+        ok(
+          elapsed < 15000,
+          `coord_watch is NON-BLOCKING: timeout=1 killed a 30s watcher well before its sleep (a blocking spawn would run the full 30s)`,
+        );
+        ok(/^TIMEOUT/m.test(timed.content), "coord_watch reports TIMEOUT when the deadline overruns");
+
+        // Abort: passing an already-aborted signal kills the child (session stop).
+        process.env.GH_WATCH_SH = slowWatch;
+        const abortedCtl = new AbortController();
+        abortedCtl.abort();
+        const t1 = Date.now();
+        const abortRes = await tools.slow_coord_watch.execute({ items: ["acme/widget#1"] }, { signal: abortedCtl.signal });
+        ok(
+          Date.now() - t1 < 15000 && /aborted|TIMEOUT|no event|exited/.test(abortRes.content),
+          "coord_watch honours context.signal: an aborted call returns promptly",
+        );
+        process.env.GH_WATCH_SH = stubWatch;
 
         const commentRes = await tools.coord_comment.execute({
           verb: "STATUS",
@@ -365,6 +419,56 @@ if (process.env.LIVE_OPENCODE === "1") {
       ok(
         agentAt !== -1 && assistAt !== -1 && agentAt < assistAt,
         "real opencode: canonical footer order (Agent: BEFORE Assisted-by:)",
+      );
+
+      // --- the R1 FIX, proven live: coord_watch is non-blocking and does NOT
+      // restart the server. Stage a SLOW watcher (30s) that records START at once
+      // and FULL only after its sleep; call coord_watch with timeout=2. A blocked
+      // (spawnSync) call would let the stub reach FULL and freeze the server; the
+      // async+abortable executor kills it before FULL. "loading plugin" is logged
+      // ONCE per server boot, so counting it in the run's --print-logs output proves
+      // there was no reload.
+      const watchLog = join(proj, "watch.log");
+      const slowWatch = join(proj, "marketplace", "scripts", "gh_watch.sh");
+      writeFileSync(slowWatch, `#!/bin/sh\necho START >> ${watchLog}\nsleep 30\necho FULL >> ${watchLog}\n`);
+      const watchPrompt =
+        "You MUST call the coord_watch tool in this turn. Call it exactly once with " +
+        'items=["acme/widget#1"] and timeout=2. Do NOT answer from memory — actually ' +
+        "invoke the tool, then report its result.";
+      let wlog = "";
+      let watchTimedOut = false;
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        const wout = run("opencode", ["run", "--standalone", "--print-logs", "--auto", watchPrompt], {
+          cwd: proj,
+          timeout: 120000,
+        });
+        wlog += `\n${wout.stdout ?? ""}\n${wout.stderr ?? ""}`;
+        if (wout.signal || wout.error) watchTimedOut = true;
+        if (/coord_watch/.test(wlog)) break;
+      }
+      ok(/coord_watch/.test(wlog), "real opencode: coord_watch was the tool exercised live");
+      // The DISCRIMINATING assertion is START/not-FULL below — NOT wall-clock. The
+      // run's ~40s wall time is opencode's own startup + one model turn; the watch
+      // itself was killed at its 2s deadline (proven by FULL being absent). A
+      // blocking spawn would let the 30s stub reach FULL.
+      ok(
+        !watchTimedOut,
+        "real opencode: the coord_watch run stayed within its subprocess budget (no 120s hang)",
+      );
+      // The discriminating assertion: the 30s stub began (START) but was KILLED
+      // before it could finish (FULL). A blocking spawn would reach FULL.
+      const watchRan = existsSync(watchLog) ? readFileSync(watchLog, "utf8") : "";
+      ok(/START/.test(watchRan), "real opencode: the slow 30s watcher was started by coord_watch");
+      ok(
+        !/FULL/.test(watchRan),
+        `real opencode: coord_watch killed the 30s watcher before completion (timeout: 2) — a blocking spawn would have let it reach FULL`,
+      );
+      // "loading plugin" is logged once per server boot; a freeze-triggered restart
+      // logs it AGAIN. The whole run must show it at most once.
+      const loadCount = (wlog.match(/loading plugin/g) || []).length;
+      ok(
+        loadCount <= 1,
+        `real opencode: NO server reload during coord_watch (plugin loaded ${loadCount} time(s); a freeze/restart would log it again)`,
       );
     } finally {
       rmSync(proj, { recursive: true, force: true });

@@ -49,11 +49,28 @@
  * finds the sibling `.worktrees/<slug>/marketplace/scripts/…` automatically, with
  * no forked copy (R3); set `COORD_SH`/`GH_WATCH_SH` when it lives elsewhere.
  *
+ * EXECUTION — NON-BLOCKING + ABORTABLE (R1 fix, measured 2026-09-28). The
+ * executors MUST NOT block opencode's server event loop and MUST honour the
+ * Session abort signal. The prior revision used the SYNCHRONOUS spawn helper, which:
+ *   - blocks the server for the child's WHOLE lifetime — `coord_watch` runs the
+ *     LONG-LIVED `gh_watch.sh` watcher, so a single call froze the server for up
+ *     to the whole watch window and the supervisor RESTARTED it (measured: a
+ *     `timeout: 3` call ran the full 20s stub and ignored the deadline; the
+ *     server log showed a reload); and
+ *   - ignores `context.signal`, so stopping the Session did not stop the watch.
+ * Both executors now use the SAME async, abortable primitive `pr-watch.ts` already
+ * uses (`Bun.spawn`): the child's stdout/stderr are captured asynchronously, and the
+ * tool executor's `context.signal` is wired to a `kill()` on abort (via the signal's
+ * `abort` event, not a spawn option) so stopping the Session terminates the watch.
+ * The kill is SIGKILL because the watcher's `trap '…' TERM` defers a SIGTERM until
+ * its foreground child finishes. `timeout` on `coord_watch` is additionally enforced
+ * from the TOOL as a deadline that triggers the same kill, so an interrupted session
+ * terminates the watcher.
+ *
  * Defensive: a missing `coord.sh`/`gh_watch.sh` (marketplace pin too old), a
  * missing `gh`, or a missing required identity returns a clear message to the
  * caller — the plugin never throws into opencode startup.
  */
-import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { wakeLine } from "../lib/wake-line.ts";
@@ -145,9 +162,9 @@ export function resolveIdentity(
 
 /**
  * Argv for a one-shot `gh_watch.sh` wait (no baked-in org/repo/session). The
- * returned array is the SCRIPT PLUS its arguments — the caller prepends the
- * interpreter (`spawnSync("bash", watchArgv(...))`). It does NOT include `"bash"`
- * itself; including it produced `bash bash <script>` (a measured no-op).
+ * returned array is the SCRIPT PLUS its arguments — the caller passes it to the
+ * async spawn helper as `bash <argv>`. It does NOT include `"bash"` itself;
+ * including it produced `bash bash <script>` (a measured no-op).
  */
 export function watchArgv(
   script: string,
@@ -162,6 +179,166 @@ export function watchArgv(
   if (input.autoRearm) argv.push("--auto-rearm");
   for (const item of input.items ?? []) argv.push(String(item));
   return argv;
+}
+
+export interface SpawnResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number | null;
+  timedOut: boolean;
+  aborted: boolean;
+}
+
+/**
+ * Run `bash <argv>` ASYNCHRONOUSLY and capture its output. NEVER a synchronous
+ * spawn helper: the caller may run a LONG-LIVED process (the watcher) and must not
+ * block opencode's server event loop. `opts.signal` aborts (kills) the child — this
+ * is the tool executor's `context.signal`, so stopping the Session terminates the
+ * operation. `opts.deadlineMs` kills the child at a tool-side bound (the
+ * `coord_watch` `timeout` backstop). Prefers the Bun runtime (opencode's own, the
+ * same primitive `pr-watch.ts` uses) and falls back to Node's async
+ * `child_process` so the same executor stays unit-testable under plain `node`.
+ *
+ * DEADLOCK-SAFE AWAIT. The child is killed with SIGKILL (a TERM trap in the watcher
+ * would DEFER a SIGTERM until its foreground `sleep` finishes — measured: a
+ * `timeout: 1` abort overran to the full 30s stub). After a process-group SIGKILL
+ * the runtime's own exit/close event is not guaranteed, so the await races the
+ * natural exit against OUR OWN kill decision: once we decide to kill, we resolve
+ * immediately with the last-known exit code. The function therefore ALWAYS returns
+ * promptly — it can never hang the executor.
+ */
+export async function spawnCapture(
+  argv: string[],
+  opts: { signal?: AbortSignal; deadlineMs?: number } = {},
+): Promise<SpawnResult> {
+  const bun = (globalThis as { Bun?: any }).Bun;
+  let kill: () => void;
+  let exited: Promise<number | null>;
+  let output: () => { stdout: string; stderr: string };
+  let exitCodeOf: () => number | null;
+  let drains: Promise<unknown>[] = [];
+
+  if (typeof bun?.spawn === "function") {
+    let p: any;
+    try {
+      // NO `signal` option: we drive the kill ourselves (SIGKILL) so a TERM trap in
+      // the watcher cannot defer it — the runtime's default SIGTERM would.
+      p = bun.spawn(["bash", ...argv], { stdout: "pipe", stderr: "pipe" });
+    } catch {
+      return { stdout: "", stderr: "", exitCode: null, timedOut: false, aborted: true };
+    }
+    let out = "";
+    let err = "";
+    drains = [
+      new Response(p.stdout)
+        .text()
+        .then((t) => (out += t))
+        .catch(() => {}),
+      new Response(p.stderr)
+        .text()
+        .then((t) => (err += t))
+        .catch(() => {}),
+    ];
+    exited = p.exited.then((c: number | null) => (typeof c === "number" ? c : p.exitCode)).catch(() => p.exitCode);
+    output = () => ({ stdout: out, stderr: err });
+    kill = () => {
+      try {
+        p.kill("SIGKILL");
+      } catch {
+        /* already exited */
+      }
+    };
+    exitCodeOf = () => p.exitCode;
+  } else {
+    const { spawn } = await import("node:child_process");
+    // Plain (non-detached) child: Node reports `exit`/`close` reliably, and SIGKILL
+    // on bash prevents the stub's post-`sleep` line from running. (The Bun runtime —
+    // the PRODUCTION path, opencode's own — kills the whole tree with SIGKILL;
+    // verified 1502ms.) This Node branch exists only so the executor stays
+    // unit-testable under plain `node`.
+    let p: ReturnType<typeof spawn>;
+    try {
+      p = spawn("bash", argv, { stdio: ["ignore", "pipe", "pipe"] });
+    } catch {
+      return { stdout: "", stderr: "", exitCode: null, timedOut: false, aborted: true };
+    }
+    p.on("error", () => {});
+    let out = "";
+    let err = "";
+    p.stdout?.on("data", (d: any) => (out += d.toString()));
+    p.stderr?.on("data", (d: any) => (err += d.toString()));
+    exited = new Promise<number | null>((res) => {
+      p.on("exit", (c) => res(c));
+      p.on("close", (c) => res(c));
+      p.on("error", () => res(p.exitCode ?? null));
+    });
+    output = () => ({ stdout: out, stderr: err });
+    kill = () => {
+      try {
+        p.kill("SIGKILL");
+      } catch {
+        /* already exited */
+      }
+    };
+    exitCodeOf = () => p.exitCode;
+  }
+
+  // A kill decision resolves the await promptly (see the DEADLOCK-SAFE AWAIT note).
+  let killedResolve: (v: number | null) => void = () => {};
+  const killedPromise = new Promise<number | null>((res) => (killedResolve = res));
+  const killAndResolve = () => {
+    kill();
+    killedResolve(exitCodeOf());
+  };
+
+  // Wire the abort signal to kill+resolve ourselves. `{ once: true }` — one abort,
+  // one kill. Removed on completion so a long-lived signal does not leak a listener.
+  const onAbort = () => killAndResolve();
+  if (opts.signal && !opts.signal.aborted) {
+    opts.signal.addEventListener("abort", onAbort, { once: true });
+  } else if (opts.signal?.aborted) {
+    killAndResolve();
+  }
+
+  let timedOut = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  if (opts.deadlineMs && opts.deadlineMs > 0) {
+    timer = setTimeout(() => {
+      timedOut = true;
+      killAndResolve();
+    }, opts.deadlineMs);
+  }
+
+  let exitCode: number | null = null;
+  try {
+    exitCode = await Promise.race([exited, killedPromise]);
+  } catch {
+    exitCode = exitCodeOf();
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (opts.signal) opts.signal.removeEventListener("abort", onAbort);
+    // Let the output drains settle (bounded) so `output()` is populated. On the
+    // Node SIGKILL path the stdio `close` may never arrive, so race a timeout.
+    if (drains.length) {
+      await Promise.race([
+        Promise.all(drains),
+        new Promise((r) => {
+          const t = setTimeout(r, 1000);
+          if (typeof t.unref === "function") t.unref();
+        }),
+      ]);
+    }
+  }
+  const { stdout, stderr } = output();
+  return {
+    stdout,
+    stderr,
+    exitCode: exitCode ?? exitCodeOf(),
+    timedOut,
+    // `aborted` reflects the CALLER's signal only — an internal deadline kill is
+    // reported as `timedOut`, never as aborted.
+    aborted: !!(opts.signal && opts.signal.aborted),
+  };
 }
 
 export default {
@@ -214,6 +391,8 @@ export default {
           // .opencode/coord.conf / COORD_* env when the caller omits it.
           required: ["verb", "item"],
         },
+        // `toolCtx` (the tool executor context, pre-existing on main) carries the
+        // Session abort `signal` and sessionID used below.
         execute: async (input: Record<string, any>, toolCtx: any) => {
           if (!existsSync(commentScript)) {
             return {
@@ -245,9 +424,9 @@ export default {
           );
           if (input.assign) argv.push("--assign");
           if (input.dryRun) argv.push("--dry-run");
-          const r = spawnSync("bash", argv, { encoding: "utf8" });
-          const out = `${r.stdout ?? ""}${r.stderr ?? ""}`.trim();
-          return { content: out || `coord_comment: exit ${r.status}` };
+          const r = await spawnCapture(argv, { signal: toolCtx?.signal });
+          const out = `${r.stdout}${r.stderr}`.trim();
+          return { content: out || `coord_comment: exit ${r.exitCode}` };
         },
       });
 
@@ -274,7 +453,7 @@ export default {
           },
           required: ["items"],
         },
-        execute: async (input: Record<string, any>) => {
+        execute: async (input: Record<string, any>, toolCtx: any) => {
           if (!existsSync(watchScript)) {
             return {
               content: `coord_watch: gh_watch.sh not found at ${watchScript} — sync the marketplace pin`,
@@ -283,15 +462,24 @@ export default {
           if (!Array.isArray(input.items) || input.items.length === 0) {
             return { content: "coord_watch: pass at least one item (owner/repo#num)" };
           }
-          const r = spawnSync("bash", watchArgv(watchScript, input), { encoding: "utf8" });
-          const line = wakeLine(r.stdout ?? "");
+          // The tool-side deadline (seconds → ms). The watcher also bounds itself
+          // with `--timeout`; this is the backstop that kills the child if it
+          // overruns. 0/undefined = no tool-side deadline (rely on the watcher).
+          const deadlineMs =
+            typeof input.timeout === "number" && input.timeout > 0 ? input.timeout * 1000 : undefined;
+          const r = await spawnCapture(watchArgv(watchScript, input), {
+            signal: toolCtx?.signal,
+            deadlineMs,
+          });
+          if (r.aborted) return { content: "coord_watch: aborted (session interrupted)" };
+          const line = wakeLine(r.stdout);
           if (line) return { content: line };
           // No event: distinguish a timeout from a real watcher error.
-          const err = (r.stderr ?? "").trim();
-          if (r.status === 4 || /^TIMEOUT/m.test(r.stdout ?? "")) {
+          const err = r.stderr.trim();
+          if (r.timedOut || r.exitCode === 4 || /^TIMEOUT/m.test(r.stdout)) {
             return { content: `TIMEOUT: no event within ${input.timeout}s` };
           }
-          return { content: err || `coord_watch: watcher exited ${r.status} with no event` };
+          return { content: err || `coord_watch: watcher exited ${r.exitCode} with no event` };
         },
       });
     });
