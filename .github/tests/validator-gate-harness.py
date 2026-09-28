@@ -879,7 +879,7 @@ def run_scenario(spec, ordered, tmpdir, fakedir, workspace):
         env["FAKE_LOG"] = log_path
         env["FAKE_COMMENT_LOG"] = comment_path
         env["FAKE_SCENARIO"] = spec["fake"]
-        # The auto-close step counts the PR's BLOCK comments via `gh api`; the
+        # The auto-close step counts the PR's BLOCK/INCONCLUSIVE comments via `gh api`; the
         # scenario supplies the count so the threshold branch is exercised.
         env["FAKE_BLOCK_COUNT"] = str(spec.get("block_count", 0))
         env["FAKE_INCONCLUSIVE_COUNT"] = str(spec.get("inconclusive_count", 0))
@@ -1097,6 +1097,13 @@ def run_harness():
     note("evidence artifact" in text,
          "structural: the INCONCLUSIVE notice points at the run's evidence artifact + job log "
          "for the full diagnostics, instead of embedding them")
+    # The auto-close count matches the EXACT header the INCONCLUSIVE gate posts. Assert the
+    # workflow text carries that literal, so a rename of the notice (which would silently
+    # stop the INCONCLUSIVE auto-close while the scenario still passed) fails LOUD here.
+    note(text.count("## validator INCONCLUSIVE") >= 2,
+         "structural: the auto-close counter's literal ('## validator INCONCLUSIVE') is the "
+         "SAME header the INCONCLUSIVE gate posts (present in the workflow text at least twice: "
+         "the counter + the notice) — a rename cannot silently break the count")
     if "AI_REVIEW_TOOL_RESULT_MAX_BYTES" in review_env:
         raw_t = review_env["AI_REVIEW_TOOL_RESULT_MAX_BYTES"]
         ns_unset_t = Ctx({"vars": Ctx({}), "inputs": Ctx({}), "secrets": Ctx({})})
