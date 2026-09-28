@@ -1,0 +1,8 @@
+{
+  "name": "opencharly-umbrella-opencode-config",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@opencode-ai/plugin": "1.18.33"
+  }
+}
