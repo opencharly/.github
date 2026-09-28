@@ -13,29 +13,35 @@ WHY NOT `charly migrate`. The host leg of the removal (opencharly/charly#716) is
 NOT landed, so no RELEASED charly accepts or needs the strip — and `charly
 migrate` rewrites the WHOLE file to canonical form. Measured on the corpus: that
 is ~100 cosmetic lines of churn per file, including trailing-whitespace changes
-INSIDE `description:` block scalars. Across ~393 repos that is an unreviewable,
+INSIDE `description:` block scalars. Across ~400 repos that is an unreviewable,
 unnecessary diff. This filter touches ONLY the lines it deletes; the rest of the
 file is byte-identical.
 
-EXACT SEMANTICS (measured across the org corpus — 401 repos carry at least one
-`version:` line; the node-form manifest grammar is closed, so the indentation is
-stable):
+EXACT SEMANTICS (measured over the org TARGET set — the 423 active, non-fork,
+`main`-default repos `discover_repos` enumerates — on 2026-09-28): 402 carry a
+`charly.yml`; **394 would be STRIPPED**; 2 more carry ONLY a preserved code-block
+example; 21 have no `charly.yml`. Equivalently, **396 repos carry at least one
+`version:` line on `main`** (394 stripped + 2 preserved-only), while 6 carry a
+`charly.yml` with no `version:` line at all. The node-form manifest grammar is
+closed, so the indentation is stable — but the corpus is being stripped
+CONCURRENTLY, so the count is a point-in-time snapshot.
 
-  * indent 0            — the document stamp                      -> DELETE
-                          (399 repos)
+  * indent 0            — the document stamp (the large majority)
+                                                            -> DELETE
   * indent 8            — an entity-body stamp, under `name:` ->
-                          `candy:`/`box:`/`deploy:` (263 repos)  -> DELETE
+                          `candy:`/`box:`/`deploy:`          -> DELETE
+  * indent 4            — the same entity-body stamp in the two
+                          2-space manifests (action-review,
+                          eval-charly)                       -> DELETE
   * indent 16 or more   — a `version:` line inside a `description: |`
                           block scalar (a fenced YAML example in
-                          prose)                                  -> PRESERVE
-                          (9 repos; deleting it would corrupt the
-                          documentation. Real: layer-charly-hermes's
+                          prose)                             -> PRESERVE
+                          (deleting it would corrupt the documentation.
+                          Real: layer-charly-hermes's
                           `                version: 2026.156.1921   # mandatory CalVer`
                           inside a ```yaml block MUST survive.)
 
-Two repos (action-review, eval-charly) use a 2-space manifest, so their entity
-stamp sits at indent 4 — also DELETED. Any other indent (12/18/20/26…) is inside
-a block scalar: PRESERVED.
+Any other indent (12/18/20/26…) is inside a block scalar: PRESERVED.
 
 The rule the code enforces is a single regex: a line whose content matches
 `^ {0,8}version:` — an indent of 0..8, then `version:`, optionally followed by a

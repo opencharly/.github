@@ -1,13 +1,14 @@
 # STRIP THE RETIRED CONFIG `version:` STAMP (one-shot org cutover).
 #
 # The schema-versioning-removal cutover deletes the authored config `version:` field.
-# 393 opencharly repos still carry it on `main`. The host leg of that removal
-# (opencharly/charly#716) is NOT landed, so NO released charly accepts or needs the
-# strip — and `charly migrate` REFORMATS the whole file (~100 cosmetic lines of churn
-# per file, incl. trailing-whitespace changes INSIDE `description:` block scalars),
-# which is unacceptable across 393 repos. scripts/strip-config-version.sh strips with a
-# MINIMAL-DIFF, parser-safe line filter instead: only the stamp lines change, every
-# other byte stays identical.
+# Over the org's 423 active `main`-default repos, 396 still carry a `version:` line on
+# `main` (measured 2026-09-28; 394 would be stripped, 2 carry only a code-block example
+# that is preserved). The host leg of that removal (opencharly/charly#716) is NOT landed,
+# so NO released charly accepts or needs the strip — and `charly migrate` REFORMATS the
+# whole file (~100 cosmetic lines of churn per file, incl. trailing-whitespace changes
+# INSIDE `description:` block scalars), which is unacceptable across ~400 repos.
+# scripts/strip-config-version.sh strips with a MINIMAL-DIFF, parser-safe line filter
+# instead: only the stamp lines change, every other byte stays identical.
 #
 # WHY IT IS A WORKFLOW: committing to a protected `main` needs a commit authored by a
 # ruleset BYPASS actor. The `charly-auto-merge` App IS that actor, so it authors the
@@ -65,6 +66,12 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
+          REPOS: ${{ inputs.repos }}
         run: |
-          # shellcheck disable=SC2086
-          bash scripts/strip-config-version.sh ${{ inputs.repos }}
+          # Never interpolate `${{ inputs.* }}` directly into `run:` — a shell-injection
+          # surface. Pass it via env and expand as a QUOTED ARRAY (word-split into repo
+          # args, but never re-parsed as shell): a metacharacter in a repo name is one
+          # literal argv element, not code. An empty REPOS leaves the array empty, so the
+          # script enumerates all repos itself.
+          read -ra repo_args <<<"$REPOS" || true
+          bash scripts/strip-config-version.sh "${repo_args[@]}"

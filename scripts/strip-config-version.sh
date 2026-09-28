@@ -6,14 +6,16 @@ set -euo pipefail
 # a MINIMAL DIFF (the rest of each file stays byte-identical).
 #
 # WHY THIS EXISTS. The schema-versioning-removal cutover removes the `version:`
-# field from the authored config. 393 opencharly repos still carry it on `main`.
-# The host leg of that removal (opencharly/charly#716) is NOT landed, so NO released
-# charly accepts or needs the strip — and `charly migrate` REFORMATS the whole file:
-# measured on the corpus, ~100 cosmetic lines of churn per file, including
-# trailing-whitespace changes INSIDE `description:` block scalars. Across ~393 repos
-# that is an unreviewable diff for a one-field removal. This script strips with a
-# MINIMAL-DIFF, parser-safe line filter instead (scripts/_strip-filter.py): it deletes
-# ONLY the stamp lines, leaving every other byte untouched.
+# field from the authored config. Over the org's 423 active `main`-default repos, 396
+# still carry a `version:` line on `main` (measured 2026-09-28; 394 would be stripped,
+# 2 carry only a code-block example that is preserved). The host leg of that removal
+# (opencharly/charly#716) is NOT landed, so NO released charly accepts or needs the
+# strip — and `charly migrate` REFORMATS the whole file: measured on the corpus, ~100
+# cosmetic lines of churn per file, including trailing-whitespace changes INSIDE
+# `description:` block scalars. Across ~400 repos that is an unreviewable diff for a
+# one-field removal. This script strips with a MINIMAL-DIFF, parser-safe line filter
+# instead (scripts/_strip-filter.py): it deletes ONLY the stamp lines, leaving every
+# other byte untouched.
 #
 # WHY SEPARATELY FROM scripts/org-ruleset.sh: the commit writes to a protected
 # `main`, so it must be authored by a ruleset BYPASS actor. The `charly-auto-merge`

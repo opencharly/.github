@@ -73,7 +73,8 @@ copy inherits the files here — so a change lands **once**, not in every repo.
 - **`scripts/strip-config-version.sh`** +
   **`.github/workflows/strip-config-version.yml`** — the one-shot org cutover that
   DELETES the schema-versioning-removal cutover's retired authored `version:` stamp
-  from every repo's `charly.yml` (393 repos still carry it). It runs as a workflow
+  from every repo's `charly.yml` (measured over the org's 423 active `main`-default
+  repos: 396 still carry a `version:` line; 394 would be stripped). It runs as a workflow
   because a commit to a protected `main` needs a ruleset-bypass commit author — the
   `charly-auto-merge` App (the workflow mints that token), the same authorization the
   candy-gate retirement uses; charly.yml is not a workflow file, so only the App's
