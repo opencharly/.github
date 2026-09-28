@@ -265,8 +265,12 @@ if (mod) {
           "coord_watch.execute rejects an empty items list with a clear message",
         );
       } finally {
-        process.env.COORD_SH = saved.COORD_SH;
-        process.env.GH_WATCH_SH = saved.GH_WATCH_SH;
+        // Node footgun: `process.env.X = undefined` sets the STRING "undefined",
+        // which would poison the live layer's COORD_SH/GH_WATCH_SH. DELETE instead.
+        for (const [k, v] of Object.entries(saved)) {
+          if (v === undefined) delete process.env[k];
+          else process.env[k] = v;
+        }
       }
     } finally {
       rmSync(d, { recursive: true, force: true });
@@ -287,7 +291,25 @@ if (process.env.LIVE_OPENCODE === "1") {
       mkdirSync(join(proj, ".opencode", "plugins"), { recursive: true });
       mkdirSync(join(proj, "marketplace", "scripts"), { recursive: true });
       cpSync(pluginPath, join(proj, ".opencode", "plugins", "coord.ts"));
+      // The plugin statically imports its SIBLING modules (e.g. ../lib/wake-line.ts),
+      // so the whole lib/ directory must be staged too — otherwise the import fails
+      // and no tool registers.
+      const pluginDir = dirname(pluginPath);
+      const libDir = join(dirname(pluginDir), "lib");
+      if (existsSync(libDir)) cpSync(libDir, join(proj, ".opencode", "lib"), { recursive: true });
       cpSync(coordSh, join(proj, "marketplace", "scripts", "coord.sh"));
+      // Determinism: the model's transcript is not a reliable carrier. Stage a shim
+      // AT coord.sh's path that runs the REAL coord.sh and ALSO tees its stdout to a
+      // file — so we assert on what coord.sh ACTUALLY produced (deterministic), while
+      // still driving it through the real opencode tool call. coord.sh is called with
+      // --dry-run, so this makes no GitHub call.
+      const realCoord = join(proj, "real-coord.sh");
+      const capture = join(proj, "captured.txt");
+      cpSync(coordSh, realCoord);
+      writeFileSync(
+        join(proj, "marketplace", "scripts", "coord.sh"),
+        `#!/bin/sh\nexec "$(dirname "$0")/../../real-coord.sh" "$@" | tee ${capture}\n`,
+      );
       // A conf so the model need only pass verb + item + dryRun (the session is
       // auto-filled from the tool context).
       writeFileSync(
@@ -300,27 +322,46 @@ if (process.env.LIVE_OPENCODE === "1") {
       writeFileSync(join(proj, "f.txt"), "x\n");
       run("git", ["add", "f.txt"], { cwd: proj });
 
-      const out = run(
-        "opencode",
-        [
-          "run",
-          "--standalone",
-          "--auto",
-          "Call the tool coord_comment exactly once with verb=STATUS, " +
-            "item=\"opencharly/opencharly#1\", dryRun=true. " +
-            "Then output the tool's returned text VERBATIM between <<< and >>> markers.",
-        ],
-        { cwd: proj, timeout: 240000 },
-      );
-      const text = `${out.stdout ?? ""}\n${out.stderr ?? ""}`;
-      ok(/STATUS/.test(text), "real opencode: the coord_comment tool returned the verb label");
-      ok(/\*Agent: `coord-live` · session `ses_/.test(text), "real opencode: the comment carries the Agent: line (slug + live session)");
+      const prompt =
+        "You MUST call the coord_comment tool in this turn. Call it exactly once with " +
+        "verb=STATUS, item=\"opencharly/opencharly#1\", dryRun=true. Do NOT answer from " +
+        "memory — actually invoke the tool, then report its result.";
+
+      // LIVE LLM boundary: the model occasionally declines to call the tool. Retry
+      // ONCE (bounded), and accept EITHER the deterministic capture (what the REAL
+      // coord.sh wrote when the tool invoked it) OR the model's transcript. Never a
+      // silent pass: a real failure (bad footer) still fails.
+      let emitted = "";
+      let text = "";
+      for (let attempt = 1; attempt <= 2 && !emitted; attempt++) {
+        const out = run("opencode", ["run", "--standalone", "--auto", prompt], {
+          cwd: proj,
+          timeout: 240000,
+        });
+        text += `\n${out.stdout ?? ""}\n${out.stderr ?? ""}`;
+        if (process.env.COORD_LIVE_DEBUG) {
+          writeFileSync(`/tmp/coord-live-attempt-${attempt}.log`, `status=${out.status} signal=${out.signal ?? ""}\n${text}\n--- capture ---\n`);
+        }
+        try {
+          emitted = readFileSync(capture, "utf8");
+        } catch {
+          /* no capture → fall back to the transcript for the assertions */
+        }
+        if (!emitted && /\*Agent: `coord-live`/.test(text)) emitted = text;
+      }
+      ok(/coord_comment/.test(text) || emitted.includes("STATUS"), "real opencode: the model called the coord_comment tool");
+      if (!emitted) fail("real opencode: coord.sh produced no captured output after 2 attempts (the tool was not called)");
+      ok(/^STATUS$/m.test(emitted), "real opencode: coord.sh emitted the verb label");
       ok(
-        /\*Assisted-by: OpenCode DeepSeek V4\.1 Flash \(documentation reviewed\)\*/.test(text),
-        "real opencode: the comment carries the Assisted-by: trailer",
+        /\*Agent: `coord-live` · session `ses_[A-Za-z0-9]+`\*/.test(emitted),
+        "real opencode: coord.sh emitted the Agent: line (slug + live session)",
       );
-      const agentAt = text.indexOf("*Agent:");
-      const assistAt = text.indexOf("*Assisted-by:");
+      ok(
+        /\*Assisted-by: OpenCode DeepSeek V4\.1 Flash \(documentation reviewed\)\*/.test(emitted),
+        "real opencode: coord.sh emitted the Assisted-by: trailer",
+      );
+      const agentAt = emitted.indexOf("*Agent:");
+      const assistAt = emitted.indexOf("*Assisted-by:");
       ok(
         agentAt !== -1 && assistAt !== -1 && agentAt < assistAt,
         "real opencode: canonical footer order (Agent: BEFORE Assisted-by:)",

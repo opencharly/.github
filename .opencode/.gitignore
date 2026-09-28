@@ -3,6 +3,10 @@
 node_modules
 bun.lock
 
+# Local coordination identity — per-machine/per-session, never committed. Copy
+# coord.conf.example to coord.conf and fill in your values (or use COORD_* env).
+coord.conf
+
 # package.json IS committed: it pins the @opencode-ai/plugin TYPE version used by
 # the plugins in plugins/. The plugins import types only (`import type`), so the
 # dependency is never required at runtime — but the declared version MUST carry the

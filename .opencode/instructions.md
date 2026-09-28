@@ -35,6 +35,15 @@ In the umbrella's session-worktree layout the repo sits at
 `<umbrella>/.worktrees/<slug>/marketplace/scripts/coord.sh` with no configuration.
 Outside it, set `COORD_SH`/`GH_WATCH_SH` to the marketplace scripts' absolute path.
 
+## PR-event watcher
+
+`.opencode/plugins/pr-watch.ts` (also byte-identical to the umbrella's) is included
+for a continuous background watch: it polls `.opencode/pr-watch.items` (one
+`owner/repo#num` per line) via the marketplace `gh_watch.sh` and delivers each wake
+IN-PROCESS. It is INERT until `.opencode/pr-watch.items` carries an item, and it
+resolves its watcher script the same way `coord.ts` does. For an explicit, bounded
+wait from a session, prefer the `coord_watch` tool.
+
 ## Verification
 
 `scripts/check-opencode-coord.mjs` (byte-identical to the umbrella's copy) is the
