@@ -405,16 +405,39 @@ FAKE_GH = NL.join([
     # `gh api --paginate ...` — the auto-close step counts the PR's non-PASS
     # verdict comments (BLOCK and INCONCLUSIVE). Emit REAL JSON pages (the workflow
     # pipes to `jq -s`, which collects the pages into one array), so the multi-page
-    # path is genuinely exercised. FAKE_BLOCK_COUNT bot BLOCK comments +
-    # FAKE_INCONCLUSIVE_COUNT bot INCONCLUSIVE comments + FAKE_OTHER_COUNT other
-    # comments are emitted in pages of FAKE_PAGE_SIZE (default 30, GitHub's page
-    # size) so a multi-page thread is reproducible. This is the ONLY gh api call
-    # the workflow makes, so answering it here is exact, not a blanket stub.
+    # path is genuinely exercised. This is the ONLY gh api call the workflow makes,
+    # so answering it here is exact, not a blanket stub.
+    #
+    # END-TO-END (the anti-tautology contract): the api answer REPLAYS the machine
+    # notices the gate really posted to $FAKE_COMMENT_LOG (recorded by the `gh pr
+    # comment` branch above), as `github-actions[bot]` comments. So the counter is
+    # exercised against the EMITTED artifact — a rename of the gate's header (or of
+    # the counter's own literal) drops the notice from the replay, the count falls to
+    # 0, and the seeded scenario's `expect_closed` fails LOUD. The synthetic
+    # FAKE_BLOCK_COUNT / FAKE_INCONCLUSIVE_COUNT injections remain for the pure
+    # threshold scenarios; FAKE_OTHER_COUNT + FAKE_PAGE_SIZE keep the multi-page
+    # thread reproducible.
     "if [ \"$1\" = \"api\" ]; then",
-    "  python3 - \"${FAKE_BLOCK_COUNT:-0}\" \"${FAKE_INCONCLUSIVE_COUNT:-0}\" \"${FAKE_OTHER_COUNT:-0}\" \"${FAKE_PAGE_SIZE:-30}\" <<'PYEOF'",
+    "  python3 - \"${FAKE_BLOCK_COUNT:-0}\" \"${FAKE_INCONCLUSIVE_COUNT:-0}\" \"${FAKE_OTHER_COUNT:-0}\" \"${FAKE_PAGE_SIZE:-30}\" \"${FAKE_COMMENT_LOG:-}\" <<'PYEOF'",
     "import json, sys",
     "blocks, inconcl, other, size = int(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])",
-    "items = [{\"user\": {\"login\": \"github-actions[bot]\"}, \"body\": \"## Review — BLOCK\\n\\nblocked\"}] * blocks",
+    "comment_log = sys.argv[5]",
+    "# Replay the REAL bot notices captured from `gh pr comment` so the counter is",
+    "# exercised against the gate's EMITTED artifact, not a re-typed literal. Only",
+    "# the machine notices the counter is meant to match are replayed as the bot.",
+    "replayed = []",
+    "if comment_log:",
+    "    try:",
+    "        with open(comment_log, \"r\", encoding=\"utf-8\") as fh:",
+    "            captured = fh.read()",
+    "    except OSError:",
+    "        captured = \"\"",
+    "    for block in captured.split(\"=== gh pr comment (fake gh) ===\")[1:]:",
+    "        body = block.split(\"=== end comment ===\")[0].strip(\"\\n\")",
+    "        if body.startswith(\"## validator INCONCLUSIVE\") or body.startswith(\"## Auto-closed:\"):",
+    "            replayed.append({\"user\": {\"login\": \"github-actions[bot]\"}, \"body\": body})",
+    "items = list(replayed)",
+    "items += [{\"user\": {\"login\": \"github-actions[bot]\"}, \"body\": \"## Review — BLOCK\\n\\nblocked\"}] * blocks",
     "items += [{\"user\": {\"login\": \"github-actions[bot]\"}, \"body\": \"## validator INCONCLUSIVE — no review verdict\\n\\nno answer\"}] * inconcl",
     "items += [{\"user\": {\"login\": \"someone\"}, \"body\": \"a normal comment\"}] * other",
     "for i in range(0, max(len(items), 1), size):",
@@ -605,8 +628,13 @@ SCENARIOS = [
         "expect_verdict": "INCONCLUSIVE",
         "expect_comment": True,
         "expect_auto_merge": False,
+        # END-TO-END anti-tautology: the EXACT literal the auto-close counter matches
+        # (the workflow's `contains("## validator INCONCLUSIVE")`) must be present in
+        # the comment the gate REALLY posts. A rename of the notice header fails HERE.
+        # The post-loop replay check below ties the same emitted body back through the
+        # REAL counter, so a rename of the counter's literal fails THERE.
         "expect_comment_contains": [
-            "validator INCONCLUSIVE",
+            "## validator INCONCLUSIVE",
             "provider unanswered",
             "in-job retries: none",
             "AI_REVIEW_STREAM_IDLE_TIMEOUT",
@@ -942,6 +970,14 @@ def run_scenario(spec, ordered, tmpdir, fakedir, workspace):
         comment = fh.read()
     with open(log_path, "r", encoding="utf-8") as fh:
         calls = fh.read()
+    # The fake gh pr comment appends every posted body to comment_path; the auto-close
+    # replay below needs it to survive this function, so it is captured here (the CONTENT
+    # is returned) and the file is removed — no leftover per-scenario artifact.
+    comment_log = comment
+    try:
+        os.remove(comment_path)
+    except OSError:
+        pass
     for path in RUNNER_PATHS:
         if os.path.exists(path):
             os.remove(path)
@@ -956,6 +992,7 @@ def run_scenario(spec, ordered, tmpdir, fakedir, workspace):
         "skipped": skipped,
         "outputs": step_outputs,
         "comment": comment,
+        "comment_log": comment_log,
         "calls": calls,
         "summary": summary,
     }
@@ -1097,13 +1134,30 @@ def run_harness():
     note("evidence artifact" in text,
          "structural: the INCONCLUSIVE notice points at the run's evidence artifact + job log "
          "for the full diagnostics, instead of embedding them")
-    # The auto-close count matches the EXACT header the INCONCLUSIVE gate posts. Assert the
-    # workflow text carries that literal, so a rename of the notice (which would silently
-    # stop the INCONCLUSIVE auto-close while the scenario still passed) fails LOUD here.
-    note(text.count("## validator INCONCLUSIVE") >= 2,
-         "structural: the auto-close counter's literal ('## validator INCONCLUSIVE') is the "
-         "SAME header the INCONCLUSIVE gate posts (present in the workflow text at least twice: "
-         "the counter + the notice) — a rename cannot silently break the count")
+    # The auto-close counter matches the EXACT header the INCONCLUSIVE gate posts.
+    # The previous guard counted the literal in the workflow TEXT (>= 2) — a TAUTOLOGY:
+    # the literal also occurs in the counter's own jq filter and its explanatory comment,
+    # so a rename of the notice header would make the production count 0 while this guard
+    # still passed. Derive the literal from the COUNTER, then require it in the GATE's
+    # emitted notice, so the two surfaces are tied rather than counted.
+    auto_close_run = find_step(steps, "name", "Auto-close after N BLOCK/INCONCLUSIVE verdicts")["run"]
+    concl_run = find_step(steps, "name", "Gate (inconclusive)")["run"]
+    inconclusive_literal = "## validator INCONCLUSIVE"
+    if inconclusive_literal in auto_close_run:
+        note(inconclusive_literal in concl_run,
+             "structural: the auto-close counter's literal (" + repr(inconclusive_literal) +
+             ") is the SAME header the INCONCLUSIVE gate posts — the literal the counter "
+             "MATCHES is present in the gate's notice body, so a rename of the notice fails HERE")
+        note("echo '## validator INCONCLUSIVE" in concl_run,
+             "structural: the INCONCLUSIVE notice's first echoed line IS the counter's literal "
+             "(the exact header, not a substring of prose)")
+    else:
+        note(False,
+             "structural: the auto-close counter no longer matches " + repr(inconclusive_literal) +
+             " — the harness cannot tie the count to the emitted notice (update this guard "
+             "together with the counter)")
+    note("## Review — BLOCK" in auto_close_run,
+         "structural: the auto-close counter still matches the BLOCK verdict's exact header")
     if "AI_REVIEW_TOOL_RESULT_MAX_BYTES" in review_env:
         raw_t = review_env["AI_REVIEW_TOOL_RESULT_MAX_BYTES"]
         ns_unset_t = Ctx({"vars": Ctx({}), "inputs": Ctx({}), "secrets": Ctx({})})
@@ -1233,8 +1287,10 @@ def run_harness():
     open(os.path.join(workspace, "runner-config", "review-plan.yml"), "w").close()
     open(os.path.join(workspace, "runner-config", "prompt", "validator.md"), "w").close()
 
+    scenario_results = []
     for spec in SCENARIOS:
         result = run_scenario(spec, ordered, tmpdir, fakedir, workspace)
+        scenario_results.append((spec, result))
         log.append("")
         log.append("=== scenario: " + spec["name"] + "   (fake charly scenario: " + spec["fake"] + ") ===")
         log.extend(result["transcript"])
@@ -1279,6 +1335,77 @@ def run_harness():
         for needle in spec.get("expect_summary_contains", []):
             note(needle in result["summary"],
                  prefix + "run Summary contains " + repr(needle))
+
+    # ==== END-TO-END: tie the auto-close counter to the gate's EMITTED artifact ====
+    # The validator's block-2 finding: the old guard counted the counter's literal in the
+    # workflow TEXT (`text.count(...) >= 2`), but that literal also occurs in the counter's
+    # own jq filter and its explanatory comment — so it was a TAUTOLOGY and a rename of the
+    # notice header would silently zero the production count while the guard still passed.
+    # The tie is now made against the ARTIFACT: take the EXACT comment body the real
+    # `Gate (inconclusive)` step posted (captured in $FAKE_COMMENT_LOG), replay it through the
+    # REAL Auto-close step, and require it to CLOSE. A rename of either surface fails here.
+    auto_close_step = find_step(steps, "name", "Auto-close after N BLOCK/INCONCLUSIVE verdicts")
+    replay_ns = build_ns({}, workspace, tmpdir)
+    replay_bin = os.path.join(tmpdir, "replay-bin")
+    os.makedirs(replay_bin)
+    write_executable(os.path.join(replay_bin, "gh"), FAKE_GH)
+    write_executable(os.path.join(replay_bin, "charly"), FAKE_CHARLY)
+    auto_close_script = os.path.join(tmpdir, "replay-auto-close.sh")
+    with open(auto_close_script, "w", encoding="utf-8") as fh:
+        fh.write(subst(auto_close_step["run"], replay_ns))
+
+    def run_auto_close(comment_log_body):
+        """Replay a captured comment log through the REAL auto-close step (threshold 1)."""
+        clog = os.path.join(tmpdir, "replay.comment.log")
+        with open(clog, "w", encoding="utf-8") as fh:
+            fh.write(comment_log_body)
+        calls = os.path.join(tmpdir, "replay.calls.log")
+        open(calls, "w").close()
+        genv = dict(os.environ)
+        genv["PATH"] = replay_bin + os.pathsep + genv.get("PATH", "")
+        for key, value in auto_close_step["env"].items():
+            genv[key] = subst(value, replay_ns)
+        genv["THRESHOLD"] = "1"          # force the close branch on a single verdict
+        genv["FAKE_LOG"] = calls
+        genv["FAKE_COMMENT_LOG"] = clog
+        # ZERO synthetic counts: the ONLY way the counter reaches 1 is by matching the body
+        # REPLAYED from the gate's own emitted notice — never a seeded literal.
+        genv["FAKE_BLOCK_COUNT"] = "0"
+        genv["FAKE_INCONCLUSIVE_COUNT"] = "0"
+        genv["FAKE_OTHER_COUNT"] = "0"
+        genv["FAKE_PAGE_SIZE"] = "30"
+        proc = subprocess.run(
+            ["bash", "--noprofile", "--norc", "-eo", "pipefail", auto_close_script],
+            cwd=workspace, env=genv, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, universal_newlines=True)
+        with open(calls, "r", encoding="utf-8") as fh:
+            return proc.returncode, proc.stdout, fh.read()
+
+    pu_result = dict((s["name"], r) for s, r in scenario_results).get("provider-unanswered")
+    emitted_log = pu_result["comment_log"] if pu_result else ""
+    first_notice = emitted_log.split("=== gh pr comment (fake gh) ===", 1)[-1].lstrip("\n")
+    note(first_notice.startswith("## validator INCONCLUSIVE"),
+         "functional: the EXACT literal the auto-close counter matches "
+         "('## validator INCONCLUSIVE') opens the gate's EMITTED notice — the emitted "
+         "artifact and the counter's filter are TIED, not counted (renaming the notice fails HERE)")
+    rc, out, calls = run_auto_close(emitted_log)
+    note("BLOCK/INCONCLUSIVE verdicts on this PR: 1" in out,
+         "functional: replaying the gate's REAL emitted notice through the REAL auto-close step "
+         "yields count == 1 with ZERO synthetic injections (the counter read the emitted artifact)")
+    note("pr close" in calls,
+         "functional: the replayed emitted notice CLOSES the PR at threshold=1 — the "
+         "INCONCLUSIVE auto-close is exercised end-to-end against the gate's own header")
+    # NEGATIVE CONTROL — the exact break the tautology hid: rename the emitted header and
+    # prove the REAL counter drops to 0 and does NOT close. Without this the positive replay
+    # could pass on any text the counter happened to match.
+    renamed_log = emitted_log.replace("## validator INCONCLUSIVE", "## validator VERDICT-MISSING", 1)
+    rc2, out2, calls2 = run_auto_close(renamed_log)
+    note("pr close" not in calls2 and "BLOCK/INCONCLUSIVE verdicts on this PR: 0" in out2,
+         "functional: NEGATIVE CONTROL — renaming the gate's header to "
+         "'## validator VERDICT-MISSING' drops the REAL counter to 0 and does NOT close "
+         "(the counter is genuinely bound to the emitted header, so a rename cannot silently "
+         "disable the INCONCLUSIVE auto-close) — got: " +
+         " | ".join(line for line in out2.splitlines() if "verdicts on this PR" in line))
 
     print(NL.join(log))
     failed = [message for ok, message in checks if not ok]
