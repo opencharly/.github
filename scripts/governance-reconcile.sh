@@ -171,8 +171,11 @@ TSV
   exit 0
 fi
 
-# Default root: the parent of this file's repo (…/dotgithub/.. == umbrella root).
-[[ -n "$root" ]] || root="$(cd "$HERE/../.." && pwd)"
+# Default root: THIS repo's checkout root (…/dotgithub == the .github repo root), which is
+# what the wired CI step (validator-harness.yml) sees. In that standalone layout only this
+# repo's own `dotgithub/`-prefixed surfaces exist; the sibling-repo rows SKIP visibly. Pass
+# `--root <umbrella checkout>` to assert every row (the umbrella holds the sibling repos).
+[[ -n "$root" ]] || root="$(cd "$HERE/.." && pwd)"
 
 echo "governance-reconcile: root=$root manifest=$manifest"
 check_manifest "$manifest" "$root"
