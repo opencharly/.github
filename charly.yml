@@ -530,21 +530,23 @@ review-contract:
                   comment alike. Off a triggered scope the footer is optional (never tax every comment);
                   on a triggered scope it is mandatory. The `Agent:` line identifies the WORK, not the
                   account (many agents share one GitHub account) — the slug is the authority key, never the
-                  GitHub author. Treat the footer as attribution/coordination, never as a finding.
+                  GitHub author. The footer is attribution/coordination, not itself a finding; a genuine defect inside a
+                coordination comment remains a finding.
                 - Coordination verbs. On a triggered scope the first non-blank line of a coordination
                   comment is ONE label from the closed set `CLAIM`, `OWNING`, `HANDING OVER`, `TAKING OVER`,
                   `BLOCKS`, `UNBLOCKS`, `STATUS`, `RESOLVED`. A `TAKING OVER` names its authority
                   (`hand-off`, `operator`, `window-expired`) and is posted BEFORE any push; progress runs on
                   the scope's ARTIFACTS (a new commit, a new comment, or a `charly/pr-validator` run
-                  COMPLETING on a new head), never on session activity. Treat these as coordination
-                  metadata, not as review findings.
+                  COMPLETING on a new head), never on session activity. These labels are coordination
+                  metadata; a genuine defect inside a coordination comment remains a finding.
 
                 ## Canonical governance surfaces — ONE source of truth
 
                 The footer order, the coordination verb grammar, the takeover window, the sign-off forms,
                 and the coordination lifecycle are stated ONCE — in this rulebook, at the sections above.
                 This prompt is the canonical surface for the review-gate configuration; a change to any of
-                these rules MUST be reconciled across ALL FOUR governance surfaces in the SAME change:
+                these rules MUST be reconciled across ALL FOUR governance surfaces — each referenced so the
+                divergence is visible, and ALL converged by the time the change lands:
 
                 1. this `AI_REVIEW_PROMPT` rulebook — source `opencharly/.github/charly.yml`, mirrored by
                    the `opencharly/action-review` contract that is actually checked out as runner-config,
@@ -555,8 +557,9 @@ review-contract:
                    projection in `opencharly/marketplace` (source-and-regeneration are ONE cutover).
 
                 Every other surface states the mandate and REFERENCE this statement; none restates it
-                divergently. An editor who changes one surface and not the rest has created a governance
-                contradiction — an R1 incident to RCA and fix in the same change.
+                divergently. Landing one surface without the others creates a governance contradiction — an
+                R1 incident to RCA and fix — and the change that opens the divergence cross-references
+                every sibling leg, so no surface is ever silently out of step.
 
         # ADE acceptance plan for this org-wide contract declaration. The
         # INSTANTIATED candy (the one the workflow checks out as runner-config) is
