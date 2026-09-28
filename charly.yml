@@ -14,6 +14,7 @@
 #
 # The values below are the CURRENTLY-USED production values (except the API keys, which
 # are never written anywhere but the org secret store).
+version: 2026.261.1747
 
 review-contract:
     candy:
@@ -22,6 +23,8 @@ review-contract:
             The org-wide AI-review contract: the full pr-validator rulebook and every
             tunable the review engine reads, declared as var: defaults. All values may be
             overridden in the opencharly org GitHub settings.
+        candy:
+            - '@github.com/opencharly/plugin-review/candy/plugin-review:v2026.270.1323'
         var:
             AI_REVIEW_PROVIDER: ollama-cloud
             AI_REVIEW_MODEL: deepseek-v4.1-flash
@@ -530,6 +533,29 @@ review-contract:
                   coordination comment remains a finding. A takeover waits for the 60-minute comment-first
                   window; a PR closed and superseded names
                   its successor (`RESOLVED — superseded by #n`) and the successor names its predecessor.
+                - Subagent accountability + identification. A session is FULLY RESPONSIBLE for its
+                  subagents: it owns each dispatched subagent's guidance, results, and EVERY action it takes
+                  (pushes, PRs, comments, takeovers, sign-offs); responsibility does NOT delegate away with
+                  the task. An action taken by a subagent MUST identify itself and name its parent, so the
+                  chain of responsibility is followable — the footer extends to
+                  `*Agent: <slug> (subagent of <parent-slug>) · session ses_…*` + the `Assisted-by:` trailer
+                  (`Agent:` FIRST, `Assisted-by:` LAST). `CLAIM`/`TAKING OVER`/`HANDING OVER`/`BLOCKS` are
+                  addressed to the accountable PARENT, not merely a subagent; the parent ensures its
+                  subagents comply and remediates any violation. A `CLAIM` carries a PRODUCE-OR-HAND-OVER
+                  duty: produce an artifact or `HANDING OVER` with the reason — "still investigating" past
+                  the window is a silent block, not progress.
+                - The parent's MONITORING DUTY. Responsibility implies a duty to monitor: a session MUST NOT
+                  dispatch-and-forget. The parent MUST watch each subagent's artifacts and INTERVENE when
+                  the subagent STALLS (no artifact progress — no push, PR, or completed
+                  `charly/pr-validator` run — within the window; the silence alarm) or receives repeated
+                  BLOCK verdicts (not converging toward the 5/5 auto-close) — re-brief it with the exact
+                  findings, take over the fix, or take over the PR under the comment-first hand-off rule,
+                  BEFORE the auto-close. BEFORE dispatch: complete, correct guidance (owning skills, binding
+                  rules, the exact deliverable) and a defined completion (merged, with the tag). AFTER:
+                  independently VERIFY the artifacts (PR state, merge, tag, gate output) — never trust the
+                  subagent's own report. AT session end: no orphaned scopes — complete them, `HANDING OVER`,
+                  or report blocked. Monitoring a subagent is how the parent discharges its accountability;
+                  a parent that does not watch its subagents is not compliant.
 
                 ## Canonical governance surfaces — ONE source of truth
 
@@ -551,7 +577,10 @@ review-contract:
                 Every other surface states the mandate and REFERENCE this statement; none restates it
                 divergently. Landing one surface without the others creates a governance contradiction — an
                 R1 incident to RCA and fix — and the change that opens the divergence cross-references
-                every sibling leg, so no surface is ever silently out of step.
+                every sibling leg, so no surface is ever silently out of step. The machine control that
+                makes this non-silent is `opencharly/.github`'s `scripts/governance-reconcile.sh` (+
+                `scripts/governance-claims.tsv`), run in `validator-harness.yml`: it asserts each canonical
+                phrase in its declared surfaces and FORBIDS the superseded one.
 
         # ADE acceptance plan for this org-wide contract declaration. The
         # INSTANTIATED candy (the one the workflow checks out as runner-config) is
