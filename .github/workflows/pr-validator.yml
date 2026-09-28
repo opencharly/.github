@@ -643,19 +643,15 @@ jobs:
             echo
             echo 'A run that produced no verdict keeps this required check **RED**: unreviewed code must never merge.'
             echo
-            echo '<details><summary>Diagnostics (tail of the review log)</summary>'
-            echo
-            echo '~~~'
-            # BOUNDED. The review log can carry ONE degenerate-repetition line of
-            # hundreds of KB (a model decode collapse), which pushes the comment
-            # body past GitHub's 65536-character limit — the notice then FAILS to
-            # post and the red required check has NO explanation (live evidence:
-            # `GraphQL: Body is too long (maximum is 65536 characters)`). Cap the
-            # line count, each line, AND the total so the notice always posts.
-            tail -n 40 /tmp/review.log 2>/dev/null | cut -c1-2000 | tail -c 16000 || echo '(no review log captured)'
-            echo '~~~'
-            echo
-            echo '</details>'
+            # The review-log diagnostics are deliberately NOT embedded in this comment.
+            # A degenerate-repetition run carries hundreds of KB of "Hmm." noise (measured:
+            # ~467 KB / 83k lines on the real context), and THIS comment is re-ingested into
+            # the NEXT review's context (the engine reads every PR comment), so embedding the
+            # runaway made the next review collapse harder — a positive feedback loop. The
+            # full diagnostics live in this run's uploaded EVIDENCE artifact and the job log,
+            # neither of which a later review reads. Keeping this notice short is the durable
+            # fix for the loop; see opencharly/charly#712.
+            echo "_Full diagnostics: this run's **evidence artifact** + job log (not embedded here — embedding a runaway log would feed it into the next review and deepen the collapse)._"
           } > /tmp/inconclusive-comment.md
           gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file /tmp/inconclusive-comment.md || echo "::warning::could not post the INCONCLUSIVE comment (non-fatal)"
           echo "::error::validator INCONCLUSIVE — no review verdict was produced (not a BLOCK; no code finding) — see the PR comment"
