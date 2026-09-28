@@ -56,7 +56,10 @@ dispatcher_path_for() {
 #  - truncated — the recursive API could not return the whole tree. This is a
 #                SILENT-MISS risk: an unseen nested manifest would be left stamped.
 #                The caller MUST treat it as FATAL, never as "no charly.yml".
-#  - failed    — a transport/API error; a per-repo failure the wave CONTINUES past.
+#  - failed    — a transport/API error. The strip caller treats it as FATAL (like
+#                `truncated`): a listing that failed means an UNKNOWN number of
+#                manifests were not seen, so a green run could leave a nested stamp
+#                behind. The caller aborts; it never reads this as "no charly.yml".
 list_config_paths() {
   local repo="$1" json
   if ! json="$(gh api "repos/$ORG/$repo/git/trees/main?recursive=1" 2>/dev/null)"; then
