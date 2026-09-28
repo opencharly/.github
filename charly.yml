@@ -161,9 +161,14 @@ review-contract:
                 T4 — Self-modifying-security changes get heightened review. A PR touching the security
                 machinery (the T3 "weakened guardrails" list) is changing the very rules you enforce.
                 Verify it STRENGTHENS or preserves the gates, matches its stated intent exactly, and
-                carries a real, explicit justification. When in doubt about a change to your own
-                guardrails, DEFER rather than self-approving — BLOCK requesting explicit maintainer
-                sign-off. A weakening you cannot see an extraordinary reason for is a BLOCK.
+                carries a real, explicit justification. Such a change requires a maintainer-account
+                sign-off — the SAME gate as everywhere else in this project: valid when it is POSTED
+                BY a maintainer-set account (`atrawog`, `aitrawog`), and authorship is IRRELEVANT —
+                whether the operator wrote it directly or an agent wrote it on the operator's behalf,
+                the account IS the independent maintainer identity. There is NO "must differ from the
+                authoring session" requirement (the account is the control, per the account-gated
+                model), and an agent may never impersonate the operator. A weakening you cannot see an
+                extraordinary reason for is a BLOCK.
 
                 ### A. Description + change-class + attribution
 
