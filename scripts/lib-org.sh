@@ -65,11 +65,22 @@ list_config_paths() {
   if ! json="$(gh api "repos/$ORG/$repo/git/trees/main?recursive=1" 2>/dev/null)"; then
     printf 'failed\n'; return 0
   fi
-  if [[ "$(jq -r '.truncated // false' <<<"$json" 2>/dev/null)" == "true" ]]; then
+  # Gate BOTH the truncation probe and the path extraction on jq's EXIT STATUS: a
+  # non-JSON/partial body returned while `gh` exited 0 would otherwise make the
+  # probe yield "" (!= "true") and the extraction yield nothing — a silent `ok`
+  # with zero paths, exactly the miss this helper must never produce.
+  if ! truncated="$(jq -r '.truncated // false' <<<"$json" 2>/dev/null)"; then
+    printf 'failed\n'; return 0
+  fi
+  if [[ "$truncated" == "true" ]]; then
     printf 'truncated\n'; return 0
   fi
+  if ! paths="$(jq -r '[.tree[] | select(.type == "blob") | .path | select((split("/") | last) == "charly.yml")] | .[]' <<<"$json" 2>/dev/null)"; then
+    printf 'failed\n'; return 0
+  fi
   printf 'ok\n'
-  jq -r '[.tree[] | select(.type == "blob") | .path | select((split("/") | last) == "charly.yml")] | .[]' <<<"$json" 2>/dev/null || true
+  [[ -n "$paths" ]] && printf '%s\n' "$paths"
+  return 0
 }
 
 # api_status <path> — the HTTP status of a GET; empty on a transport/other failure.
