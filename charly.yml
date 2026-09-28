@@ -17,7 +17,6 @@
 
 review-contract:
     candy:
-        version: 2026.270.0000
         description: |
             The org-wide AI-review contract: the full pr-validator rulebook and every
             tunable the review engine reads, declared as var: defaults. All values may be
