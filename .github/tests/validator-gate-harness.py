@@ -402,18 +402,20 @@ FAKE_GH = NL.join([
     "  fi",
     "  echo \"=== end comment ===\" >> \"$FAKE_COMMENT_LOG\"",
     "fi",
-    # `gh api --paginate ...` — the auto-close step counts the PR's BLOCK verdict
-    # comments. Emit REAL JSON pages (the workflow pipes to `jq -s`, which collects
-    # the pages into one array), so the multi-page path is genuinely exercised.
-    # FAKE_BLOCK_COUNT bot BLOCK comments + FAKE_OTHER_COUNT other comments are
-    # emitted in pages of FAKE_PAGE_SIZE (default 30, GitHub's page size) so a
-    # multi-page thread is reproducible. This is the ONLY gh api call the workflow
-    # makes, so answering it here is exact, not a blanket stub.
+    # `gh api --paginate ...` — the auto-close step counts the PR's non-PASS
+    # verdict comments (BLOCK and INCONCLUSIVE). Emit REAL JSON pages (the workflow
+    # pipes to `jq -s`, which collects the pages into one array), so the multi-page
+    # path is genuinely exercised. FAKE_BLOCK_COUNT bot BLOCK comments +
+    # FAKE_INCONCLUSIVE_COUNT bot INCONCLUSIVE comments + FAKE_OTHER_COUNT other
+    # comments are emitted in pages of FAKE_PAGE_SIZE (default 30, GitHub's page
+    # size) so a multi-page thread is reproducible. This is the ONLY gh api call
+    # the workflow makes, so answering it here is exact, not a blanket stub.
     "if [ \"$1\" = \"api\" ]; then",
-    "  python3 - \"${FAKE_BLOCK_COUNT:-0}\" \"${FAKE_OTHER_COUNT:-0}\" \"${FAKE_PAGE_SIZE:-30}\" <<'PYEOF'",
+    "  python3 - \"${FAKE_BLOCK_COUNT:-0}\" \"${FAKE_INCONCLUSIVE_COUNT:-0}\" \"${FAKE_OTHER_COUNT:-0}\" \"${FAKE_PAGE_SIZE:-30}\" <<'PYEOF'",
     "import json, sys",
-    "blocks, other, size = int(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3])",
+    "blocks, inconcl, other, size = int(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])",
     "items = [{\"user\": {\"login\": \"github-actions[bot]\"}, \"body\": \"## Review — BLOCK\\n\\nblocked\"}] * blocks",
+    "items += [{\"user\": {\"login\": \"github-actions[bot]\"}, \"body\": \"## validator INCONCLUSIVE — no review verdict\\n\\nno answer\"}] * inconcl",
     "items += [{\"user\": {\"login\": \"someone\"}, \"body\": \"a normal comment\"}] * other",
     "for i in range(0, max(len(items), 1), size):",
     "    print(json.dumps(items[i:i+size]))",
@@ -466,7 +468,7 @@ TARGETS = [
     # Auto-close runs BEFORE the Gate (BLOCK) in the workflow, so the close +
     # notice land before the gate fails the check. The harness executes in this
     # order, so it must mirror the workflow's.
-    ("name", "Auto-close after N BLOCKs"),
+    ("name", "Auto-close after N BLOCK/INCONCLUSIVE verdicts"),
     ("name", "Gate (BLOCK)"),
     ("name", "Gate (inconclusive)"),
     ("name", "Gate (ambiguous)"),
@@ -498,7 +500,7 @@ SCENARIOS = [
         "name": "block",
         "fake": "block",
         "expect_exit": 1,
-        "expect_steps": ["review", "parse", "Auto-close after N BLOCKs", "Gate (BLOCK)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close after N BLOCK/INCONCLUSIVE verdicts", "Gate (BLOCK)", "evidence"],
         "expect_verdict": "BLOCK",
         "expect_comment": False,
         "expect_auto_merge": False,
@@ -513,7 +515,7 @@ SCENARIOS = [
         "fake": "block",
         "block_count": 5,
         "expect_exit": 1,
-        "expect_steps": ["review", "parse", "Auto-close after N BLOCKs", "Gate (BLOCK)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close after N BLOCK/INCONCLUSIVE verdicts", "Gate (BLOCK)", "evidence"],
         "expect_verdict": "BLOCK",
         "expect_comment": True,
         "expect_comment_contains": ["Auto-closed", "open a **NEW** pull request"],
@@ -534,7 +536,7 @@ SCENARIOS = [
         "other_count": 60,
         "page_size": 30,
         "expect_exit": 1,
-        "expect_steps": ["review", "parse", "Auto-close after N BLOCKs", "Gate (BLOCK)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close after N BLOCK/INCONCLUSIVE verdicts", "Gate (BLOCK)", "evidence"],
         "expect_verdict": "BLOCK",
         "expect_comment": True,
         "expect_comment_contains": ["Auto-closed", "open a **NEW** pull request"],
@@ -543,19 +545,19 @@ SCENARIOS = [
         "expect_review_outputs": {"provider_unanswered": "false", "review_rc": "0"},
     },
     {
-        # AUTO-CLOSE (over threshold): the notice MUST render the ACTUAL BLOCK count,
+        # AUTO-CLOSE (over threshold): the notice MUST render the ACTUAL verdict-count,
         # not the threshold. `blocks=8` against the default threshold 5 fired the
-        # headline "Auto-closed: 5 unanswered BLOCK verdicts" while the body said
+        # headline "Auto-closed: 5 unanswered …" while the body said
         # "received **8**" — a false statement from the gate. The scenario asserts
         # the real count appears (and the threshold-only count does not).
         "name": "auto-close-over-threshold-count",
         "fake": "block",
         "block_count": 8,
         "expect_exit": 1,
-        "expect_steps": ["review", "parse", "Auto-close after N BLOCKs", "Gate (BLOCK)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close after N BLOCK/INCONCLUSIVE verdicts", "Gate (BLOCK)", "evidence"],
         "expect_verdict": "BLOCK",
         "expect_comment": True,
-        "expect_comment_contains": ["Auto-closed: 8 unanswered BLOCK verdicts", "received **8**"],
+        "expect_comment_contains": ["Auto-closed: 8 unanswered BLOCK/INCONCLUSIVE verdicts", "received **8**"],
         "expect_comment_excludes": ["Auto-closed: 5 unanswered"],
         "expect_auto_merge": False,
         "expect_closed": True,
@@ -568,7 +570,7 @@ SCENARIOS = [
         "fake": "block",
         "block_count": 2,
         "expect_exit": 1,
-        "expect_steps": ["review", "parse", "Auto-close after N BLOCKs", "Gate (BLOCK)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close after N BLOCK/INCONCLUSIVE verdicts", "Gate (BLOCK)", "evidence"],
         "expect_verdict": "BLOCK",
         "expect_comment": False,
         "expect_auto_merge": False,
@@ -576,10 +578,30 @@ SCENARIOS = [
         "expect_review_outputs": {"provider_unanswered": "false", "review_rc": "0"},
     },
     {
+        # AUTO-CLOSE (INCONCLUSIVE): a PR that keeps producing NO review verdict
+        # (the provider never answers) must ALSO be auto-closed at the threshold —
+        # otherwise an unreviewable PR loops forever, growing its own thread and
+        # driving the reviewer into the runaway this feature bounds. The count is
+        # the validator's own INCONCLUSIVE comments; the notice is the policy bound,
+        # not a code finding.
+        "name": "auto-close-inconclusive-at-threshold",
+        "fake": "provider-unanswered",
+        "inconclusive_count": 5,
+        "expect_exit": 3,
+        "expect_steps": ["review", "parse", "Auto-close after N BLOCK/INCONCLUSIVE verdicts", "Gate (inconclusive)", "evidence"],
+        "expect_verdict": "INCONCLUSIVE",
+        "expect_comment": True,
+        "expect_comment_contains": ["Auto-closed", "BLOCK/INCONCLUSIVE"],
+        "expect_auto_merge": False,
+        "expect_closed": True,
+        "expect_review_outputs": {"provider_unanswered": "true", "review_rc": "1",
+                                  "discarded_verdict": "false"},
+    },
+    {
         "name": "provider-unanswered",
         "fake": "provider-unanswered",
         "expect_exit": 3,
-        "expect_steps": ["review", "parse", "Gate (inconclusive)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close after N BLOCK/INCONCLUSIVE verdicts", "Gate (inconclusive)", "evidence"],
         "expect_verdict": "INCONCLUSIVE",
         "expect_comment": True,
         "expect_auto_merge": False,
@@ -601,7 +623,7 @@ SCENARIOS = [
         "name": "engine-defective",
         "fake": "engine-defective",
         "expect_exit": 3,
-        "expect_steps": ["review", "parse", "Gate (inconclusive)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close after N BLOCK/INCONCLUSIVE verdicts", "Gate (inconclusive)", "evidence"],
         "expect_verdict": "INCONCLUSIVE",
         "expect_comment": True,
         "expect_auto_merge": False,
@@ -622,7 +644,7 @@ SCENARIOS = [
         "name": "provider-error",
         "fake": "provider-error",
         "expect_exit": 3,
-        "expect_steps": ["review", "parse", "Gate (inconclusive)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close after N BLOCK/INCONCLUSIVE verdicts", "Gate (inconclusive)", "evidence"],
         "expect_verdict": "INCONCLUSIVE",
         "expect_comment": True,
         "expect_auto_merge": False,
@@ -657,7 +679,7 @@ SCENARIOS = [
         "name": "unanswered-plus-error",
         "fake": "unanswered-plus-error",
         "expect_exit": 3,
-        "expect_steps": ["review", "parse", "Gate (inconclusive)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close after N BLOCK/INCONCLUSIVE verdicts", "Gate (inconclusive)", "evidence"],
         "expect_verdict": "INCONCLUSIVE",
         "expect_comment": True,
         "expect_auto_merge": False,
@@ -697,7 +719,7 @@ SCENARIOS = [
         "name": "mixed-signals",
         "fake": "mixed-signals",
         "expect_exit": 3,
-        "expect_steps": ["review", "parse", "Gate (inconclusive)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close after N BLOCK/INCONCLUSIVE verdicts", "Gate (inconclusive)", "evidence"],
         "expect_verdict": "INCONCLUSIVE",
         "expect_comment": True,
         "expect_auto_merge": False,
@@ -722,7 +744,7 @@ SCENARIOS = [
         "name": "non-error-status",
         "fake": "non-error-status",
         "expect_exit": 3,
-        "expect_steps": ["review", "parse", "Gate (inconclusive)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close after N BLOCK/INCONCLUSIVE verdicts", "Gate (inconclusive)", "evidence"],
         "expect_verdict": "INCONCLUSIVE",
         "expect_comment": True,
         "expect_auto_merge": False,
@@ -742,7 +764,7 @@ SCENARIOS = [
         "name": "verdict-less",
         "fake": "verdict-less",
         "expect_exit": 3,
-        "expect_steps": ["review", "parse", "Gate (inconclusive)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close after N BLOCK/INCONCLUSIVE verdicts", "Gate (inconclusive)", "evidence"],
         "expect_verdict": "INCONCLUSIVE",
         "expect_comment": True,
         "expect_auto_merge": False,
@@ -777,7 +799,7 @@ SCENARIOS = [
         "name": "pass-with-error",
         "fake": "pass-with-error",
         "expect_exit": 3,
-        "expect_steps": ["review", "parse", "Gate (inconclusive)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close after N BLOCK/INCONCLUSIVE verdicts", "Gate (inconclusive)", "evidence"],
         "expect_verdict": "INCONCLUSIVE",
         "expect_comment": True,
         "expect_auto_merge": False,
@@ -798,7 +820,7 @@ SCENARIOS = [
         "name": "block-with-error",
         "fake": "block-with-error",
         "expect_exit": 1,
-        "expect_steps": ["review", "parse", "Auto-close after N BLOCKs", "Gate (BLOCK)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close after N BLOCK/INCONCLUSIVE verdicts", "Gate (BLOCK)", "evidence"],
         "expect_verdict": "BLOCK",
         "expect_comment": False,
         "expect_auto_merge": False,
@@ -860,6 +882,7 @@ def run_scenario(spec, ordered, tmpdir, fakedir, workspace):
         # The auto-close step counts the PR's BLOCK comments via `gh api`; the
         # scenario supplies the count so the threshold branch is exercised.
         env["FAKE_BLOCK_COUNT"] = str(spec.get("block_count", 0))
+        env["FAKE_INCONCLUSIVE_COUNT"] = str(spec.get("inconclusive_count", 0))
         env["FAKE_OTHER_COUNT"] = str(spec.get("other_count", 0))
         env["FAKE_PAGE_SIZE"] = str(spec.get("page_size", 30))
         stem = label + "." + re.sub("[^A-Za-z0-9]+", "_", name)
