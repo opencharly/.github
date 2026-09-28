@@ -1,0 +1,22 @@
+# .opencode/coord.conf.example — identity defaults for the coordination tools.
+#
+# Copy to `.opencode/coord.conf` (git-ignored) and fill in your project's values,
+# OR pass them as tool args, OR set the matching COORD_* environment variables.
+# Precedence: TOOL ARG > COORD_* ENV > this file. The session is always the live
+# session (`context.sessionID`) — it cannot be set here.
+#
+#   agent       the work slug for the `Agent:` line (a stable kebab name for the
+#               work, e.g. `ocv2-coordination`; never a harness or account name).
+#   harness     the harness name, e.g. OpenCode.
+#   model       the provider + model name, e.g. `DeepSeek V4.1 Flash`.
+#   confidence  one of the five attribution tiers:
+#                 fully tested and validated | analysed on a live system |
+#                 documentation reviewed | syntax check only | theoretical suggestion
+#
+# Every key is optional; a value supplied at the tool call or in the environment
+# wins over the one here.
+
+agent=
+harness=OpenCode
+model=
+confidence=
