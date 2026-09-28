@@ -27,11 +27,11 @@ comment_first_takeover	marketplace projection	marketplace/internals/skills/git-w
 successor_protocol	umbrella AGENTS.md	AGENTS.md	require	RESOLVED — superseded by #<n>
 successor_protocol	git-workflow skill source	layer-charly-internals/charly.yml	require	superseded by #<n>
 successor_protocol	marketplace projection	marketplace/internals/skills/git-workflow/SKILL.md	require	superseded by #<n>
-signoff_account_gate	umbrella AGENTS.md	AGENTS.md	require	posting ACCOUNT is the
+signoff_account_gate	umbrella AGENTS.md	AGENTS.md	require	posting ACCOUNT is the entire gate
 signoff_account_gate	umbrella AGENTS.md	AGENTS.md	forbid	labelled delegated and carrying
-signoff_account_gate	git-workflow skill source	layer-charly-internals/charly.yml	require	posting ACCOUNT is the
+signoff_account_gate	git-workflow skill source	layer-charly-internals/charly.yml	require	posting ACCOUNT is the entire gate
 signoff_account_gate	git-workflow skill source	layer-charly-internals/charly.yml	forbid	labelled delegated and carrying
-signoff_account_gate	marketplace projection	marketplace/internals/skills/git-workflow/SKILL.md	require	posting ACCOUNT is the
+signoff_account_gate	marketplace projection	marketplace/internals/skills/git-workflow/SKILL.md	require	posting ACCOUNT is the entire gate
 signoff_account_gate	marketplace projection	marketplace/internals/skills/git-workflow/SKILL.md	forbid	labelled delegated and carrying
 rerun_channel	git-workflow skill source	layer-charly-internals/charly.yml	require	rerun.yml. sweep
 rerun_channel	git-workflow skill source	layer-charly-internals/charly.yml	forbid	distribute-rerun-listener
@@ -40,4 +40,4 @@ rerun_channel	marketplace projection	marketplace/internals/skills/git-workflow/S
 rerun_channel	org-wide required workflow	dotgithub/.github/workflows/org-wide-pr-validator-required.yml	forbid	distribute-rerun-listener
 auto_close_threshold	validator workflow	dotgithub/.github/workflows/pr-validator.yml	require	AI_REVIEW_AUTO_CLOSE_AFTER .. .5.
 auto_close_threshold	umbrella AGENTS.md	AGENTS.md	require	AI_REVIEW_AUTO_CLOSE_AFTER., default 5
-auto_close_threshold	git-workflow skill source	layer-charly-internals/charly.yml	require	AI_REVIEW_AUTO_CLOSE_AFTER., default 5
+auto_close_threshold	git-workflow skill source	layer-charly-internals/charly.yml	require	AI_REVIEW_AUTO_CLOSE_AFTER., (effective )?default 5

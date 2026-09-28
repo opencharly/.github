@@ -99,15 +99,22 @@ check_manifest() {
       continue
     fi
     checked=$((checked+1))
+    # WRAP-ROBUST matching. Prose in these surfaces wraps at a fixed column, so a
+    # multi-word canonical phrase can straddle a line break and a naive line-based
+    # `grep` would MISS it — a false red on a correct tree. Match against a
+    # whitespace-NORMALIZED copy of the file: runs of whitespace (including the
+    # newline) collapse to one space, so a phrase spans a wrap. The manifest keeps
+    # its specific, full phrases (never shortened to a loose fragment).
+    norm="$(tr '\n' ' ' < "$target" | tr -s '[:space:]' ' ')"
     if [[ "$kind" == require ]]; then
-      if grep -Eq -- "$pattern" "$target"; then
+      if printf '%s' "$norm" | grep -Eq -- "$pattern"; then
         echo "ok    $claim/$surface — required phrase present in ${target#"$rt"/}"
       else
         echo "FAIL  $claim/$surface — required phrase ABSENT from $path (/$pattern/)" >&2
         fail=1
       fi
     else
-      if grep -Eq -- "$pattern" "$target"; then
+      if printf '%s' "$norm" | grep -Eq -- "$pattern"; then
         echo "FAIL  $claim/$surface — forbidden phrase PRESENT in $path (/$pattern/)" >&2
         fail=1
       else
