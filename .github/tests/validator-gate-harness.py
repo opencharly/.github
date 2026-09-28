@@ -76,6 +76,7 @@ ENVIRONMENT NOTES
   therefore safe (serialized), not merely discouraged.
 """
 
+import atexit
 import fcntl
 import os
 import re
@@ -103,6 +104,28 @@ PATH_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)((?:[.][A-Za-z0-9_-]+)+)")
 
 RUNNER_PATHS = ["/tmp/review.txt", "/tmp/review.untrusted.txt", "/tmp/review.log",
                 "/tmp/inconclusive-comment.md"]
+
+# Temp dirs this harness creates. One functional test — the ensure-charly pin guard —
+# downloads a ~383 MB pinned charly release into its temp dir; when these are never
+# removed they accumulate across runs and exhaust the runner's disk quota (a measured
+# EDQUOT after ~30 runs, which then fails EVERY scenario with "Disk quota exceeded"
+# and looks like a code regression). Register every harness temp dir for removal at
+# process exit so the coverage is self-cleaning and cannot poison later runs (R1).
+_TMP_DIRS = []
+
+
+def make_tmpdir(prefix):
+    path = tempfile.mkdtemp(prefix=prefix)
+    _TMP_DIRS.append(path)
+    return path
+
+
+def cleanup_tmpdirs():
+    while _TMP_DIRS:
+        shutil.rmtree(_TMP_DIRS.pop(), ignore_errors=True)
+
+
+atexit.register(cleanup_tmpdirs)
 
 
 class HarnessError(Exception):
@@ -1233,7 +1256,7 @@ def run_harness():
     #   (a) pin UNSET          -> ::error:: + exit 3 (INCONCLUSIVE; never a fallback)
     #   (b) on-PATH == pin     -> exit 0 (uses the on-PATH binary)
     #   (c) on-PATH != pin     -> ::warning:: + downloads the pinned release
-    pin_tmp = tempfile.mkdtemp(prefix="validator-pin-guard.")
+    pin_tmp = make_tmpdir("validator-pin-guard.")
     pin_ns = build_ns({}, pin_tmp, pin_tmp)
     pin_script = os.path.join(pin_tmp, "ensure-charly.sh")
     with open(pin_script, "w", encoding="utf-8") as fh:
@@ -1277,7 +1300,7 @@ def run_harness():
          "functional: ensure-charly LOUDLY warns and downloads the pinned engine when the "
          "on-PATH charly DIFFERS from the pin (the stale-engine defect)")
 
-    tmpdir = tempfile.mkdtemp(prefix="validator-gate-harness.")
+    tmpdir = make_tmpdir("validator-gate-harness.")
     fakedir = os.path.join(tmpdir, "fakebin")
     os.makedirs(fakedir)
     write_executable(os.path.join(fakedir, "charly"), FAKE_CHARLY)
@@ -1406,6 +1429,19 @@ def run_harness():
          "(the counter is genuinely bound to the emitted header, so a rename cannot silently "
          "disable the INCONCLUSIVE auto-close) — got: " +
          " | ".join(line for line in out2.splitlines() if "verdicts on this PR" in line))
+
+    # SELF-CLEANING COVERAGE (R1): every temp dir this run created is removed here, and
+    # the removal is ASSERTED. One functional test (the ensure-charly pin guard) downloads
+    # a ~383 MB release; uncleaned dirs accumulate across runs and exhaust the runner's
+    # quota (measured: ~30 runs -> EDQUOT, which then fails EVERY scenario and masquerades
+    # as a code regression). Removing cleanup must FAIL this assertion, so the leak cannot
+    # silently return.
+    dirs_created = list(_TMP_DIRS)
+    cleanup_tmpdirs()
+    leaked = [d for d in dirs_created if os.path.exists(d)]
+    note(len(dirs_created) >= 2 and not leaked,
+         "functional: the harness removes EVERY temp dir it created (no disk-quota leak) "
+         "— created=" + str(len(dirs_created)) + " leaked=" + str(leaked))
 
     print(NL.join(log))
     failed = [message for ok, message in checks if not ok]
