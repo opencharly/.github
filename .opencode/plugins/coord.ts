@@ -391,6 +391,8 @@ export default {
           // .opencode/coord.conf / COORD_* env when the caller omits it.
           required: ["verb", "item"],
         },
+        // `toolCtx` (the tool executor context, pre-existing on main) carries the
+        // Session abort `signal` and sessionID used below.
         execute: async (input: Record<string, any>, toolCtx: any) => {
           if (!existsSync(commentScript)) {
             return {
