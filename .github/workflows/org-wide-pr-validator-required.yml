@@ -33,8 +33,9 @@ on:
 # non-default activity types. A body-only BLOCK is therefore cleared by re-running the
 # EXISTING failed run (`gh run rerun <run-id>`): a re-run reuses the SAME GITHUB_SHA and
 # updates THAT run's check run IN PLACE — no duplicate same-name check run, no POISON. The
-# `rerun`-label channel that automates this lives in a PLAIN per-repo workflow distributed by
-# `.github/workflows/distribute-rerun-listener.yml` (dotgithub#121) — it CANNOT live here.
+# `rerun`-label channel that automates this is the org-wide `rerun.yml` sweep (PR #122), which
+# replaces the earlier per-repo listener distributor (dotgithub#121): the sweep runs from THIS
+# repo on a schedule, so it needs NO per-repo workflow file and no `workflows: write`.
 
 # ONE run per PR: a re-dispatch/push cancels the in-flight run, so the head can never
 # carry duplicate same-name `validate / validate` check runs (a duplicate FAILED run
