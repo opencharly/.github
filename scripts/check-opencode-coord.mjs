@@ -182,6 +182,15 @@ if (mod) {
   // `../marketplace/scripts/…` instead of forking it — R3).
   const src = readFileSync(pluginPath, "utf8");
   ok(/COORD_SH/.test(src) && /GH_WATCH_SH/.test(src), "the plugin resolves its scripts via COORD_SH/GH_WATCH_SH overrides");
+
+  // Static guard for the R1 fix: the executors MUST be async + abortable. A
+  // synchronous spawn helper would block opencode's server event loop (the
+  // coord_watch watcher is long-lived → the supervisor restarts the server), and a
+  // missing `signal` means an interrupted Session cannot stop the operation.
+  ok(!/spawnSync/.test(src), "coord.ts contains NO synchronous spawn helper (spawnSync)");
+  ok(/signal/.test(src), "coord.ts references the abort `signal` (cancellable executors)");
+  ok(/Bun\.spawn/.test(src), "coord.ts uses async Bun.spawn (the same primitive pr-watch.ts uses)");
+
   ok(typeof mod.resolveScript === "function", "resolveScript is exported (script resolution is unit-testable)");
   if (typeof mod.resolveScript === "function") {
     const { resolveScript } = mod;
@@ -243,6 +252,38 @@ if (mod) {
           "MERGED acme/widget#1",
           "coord_watch.execute RUNS the watcher via bash (double-`bash` regression) and returns the wake line",
         );
+
+        // The executors MUST be async + non-blocking: the tool call resolves while a
+        // slow child is still running, and the tool-side `timeout` kills it.
+        const slowWatch = join(d, "stub-gh-watch-slow.sh");
+        writeFileSync(slowWatch, '#!/bin/sh\nsleep 30\necho "MERGED late"\n');
+        process.env.GH_WATCH_SH = slowWatch;
+        const ctx2 = {
+          location: { directory: d },
+          tool: { transform: async (cb) => cb({ add: (t) => (tools["slow_" + t.name] = t) }) },
+          session: { hook: async () => ({}) },
+        };
+        await plugin.setup(ctx2);
+        const t0 = Date.now();
+        const timed = await tools.slow_coord_watch.execute({ items: ["acme/widget#1"], timeout: 1 });
+        const elapsed = Date.now() - t0;
+        ok(
+          elapsed < 15000,
+          `coord_watch is NON-BLOCKING: timeout=1 killed a 30s watcher in ${elapsed}ms (a blocking spawn would run the full 30s)`,
+        );
+        ok(/^TIMEOUT/m.test(timed.content), "coord_watch reports TIMEOUT when the deadline overruns");
+
+        // Abort: passing an already-aborted signal kills the child (session stop).
+        process.env.GH_WATCH_SH = slowWatch;
+        const abortedCtl = new AbortController();
+        abortedCtl.abort();
+        const t1 = Date.now();
+        const abortRes = await tools.slow_coord_watch.execute({ items: ["acme/widget#1"] }, { signal: abortedCtl.signal });
+        ok(
+          Date.now() - t1 < 15000 && /aborted|TIMEOUT|no event|exited/.test(abortRes.content),
+          "coord_watch honours context.signal: an aborted call returns promptly",
+        );
+        process.env.GH_WATCH_SH = stubWatch;
 
         const commentRes = await tools.coord_comment.execute({
           verb: "STATUS",
@@ -366,6 +407,47 @@ if (process.env.LIVE_OPENCODE === "1") {
         agentAt !== -1 && assistAt !== -1 && agentAt < assistAt,
         "real opencode: canonical footer order (Agent: BEFORE Assisted-by:)",
       );
+
+      // --- the R1 FIX, proven live: coord_watch is non-blocking and does NOT
+      // restart the server. Stage a SLOW watcher (30s) and call coord_watch with
+      // timeout=2; a synchronous spawn would freeze the server for 30s (and the
+      // supervisor would restart it), while the async+abortable executor returns in
+      // ~2s. "loading plugin" is logged ONCE per server boot, so counting it in the
+      // run's --print-logs output proves there was no reload.
+      const slowWatch = join(proj, "marketplace", "scripts", "gh_watch.sh");
+      writeFileSync(slowWatch, '#!/bin/sh\nsleep 30\necho "MERGED late"\n');
+      const watchPrompt =
+        "You MUST call the coord_watch tool in this turn. Call it exactly once with " +
+        'items=["acme/widget#1"] and timeout=2. Do NOT answer from memory — actually ' +
+        "invoke the tool, then report its result.";
+      let wlog = "";
+      let wallMs = 0;
+      let watchTimedOut = false;
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        const w0 = Date.now();
+        const wout = run("opencode", ["run", "--standalone", "--print-logs", "--auto", watchPrompt], {
+          cwd: proj,
+          timeout: 120000,
+        });
+        wallMs = Date.now() - w0;
+        wlog += `\n${wout.stdout ?? ""}\n${wout.stderr ?? ""}`;
+        // spawnSync returns `signal`/`error` on timeout; a blocked server would hang
+        // the run past the 120s budget.
+        if (wout.signal || wout.error) watchTimedOut = true;
+        if (/coord_watch/.test(wlog)) break;
+      }
+      ok(
+        !watchTimedOut && wallMs > 0 && wallMs < 90000,
+        `real opencode: the coord_watch run COMPLETED (${wallMs}ms, no timeout) — the server was not frozen by a blocking spawn`,
+      );
+      // "loading plugin" is logged once per server boot; a freeze-triggered restart
+      // logs it AGAIN. The whole run must show it at most once.
+      const loadCount = (wlog.match(/loading plugin/g) || []).length;
+      ok(
+        loadCount <= 1,
+        `real opencode: NO server reload during coord_watch (plugin loaded ${loadCount} time(s); a freeze/restart would log it again)`,
+      );
+      ok(/coord_watch/.test(wlog), "real opencode: coord_watch was the tool exercised live");
     } finally {
       rmSync(proj, { recursive: true, force: true });
     }
