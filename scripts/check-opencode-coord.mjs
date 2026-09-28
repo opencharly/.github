@@ -282,7 +282,7 @@ if (mod) {
         const elapsed = Date.now() - t0;
         ok(
           elapsed < 15000,
-          `coord_watch is NON-BLOCKING: timeout=1 killed a 30s watcher in ${elapsed}ms (a blocking spawn would run the full 30s)`,
+          `coord_watch is NON-BLOCKING: timeout=1 killed a 30s watcher well before its sleep (a blocking spawn would run the full 30s)`,
         );
         ok(/^TIMEOUT/m.test(timed.content), "coord_watch reports TIMEOUT when the deadline overruns");
 
