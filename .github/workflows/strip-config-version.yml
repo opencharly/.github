@@ -8,7 +8,11 @@
 # whole file (~100 cosmetic lines of churn per file, incl. trailing-whitespace changes
 # INSIDE `description:` block scalars), which is unacceptable across ~400 repos.
 # scripts/strip-config-version.sh strips with a MINIMAL-DIFF, parser-safe line filter
-# instead: only the stamp lines change, every other byte stays identical.
+# instead: only the stamp lines change, every other byte stays identical. It strips
+# EVERY `charly.yml` in each repo, ROOT OR NESTED (the git TREES API enumerates them):
+# the v1 tool fetched only the root manifest, leaving nested candy/box/tools/
+# packaging/check/testdata manifests stamped (measured 2026-09-28: 206 nested
+# `charly.yml` files across 140 repos).
 #
 # WHY IT IS A WORKFLOW: committing to a protected `main` needs a commit authored by a
 # ruleset BYPASS actor. The `charly-auto-merge` App IS that actor, so it authors the
@@ -21,11 +25,14 @@
 # Apps `workflows: write` permission is NOT needed here (contrast the candy-gate
 # retirement, which DELETE'd `.github/workflows/*` and did need it).
 #
-# SAFETY: a line is deleted ONLY when it matches `^ {0,8}version:` (the document stamp
-# at indent 0, or an entity-body stamp at indent 8/4). A `version:` line indented 16+
-# is a fenced YAML example inside a `description: |` block scalar and is PRESERVED; the
-# filter additionally refuses LOUDLY if a matched line ever sits inside a block scalar.
-# Idempotent: a file with nothing to strip is never written.
+# SAFETY — the filter is STRUCTURAL: a `version:` line is deleted ONLY when it is the
+# indent-0 DOCUMENT stamp or a DIRECT child of a `candy:`/`box:`/`deploy:` entity body.
+# Every other `version:` is preserved — in particular a LIVE `distro:` -> `version:`
+# (`#Distro.version`, e.g. charly/charly.yml's embedded default vocabulary). A
+# `version:` line indented 16+ is a fenced YAML example inside a `description: |`
+# block scalar and is preserved; the filter additionally refuses LOUDLY if a matched
+# line ever sits inside a block scalar. Idempotent: a file with nothing to strip is
+# never written.
 #
 # DRY RUN: dispatch with the `dry_run` input true to report what WOULD change without
 # committing (optionally restricted to named `repos`).
