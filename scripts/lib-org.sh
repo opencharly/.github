@@ -46,5 +46,11 @@ dispatcher_path_for() {
 api_status() {
   local resp
   resp="$(gh api --include "$1" 2>&1 || true)"
-  printf '%s\n' "$resp" | awk 'NR==1 { print $2; exit }'
+  # Read the status from the FIRST line but do NOT `exit` awk: under `pipefail` a
+  # response body larger than the 64 KiB pipe buffer (every charly.yml over ~64 KB —
+  # measured on distro-arch, 100 KB) makes awk close the pipe while printf is still
+  # writing, so printf dies with SIGPIPE (141) and the whole pipeline — hence this
+  # function under `set -e` — FAILS. Letting awk consume the whole input costs nothing
+  # (it prints only line 1) and keeps the function SIGPIPE-safe for any body size.
+  printf '%s\n' "$resp" | awk 'NR==1 { print $2 }'
 }

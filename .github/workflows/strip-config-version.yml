@@ -1,0 +1,77 @@
+# STRIP THE RETIRED CONFIG `version:` STAMP (one-shot org cutover).
+#
+# The schema-versioning-removal cutover deletes the authored config `version:` field.
+# Over the org's 423 active `main`-default repos, 396 still carry a `version:` line on
+# `main` (measured 2026-09-28; 394 would be stripped, 2 carry only a code-block example
+# that is preserved). The host leg of that removal (opencharly/charly#716) is NOT landed,
+# so NO released charly accepts or needs the strip — and `charly migrate` REFORMATS the
+# whole file (~100 cosmetic lines of churn per file, incl. trailing-whitespace changes
+# INSIDE `description:` block scalars), which is unacceptable across ~400 repos.
+# scripts/strip-config-version.sh strips with a MINIMAL-DIFF, parser-safe line filter
+# instead: only the stamp lines change, every other byte stays identical.
+#
+# WHY IT IS A WORKFLOW: committing to a protected `main` needs a commit authored by a
+# ruleset BYPASS actor. The `charly-auto-merge` App IS that actor, so it authors the
+# commit; the operator-run scripts/org-ruleset.sh deliberately adds NO human bypass to
+# the ruleset (that would loosen main protection). This is the same authorization the
+# `retire-per-repo-candy-gates` cutover (`retire-per-repo-candy-gates.yml`) uses.
+#
+# REQUIRED APP PERMISSION: `contents: write` (the ruleset bypass, for the
+# protected-main commit). charly.yml is NOT a workflow file, so the separate GitHub
+# Apps `workflows: write` permission is NOT needed here (contrast the candy-gate
+# retirement, which DELETE'd `.github/workflows/*` and did need it).
+#
+# SAFETY: a line is deleted ONLY when it matches `^ {0,8}version:` (the document stamp
+# at indent 0, or an entity-body stamp at indent 8/4). A `version:` line indented 16+
+# is a fenced YAML example inside a `description: |` block scalar and is PRESERVED; the
+# filter additionally refuses LOUDLY if a matched line ever sits inside a block scalar.
+# Idempotent: a file with nothing to strip is never written.
+#
+# DRY RUN: dispatch with the `dry_run` input true to report what WOULD change without
+# committing (optionally restricted to named `repos`).
+name: strip-config-version
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Report what would change without committing"
+        required: false
+        type: boolean
+        default: false
+      repos:
+        description: "Space-separated repo names to restrict the wave (empty = all)"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  strip:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create bot token (charly-auto-merge App)
+        id: app
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547
+        with:
+          app-id: ${{ secrets.CHARLY_AUTO_MERGE_APP_ID }}
+          private-key: ${{ secrets.CHARLY_AUTO_MERGE_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - uses: actions/checkout@v7
+
+      - name: Strip the retired config version stamp (org-wide)
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
+          REPOS: ${{ inputs.repos }}
+        run: |
+          # Never interpolate `${{ inputs.* }}` directly into `run:` — a shell-injection
+          # surface. Pass it via env and expand as a QUOTED ARRAY (word-split into repo
+          # args, but never re-parsed as shell): a metacharacter in a repo name is one
+          # literal argv element, not code. An empty REPOS leaves the array empty, so the
+          # script enumerates all repos itself.
+          read -ra repo_args <<<"$REPOS" || true
+          bash scripts/strip-config-version.sh "${repo_args[@]}"
