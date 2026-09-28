@@ -42,6 +42,33 @@ dispatcher_path_for() {
   [[ "$1" == "$SOURCE_REPO" ]] && echo "$SOURCE_DISPATCHER_PATH" || echo "$DISPATCHER_PATH"
 }
 
+# list_config_paths <repo> — print `<status>` (ok | truncated | failed) then, when
+# ok, every `charly.yml` blob path in the repo, ROOT OR NESTED, one per line. Uses
+# the git TREES API recursively (`git/trees/main?recursive=1`) so a nested
+# candy/box/tools/packaging/check/testdata manifest is discovered, not just the
+# root file. Paths are the tree's blob paths (e.g. `candy/plugin-box/charly.yml`);
+# the recursive listing includes testdata fixtures (e.g. charly/testdata/...), which
+# is intended — the retired stamp must go from EVERY authored manifest.
+#
+# ALWAYS returns 0 (the caller branches on the status line):
+#  - ok        — the tree was read; the paths follow (possibly none, meaning the
+#                repo has no charly.yml — the caller counts it `absent`).
+#  - truncated — the recursive API could not return the whole tree. This is a
+#                SILENT-MISS risk: an unseen nested manifest would be left stamped.
+#                The caller MUST treat it as FATAL, never as "no charly.yml".
+#  - failed    — a transport/API error; a per-repo failure the wave CONTINUES past.
+list_config_paths() {
+  local repo="$1" json
+  if ! json="$(gh api "repos/$ORG/$repo/git/trees/main?recursive=1" 2>/dev/null)"; then
+    printf 'failed\n'; return 0
+  fi
+  if [[ "$(jq -r '.truncated // false' <<<"$json" 2>/dev/null)" == "true" ]]; then
+    printf 'truncated\n'; return 0
+  fi
+  printf 'ok\n'
+  jq -r '[.tree[] | select(.type == "blob") | .path | select((split("/") | last) == "charly.yml")] | .[]' <<<"$json" 2>/dev/null || true
+}
+
 # api_status <path> — the HTTP status of a GET; empty on a transport/other failure.
 api_status() {
   local resp

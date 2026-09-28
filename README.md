@@ -73,8 +73,11 @@ copy inherits the files here — so a change lands **once**, not in every repo.
 - **`scripts/strip-config-version.sh`** +
   **`.github/workflows/strip-config-version.yml`** — the one-shot org cutover that
   DELETES the schema-versioning-removal cutover's retired authored `version:` stamp
-  from every repo's `charly.yml` (measured over the org's 423 active `main`-default
-  repos: 396 still carry a `version:` line; 394 would be stripped). It runs as a workflow
+  from EVERY `charly.yml` in every repo, ROOT OR NESTED (the git TREES API enumerates
+  them; the v1 tool fetched only the root manifest, leaving 206 nested `charly.yml`
+  files across 140 repos stamped — measured 2026-09-28; over the org's 423 active
+  `main`-default repos, 396 still carry a `version:` line; 394 roots would be
+  stripped). It runs as a workflow
   because a commit to a protected `main` needs a ruleset-bypass commit author — the
   `charly-auto-merge` App (the workflow mints that token), the same authorization the
   candy-gate retirement uses; charly.yml is not a workflow file, so only the App's
@@ -82,15 +85,20 @@ copy inherits the files here — so a change lands **once**, not in every repo.
   (`opencharly/charly#716`) is not landed and `charly migrate` reformats the whole
   file (~100 cosmetic lines of churn, incl. trailing-whitespace changes INSIDE
   `description:` block scalars), the strip is a MINIMAL-DIFF, parser-safe line filter
-  (`scripts/_strip-filter.py`) that touches ONLY the stamp lines. **Safety rule:** a
-  line is deleted ONLY when it matches `^ {0,8}version:` — the document stamp (indent
-  0) or an entity-body stamp (indent 8, and indent 4 in the two 2-space manifests); a
-  `version:` line indented 16+ is a fenced YAML example inside a `description: |`
+  (`scripts/_strip-filter.py`) that touches ONLY the stamp lines. **Safety rule:** the
+  predicate is STRUCTURAL — a `version:` line is deleted ONLY when it is the indent-0
+  DOCUMENT stamp or a DIRECT child of a `candy:`/`box:`/`deploy:` entity body (indent
+  8, and indent 4 in the two 2-space manifests). Every other `version:` is preserved,
+  in particular a LIVE `distro:` -> `version:` field (`#Distro.version`, e.g.
+  charly/charly.yml's embedded default vocabulary — the merged host leg charly#716
+  removed ONLY its line-1 stamp); a `version:` line indented 16+ is a fenced YAML
+  example inside a `description: |`
   block scalar and is PRESERVED (9 repos — deleting it would corrupt documentation,
   e.g. layer-charly-hermes's `version: 2026.156.1921   # mandatory CalVer`). The
   filter additionally refuses LOUDLY if a matched line ever sits inside a block
   scalar. Idempotent (nothing to strip → never written); `DRY_RUN=1` reports what
-  WOULD change without committing; its offline mock-`gh` test is
+  WOULD change (every file, root + nested) without committing; its offline mock-`gh`
+  test is
   `scripts/strip-config-version_test.sh` (which locks the real layer-charly-hermes
   charly.yml as a committed fixture in `scripts/fixtures/`).
 - **`.github/workflows/validator-harness.yml`** +
