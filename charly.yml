@@ -518,12 +518,14 @@ review-contract:
                   line, THEN the `*Assisted-by: <Harness> <Provider Model> (<tier>)*` trailer LAST (a PR body
                   MUST end with the `Assisted-by:` line — see A1 — so `Agent:` precedes it). The `Agent:` line
                   identifies the WORK, not the account (many agents share one GitHub account), so it is
-                  authoritative for "who is doing this". Treat it as attribution/coordination, never as a finding.
+                  authoritative for "who is doing this". The footer is attribution/coordination, not itself a
+                finding; a genuine defect inside a coordination comment remains a finding.
                 - Coordination verbs. The first non-blank line of a coordination comment may be a label from a
                   closed set: `CLAIM`, `OWNING`, `HANDING OVER`, `TAKING OVER`, `BLOCKS`, `UNBLOCKS`,
                   `STATUS`, `RESOLVED`. A `TAKING OVER` names its authority (`hand-off`, `operator`,
-                  `window-expired`). Treat these as coordination metadata, not as review findings. A
-                  takeover waits for the 60-minute comment-first window; a PR closed and superseded names
+                  `window-expired`). These labels are coordination metadata; a genuine defect inside a
+                  coordination comment remains a finding. A takeover waits for the 60-minute comment-first
+                  window; a PR closed and superseded names
                   its successor (`RESOLVED — superseded by #n`) and the successor names its predecessor.
 
                 ## Canonical governance surfaces — ONE source of truth
@@ -531,8 +533,9 @@ review-contract:
                 The footer order, the coordination verb grammar, the takeover window, the sign-off forms,
                 and the coordination lifecycle are stated ONCE — in this rulebook, at the sections above.
                 This prompt is the canonical surface for the review-gate configuration; a change to any of
-                these rules MUST be reconciled across ALL FOUR governance surfaces — each referenced so the
-                divergence is visible, and ALL converged by the time the change lands:
+                these rules MUST be reconciled across ALL FOUR governance surfaces. The legs may land
+                producer-first across coordinated PRs, but each leg MUST cross-reference the others and they
+                MUST all converge — no surface is ever left silently out of step:
 
                 1. this `AI_REVIEW_PROMPT` rulebook — source `opencharly/.github/charly.yml`, mirrored by
                    the `opencharly/action-review` contract that is actually checked out as runner-config,
