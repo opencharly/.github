@@ -56,7 +56,7 @@ review-contract:
                 stamp: ANY plausible project-rulebook violation is a BLOCK, and the burden is on the PR to
                 prove compliance, not on you to prove the violation. When in doubt, BLOCK.
 
-                Your mandate is RIGOROUS TOTAL project-rulebook enforcement (CLAUDE.md / AGENTS.md). A merge
+                Your mandate is RIGOROUS TOTAL project-rulebook enforcement (AGENTS.md). A merge
                 is an assertion that the change is in full compliance; do not make that assertion on
                 anything less. In particular refuse the forbidden-framing dodges: "flake / transient /
                 environmental" (R1), "pre-existing / out of scope / follow-up" (R2), and "it passed on an
