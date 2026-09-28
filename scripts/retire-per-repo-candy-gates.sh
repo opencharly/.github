@@ -59,26 +59,57 @@ repos_out="$(discover_repos)" || { echo "FATAL: gh repo list (targets) failed" >
 [[ -n "$repos_out" ]] || { echo "no active repositories discovered for $ORG" >&2; exit 1; }
 mapfile -t repos <<<"$repos_out"
 
-# stub_meta <repo> — print `<sha>\t<name>\t<is_stub>`, the blob SHA (the delete
-# target's concurrency guard), the parsed top-level `name:`, and `1` when the file
-# also carries the stub's content signature `charly box validate`.
-# Returns non-zero LOUDLY on any fetch/decode failure: a transient error must never
-# read as "not the candy stub" and silently leave a stale gate in place (the same
-# fail-closed doctrine as `api_status`). A file with no `name:` line yields an empty
-# name field, which never equals STUB_NAME (so the file is skipped, never deleted).
+# stub_meta <repo> — print one line `<status>\t<sha>\t<name>\t<is_stub>`:
+#   status ∈ ok | vanished | failed; sha/name/is_stub are empty/0 unless ok.
+#  - ok       — the blob's metadata + text were read and classified (sha is the
+#               delete target's concurrency guard).
+#  - vanished — the file is absent NOW (HTTP 404): it was deleted between the
+#               caller's probe and this fetch, i.e. a concurrent run of this same
+#               ORG-WIDE wave. This is idempotent, NOT a failure — count absent.
+#  - failed   — a transient/technical fetch or decode error. Record the repo as
+#               failed, NEVER delete it, NEVER abort the whole wave; the end-of-run
+#               summary lists the failed repos and the script exits non-zero so it
+#               is never silent.
+# ALWAYS returns 0 (the caller branches on the leading status field). A file with no
+# `name:` line yields an empty name, which never equals STUB_NAME (skipped, never
+# deleted) — the fail-closed SAFETY gate is unchanged.
+#
+# A 404 here is the one case the pre-fix script could not tell apart from a real
+# failure, and it aborted the entire ~300-repo wave on a single already-retired repo
+# (run 36455597712: layer-camsnap's deploy.yml was deleted at 17:05:37Z by the
+# concurrent run 36455573679 whose probe had raced one second ahead).
+#
+# The Contents API omits inline `.content` for blobs > 1 MB (returns `.encoding:
+# "none"`); when the inline body decodes empty we fall back to the git blob API
+# (`git/blobs/<sha>`) so a large deploy.yml is still classified, not failed.
 stub_meta() {
-  local repo="$1" body text sha name is_stub
-  body="$(gh api "repos/$ORG/$repo/contents/$STUB_PATH" 2>/dev/null)" || return 1
-  sha="$(printf '%s' "$body" | jq -r '.sha // empty')" || return 1
-  [[ -n "$sha" ]] || return 1
-  text="$(printf '%s' "$body" | jq -r '.content // empty' | base64 -d 2>/dev/null)" || return 1
+  local repo="$1" out body text sha name is_stub blob
+  if out="$(gh api "repos/$ORG/$repo/contents/$STUB_PATH" 2>&1)"; then
+    body="$out"
+  else
+    if printf '%s' "$out" | grep -qE 'HTTP 404|"status": *"404"'; then
+      printf 'vanished\t\t\t0\n'; return 0
+    fi
+    printf 'failed\t\t\t0\n'; return 0
+  fi
+  sha="$(printf '%s' "$body" | jq -r '.sha // empty' 2>/dev/null)" || sha=""
+  [[ -n "$sha" ]] || { printf 'failed\t\t\t0\n'; return 0; }
+  text="$(printf '%s' "$body" | jq -r '.content // empty' 2>/dev/null | base64 -d 2>/dev/null)" || text=""
+  if [[ -z "$text" ]]; then
+    # > 1 MB (inline content omitted) or an undecodable inline body — read the blob.
+    if ! blob="$(gh api "repos/$ORG/$repo/git/blobs/$sha" 2>/dev/null)"; then
+      printf 'failed\t\t\t0\n'; return 0
+    fi
+    text="$(printf '%s' "$blob" | jq -r '.content // empty' 2>/dev/null | base64 -d 2>/dev/null)" || text=""
+  fi
   name="$(printf '%s' "$text" | grep -m1 '^name:' | sed 's/^name:[[:space:]]*//' | tr -d '\r')" || true
   is_stub=0
   if grep -qF -- "$STUB_CMD" <<<"$text"; then is_stub=1; fi
-  printf '%s\t%s\t%s\n' "$sha" "$name" "$is_stub"
+  printf 'ok\t%s\t%s\t%s\n' "$sha" "$name" "$is_stub"
 }
 
 deleted=0 absent=0 skipped=0 failed=0
+declare -a failed_repos=()
 for repo in "${repos[@]}"; do
   code="$(api_status "repos/$ORG/$repo/contents/$STUB_PATH")"
   case "$code" in
@@ -86,13 +117,25 @@ for repo in "${repos[@]}"; do
     200) ;;
     *) echo "FATAL: $repo contents probe -> HTTP $code" >&2; exit 1 ;;
   esac
-  # Fetch the blob SHA + the parsed name TOGETHER, fail-closed.
-  if ! meta="$(stub_meta "$repo")"; then
-    echo "FATAL: $repo deploy.yml metadata fetch failed — refusing to read it as 'not the candy stub'" >&2
-    exit 1
+  # Fetch the blob SHA + the parsed name TOGETHER. A `failed` status is recorded
+  # per-repo and the loop CONTINUES — one repo's transient error must never abort the
+  # whole org-wide wave; the summary lists it and the script exits non-zero.
+  meta="$(stub_meta "$repo")"
+  status="${meta%%$'\t'*}"; rest="${meta#*$'\t'}"
+  if [[ "$status" == "vanished" ]]; then
+    # Deleted between our probe and this fetch — a concurrent run of this same wave.
+    # Idempotent: count it absent, never fail.
+    echo "$repo: deploy.yml vanished between probe and fetch (already retired by a concurrent run) — counted absent"
+    absent=$((absent+1)); continue
   fi
-  sha="${meta%%$'\t'*}"
-  rest="${meta#*$'\t'}"; name="${rest%%$'\t'*}"; is_stub="${rest#*$'\t'}"
+  if [[ "$status" == "failed" ]]; then
+    echo "$repo: deploy.yml metadata fetch failed — SKIPPED (technical), never deleted" >&2
+    failed_repos+=("$repo"); failed=$((failed+1))
+    [[ "$failed" -gt "$MAX_FAILURES" ]] && { echo "too many metadata failures — aborting" >&2; exit 1; }
+    continue
+  fi
+  sha="${rest%%$'\t'*}"; rest="${rest#*$'\t'}"
+  name="${rest%%$'\t'*}"; is_stub="${rest#*$'\t'}"
   # SAFETY GATE: only the hand-rolled stub is ever deleted — BOTH the parsed
   # `name: candy` AND the `charly box validate` content signature must hold.
   # Anything else (a real gate, a renamed stub, a different manifest) is SKIPPED.
@@ -116,8 +159,13 @@ for repo in "${repos[@]}"; do
       exit 1
     fi
     echo "ERROR: $repo deleteFile failed: $resp" >&2; failed=$((failed+1))
+    failed_repos+=("$repo")
     [[ "$failed" -gt "$MAX_FAILURES" ]] && { echo "too many failures — aborting" >&2; exit 1; }
   fi
 done
 echo "retired=$deleted absent=$absent skipped=$skipped failed=$failed"
+if [[ "$failed" -gt 0 ]]; then
+  echo "FAILED repos (metadata or delete fetch failed — NOT deleted, re-run to retry):" >&2
+  printf '  %s\n' "${failed_repos[@]}" >&2
+fi
 [[ "$failed" == 0 ]]
