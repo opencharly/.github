@@ -10,8 +10,13 @@
  * no dependency on any `.sh` file — hence NO `marketplace` submodule pin).
  *
  * R3 — the two are deliberately NOT a forked copy of one implementation: each is
- * native to its harness (the operator's chosen clean split). They DO share ONE
- * contract, asserted by `scripts/check-opencode-coord.mjs` so the two cannot drift:
+ * native to its harness (the operator's SIGNED-OFF clean split — a maintainer-account
+ * R3 divergence, not a self-asserted waiver). The shared CONTRACT is defined ONCE in
+ * the shell family's docs; the native engine implements the SAME contract and the gate
+ * asserts the TS side against it. Drift in the SHELL side alone is not compared by the
+ * gate (the shell is not a dependency — no `.sh`, no pin) — the signed-off condition
+ * requires only honest wording, so the contract is stated as a SPECIFICATION the TS
+ * implements and the gate pins, never as a claim the two "cannot drift":
  *   * the event vocabulary + wake-line format — MERGED / CLOSED / COMMENT / VERDICT /
  *     STALL — and its SEMANTICS (merged/closed are STATE events, firing from the arm
  *     baseline; comment/verdict are DELTA events seeded at arm, so a pre-existing
@@ -20,10 +25,24 @@
  *   * the item grammar (`owner/repo#num`, `owner/repo/pull|issues/num`, a full
  *     `https://github.com/...` URL).
  *
+ * API EFFICIENCY (operator requirement, 2026-09-29):
+ *   * ONE request per poll for N items — a single batched GraphQL query with one
+ *     alias per item returning state / merged / updatedAt / commentCount /
+ *     latest-commit / verdict-run. Calls-per-poll is 1 regardless of item count.
+ *   * SKIP UNCHANGED ITEMS — a per-item fingerprint (state|merged|updatedAt|comments|
+ *     verdict|commit) means a delta event is only evaluated when the fingerprint
+ *     changed; an idle watch costs exactly one batched call per interval. The stall
+ *     (silence) alarm is wall-clock-driven and still evaluated every poll.
+ *   * RATE LIMITS FAIL HARD — a REST 403/429 or a GraphQL `RATE_LIMITED` error throws
+ *     `RateLimitedError` (with the reset time); the watch surfaces it distinctly and
+ *     NEVER spins/retries it as "no event". The remaining quota is read from the
+ *     batched response's own `x-ratelimit-remaining` header (FREE — no extra call), so
+ *     calls-per-poll stays 1 while a near-exhausted quota backs the watch off visibly.
+ *
  * AUTH — the native client authenticates with `GITHUB_TOKEN` / `GH_TOKEN` when set,
  * else the `gh` CLI's stored token (`gh auth token` — one async `execFile`; the `gh`
- * binary is a TOOL, never a `.sh` script). The API is GitHub REST v3
- * (`https://api.github.com`, overridable with `GITHUB_API_URL` for GH Enterprise).
+ * binary is a TOOL, never a `.sh` script). REST is `https://api.github.com`; GraphQL is
+ * `<REST>/graphql`. `GITHUB_API_URL` overrides the base (GitHub Enterprise / tests).
  *
  * CANCELLATION — every call takes an `AbortSignal` (the plugin executor's
  * `context.signal`), threaded into `fetch` and the poll sleep, so stopping the
@@ -32,6 +51,24 @@
 import { execFile } from "node:child_process";
 
 export const DEFAULT_API = "https://api.github.com";
+
+/** The poll-interval FLOOR, seconds — sub-floor intervals are refused. */
+export const POLL_FLOOR = 60;
+
+/** Default poll cadence, seconds (the floor). */
+export const DEFAULT_INTERVAL_S = POLL_FLOOR;
+
+/** Default stall window, minutes. */
+export const DEFAULT_STALL_MIN = 60;
+
+/** Core-quota floor below which the watcher backs off instead of polling. */
+export const RATE_FLOOR = 200;
+
+/** Backoff multiplier applied to the poll interval when below `RATE_FLOOR`. */
+export const BACKOFF_FACTOR = 4;
+
+/** Backoff ceiling, seconds. */
+export const MAX_BACKOFF_S = 600;
 
 /** One normalised watch target. */
 export interface Item {
@@ -61,7 +98,7 @@ export function parseItem(raw: unknown): Item | null {
   return { owner, repo, num, key: `${owner}/${repo}#${num}` };
 }
 
-// --- GitHub REST client -----------------------------------------------------
+// --- GitHub client ----------------------------------------------------------
 
 let cachedToken: string | undefined;
 
@@ -88,15 +125,31 @@ export class GhError extends Error {
   }
 }
 
-export interface GhOptions {
-  method?: string;
-  body?: unknown;
-  signal?: AbortSignal;
+/**
+ * A RATE-LIMIT condition — REST 403/429 or GraphQL `RATE_LIMITED`. NEVER swallowed:
+ * the caller surfaces it distinctly and does NOT retry it as "no event".
+ */
+export class RateLimitedError extends Error {
+  /** Unix seconds when the quota resets (0 when unknown). */
+  resetAt: number;
+  kind: "rest" | "graphql";
+  constructor(kind: "rest" | "graphql", resetAt: number, message: string) {
+    super(message);
+    this.resetAt = resetAt;
+    this.kind = kind;
+    this.name = "RateLimitedError";
+  }
 }
 
-/** Perform one GitHub API request, returning the raw `Response` (2xx only). */
-export async function ghFetch(path: string, opts: GhOptions = {}): Promise<Response> {
-  const base = process.env.GITHUB_API_URL || DEFAULT_API;
+/** The REST base (overridable) and its GraphQL endpoint. */
+export function apiBase(): string {
+  return process.env.GITHUB_API_URL || DEFAULT_API;
+}
+export function graphqlUrl(): string {
+  return `${apiBase()}/graphql`;
+}
+
+async function authHeaders(): Promise<Record<string, string>> {
   const token = await resolveToken();
   const headers: Record<string, string> = {
     Accept: "application/vnd.github+json",
@@ -104,13 +157,57 @@ export async function ghFetch(path: string, opts: GhOptions = {}): Promise<Respo
     "User-Agent": "opencharly-opencode-coord",
   };
   if (token) headers.Authorization = `token ${token}`;
+  return headers;
+}
+
+const headerEpoch = (res: Response): number => {
+  const r = res.headers.get("x-ratelimit-reset");
+  const n = r ? Number(r) : NaN;
+  return Number.isFinite(n) ? n : 0;
+};
+const headerRemaining = (res: Response): number | null => {
+  const r = res.headers.get("x-ratelimit-remaining");
+  const n = r ? Number(r) : NaN;
+  return Number.isFinite(n) ? n : null;
+};
+
+/** A REST response's rate-limit metadata (FREE — read from the response headers). */
+export interface RateInfo {
+  /** Core-quota remaining, or null when the header was absent. */
+  remaining: number | null;
+  /** Unix seconds when the quota resets, or 0 when unknown. */
+  resetAt: number;
+}
+
+export interface GhOptions {
+  method?: string;
+  body?: unknown;
+  signal?: AbortSignal;
+}
+
+/** Perform one REST request, returning the raw `Response` (2xx only). */
+export async function ghFetch(path: string, opts: GhOptions = {}): Promise<Response> {
+  const headers = await authHeaders();
   if (opts.body !== undefined) headers["Content-Type"] = "application/json";
-  const res = await fetch(base + path, {
-    method: opts.method ?? "GET",
-    headers,
-    body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
-    signal: opts.signal,
-  });
+  let res: Response;
+  try {
+    res = await fetch(apiBase() + path, {
+      method: opts.method ?? "GET",
+      headers,
+      body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
+      signal: opts.signal,
+    });
+  } catch (err: any) {
+    if (opts.signal?.aborted) throw err;
+    throw new GhError(0, `network error: ${err?.message ?? String(err)}`);
+  }
+  if (res.status === 403 || res.status === 429) {
+    // A 403 is rate-limit ONLY when the quota header says so; a bare 403 (permissions)
+    // stays a plain GhError. 429 is always a rate limit.
+    if (res.status === 429 || headerRemaining(res) === 0) {
+      throw new RateLimitedError("rest", headerEpoch(res), `REST ${res.status} — rate limited`);
+    }
+  }
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new GhError(res.status, `${opts.method ?? "GET"} ${path} → ${res.status} ${text.slice(0, 300)}`);
@@ -118,22 +215,23 @@ export async function ghFetch(path: string, opts: GhOptions = {}): Promise<Respo
   return res;
 }
 
-/** Perform one GitHub API request and parse the JSON body. */
+/** Perform one REST request and parse the JSON body. */
 export async function ghJson<T = any>(path: string, opts: GhOptions = {}): Promise<T> {
   return (await ghFetch(path, opts)).json() as Promise<T>;
 }
 
-// --- snapshot + event decision ---------------------------------------------
+// --- batched GraphQL snapshot (ONE request per poll for N items) -------------
 
 /** The observed state of one item at one poll. */
 export interface Snap {
-  type: "pr" | "issue";
+  isPr: boolean;
   state: string;
   merged: boolean;
   comments: number | null;
   verdictId: string;
   updatedEpoch: number;
   verdictEpoch: number;
+  latestCommit: string;
 }
 
 const nowEpoch = () => Math.floor(Date.now() / 1000);
@@ -142,62 +240,124 @@ const toEpoch = (iso: unknown): number => {
   return Number.isFinite(ms) ? Math.floor(ms / 1000) : 0;
 };
 
-/** The newest COMPLETED run of `wf` on the item's repo, or undefined. */
-async function latestRun(it: Item, wf: string, signal?: AbortSignal): Promise<any | undefined> {
-  const j = await ghJson<{ workflow_runs?: any[] }>(
-    `/repos/${it.owner}/${it.repo}/actions/runs?per_page=50`,
-    { signal },
-  );
-  const done = (j?.workflow_runs ?? []).filter((r) => r?.name === wf && r?.status === "completed");
-  return done[0];
+/** A stable per-item fingerprint — a delta event is only considered when it changes. */
+export function fingerprint(s: Snap): string {
+  return [s.state, s.merged ? 1 : 0, s.updatedEpoch, s.comments ?? "", s.verdictId, s.latestCommit].join("|");
 }
 
-/**
- * Observe one item. Every field is best-effort: a transient failure leaves its
- * field UNKNOWN (never throws), so one bad poll skips the item instead of killing
- * the watch — the same resilience `gh_watch.sh` encodes with `|| echo ""`.
- */
-export async function snapshot(it: Item, opts: { wf: string; signal?: AbortSignal }): Promise<Snap> {
-  const base = `/repos/${it.owner}/${it.repo}`;
-  const s: Snap = {
-    type: "issue",
+/** A blank observation (state UNKNOWN) — used when a field is absent. */
+function emptySnap(): Snap {
+  return {
+    isPr: false,
     state: "unknown",
     merged: false,
     comments: null,
     verdictId: "",
     updatedEpoch: nowEpoch(),
     verdictEpoch: 0,
+    latestCommit: "",
   };
+}
 
+interface BatchResult {
+  snaps: Map<string, Snap>;
+  rate: RateInfo;
+}
+
+/**
+ * Observe EVERY item in ONE batched GraphQL query (one alias per item). Calls-per-poll
+ * is 1 regardless of item count. Throws `RateLimitedError` on a GraphQL `RATE_LIMITED`
+ * error; other GraphQL field errors are tolerated when partial `data` is returned.
+ */
+export async function batchSnapshot(
+  items: Item[],
+  opts: { wf: string; signal?: AbortSignal },
+): Promise<BatchResult> {
+  const fields: string[] = [];
+  const vars: Record<string, unknown> = {};
+  items.forEach((it, i) => {
+    vars[`o${i}`] = it.owner;
+    vars[`r${i}`] = it.repo;
+    vars[`n${i}`] = it.num;
+    fields.push(
+      `i${i}: repository(owner: $o${i}, name: $r${i}) {
+        pullRequest(number: $n${i}) {
+          state merged updatedAt
+          commits(last: 1) { nodes { commit { oid committedDate
+            checkSuites(first: 50) { nodes { workflowRun { databaseId workflow { name } status conclusion updatedAt } } } } } }
+        }
+        issue(number: $n${i}) { state updatedAt comments { totalCount } }
+      }`,
+    );
+  });
+  const query = `query(${Object.keys(vars).map((k) => `$${k}: ${k.startsWith("n") ? "Int" : "String"}!`).join(", ")}) { ${fields.join("\n")} }`;
+
+  const headers = await authHeaders();
+  headers["Content-Type"] = "application/json";
+  let res: Response;
   try {
-    const p = await ghJson(`${base}/pulls/${it.num}`, { signal: opts.signal });
-    s.type = "pr";
-    s.merged = p?.merged === true;
-  } catch {
-    s.type = "issue";
-    s.merged = false;
+    res = await fetch(graphqlUrl(), {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ query, variables: vars }),
+      signal: opts.signal,
+    });
+  } catch (err: any) {
+    if (opts.signal?.aborted) throw err;
+    throw new GhError(0, `network error: ${err?.message ?? String(err)}`);
   }
-
-  try {
-    const issue = await ghJson(`${base}/issues/${it.num}`, { signal: opts.signal });
-    s.state = typeof issue?.state === "string" ? issue.state : "unknown";
-    s.comments = typeof issue?.comments === "number" ? issue.comments : null;
-    const e = toEpoch(issue?.updated_at);
-    if (e) s.updatedEpoch = e;
-  } catch {
-    /* leave state unknown / updatedEpoch now */
-  }
-
-  try {
-    const run = await latestRun(it, opts.wf, opts.signal);
-    if (run) {
-      s.verdictId = String(run.id);
-      s.verdictEpoch = toEpoch(run.updated_at);
+  const rate: RateInfo = { remaining: headerRemaining(res), resetAt: headerEpoch(res) };
+  if (res.status === 403 || res.status === 429) {
+    if (res.status === 429 || headerRemaining(res) === 0) {
+      throw new RateLimitedError("rest", rate.resetAt, `GraphQL HTTP ${res.status} — rate limited`);
     }
-  } catch {
-    /* no run visible */
   }
-  return s;
+  const body: any = await res.json().catch(() => ({}));
+  const errors: any[] = Array.isArray(body?.errors) ? body.errors : [];
+  for (const e of errors) {
+    const type = String(e?.type ?? e?.extensions?.code ?? "");
+    if (type === "RATE_LIMITED" || /rate limit/i.test(String(e?.message ?? ""))) {
+      throw new RateLimitedError("graphql", rate.resetAt, `GraphQL RATE_LIMITED: ${e?.message ?? ""}`);
+    }
+  }
+  if (!body?.data) {
+    const msg = errors.map((e) => e?.message).filter(Boolean).join("; ") || `GraphQL HTTP ${res.status}`;
+    throw new GhError(res.status, `GraphQL query failed: ${msg}`);
+  }
+
+  const snaps = new Map<string, Snap>();
+  items.forEach((it, i) => {
+    const node = body.data[`i${i}`] ?? {};
+    const pr = node.pullRequest;
+    const issue = node.issue;
+    const s = emptySnap();
+    if (pr) {
+      s.isPr = true;
+      s.state = String(pr.state ?? "unknown").toLowerCase();
+      s.merged = pr.merged === true;
+      s.updatedEpoch = toEpoch(pr.updatedAt) || s.updatedEpoch;
+      const commit = pr.commits?.nodes?.[0]?.commit;
+      if (commit?.oid) s.latestCommit = String(commit.oid);
+      // verdict = the newest COMPLETED run of the watched workflow in the latest commit's check suites.
+      const runs: any[] = [];
+      for (const suite of commit?.checkSuites?.nodes ?? []) {
+        const run = suite?.workflowRun;
+        if (run && run?.workflow?.name === opts.wf && run?.status === "completed") runs.push(run);
+      }
+      runs.sort((a, b) => toEpoch(b.updatedAt) - toEpoch(a.updatedAt));
+      if (runs[0]) {
+        s.verdictId = String(runs[0].databaseId);
+        s.verdictEpoch = toEpoch(runs[0].updatedAt);
+      }
+    } else if (issue) {
+      s.state = String(issue.state ?? "unknown").toLowerCase();
+      s.updatedEpoch = toEpoch(issue.updatedAt) || s.updatedEpoch;
+      const cc = issue.comments?.totalCount;
+      if (typeof cc === "number") s.comments = cc;
+    }
+    snaps.set(it.key, s);
+  });
+  return { snaps, rate };
 }
 
 export type WatchEventName = "merged" | "closed" | "comment" | "verdict" | "stall";
@@ -272,7 +432,7 @@ export function formatWake(
       return `CLOSED   ${it.key}  closed without merging — find its successor`;
     case "comment":
       return `COMMENT  ${it.key}  new comment (${seed.comments} -> ${cur.comments})  ${url}/${
-        cur.type === "pr" ? "pull" : "issues"
+        cur.isPr ? "pull" : "issues"
       }/${it.num}`;
     case "verdict":
       return `VERDICT  ${it.key}  new ${opts.wf} run ${cur.verdictId}  ${url}/actions/runs/${cur.verdictId}`;
@@ -299,41 +459,73 @@ export interface PollOptions {
   signal?: AbortSignal;
 }
 
+/** The outcome of one batched poll. */
+export interface PollOutcome {
+  fire: Fire | null;
+  /** Core-quota remaining as reported by the batched response (null when absent). */
+  rateRemaining: number | null;
+  /** Unix seconds when the quota resets (0 when unknown). */
+  rateResetAt: number;
+  /** How many items were skipped as unchanged this poll. */
+  skipped: number;
+}
+
 /**
- * One poll over every item. Returns the FIRST fire (matching `gh_watch.sh`, which
- * exits on the first event) and updates `seeds` in place. An item with no seed yet
- * adopts its first observation as the baseline WITHOUT firing — EXCEPT that STATE
- * events (merged/closed/stall) intentionally fire from the baseline, which is what
- * makes arming `merged` on an already-merged PR wake immediately.
+ * One batched poll over EVERY item (ONE GraphQL request), returning the FIRST fire
+ * (matching `gh_watch.sh`, which exits on the first event) and updating `seeds` in
+ * place. Items whose fingerprint is unchanged skip the delta decision (a delta event
+ * cannot have changed); the wall-clock stall alarm is still evaluated. An item with no
+ * seed yet adopts its first observation as the baseline WITHOUT firing — EXCEPT that
+ * STATE events (merged/closed/stall) intentionally fire from the baseline, which is
+ * what makes arming `merged` on an already-merged PR wake immediately.
+ *
+ * Throws `RateLimitedError` on a rate limit — the caller surfaces it distinctly.
  */
 export async function pollOnce(
   items: Item[],
   seeds: Map<string, Snap>,
   opts: PollOptions,
-): Promise<Fire | null> {
+): Promise<PollOutcome> {
   const now = nowEpoch();
+  const { snaps, rate } = await batchSnapshot(items, { wf: opts.wf, signal: opts.signal });
+  // A fingerprint-unchanged item can be SKIPPED only for DELTA events (comment/verdict),
+  // which cannot fire without a change. STATE events (merged/closed/stall) fire from the
+  // arm baseline and are wall-clock/state-driven, so they are ALWAYS evaluated (the cost
+  // is the ONE batched call already made — the skip only avoids redundant decisions).
+  const hasStateEvent = opts.events.has("merged") || opts.events.has("closed") || opts.events.has("stall");
+  let skipped = 0;
+  let fire: Fire | null = null;
   for (const it of items) {
-    const cur = await snapshot(it, { wf: opts.wf, signal: opts.signal });
+    const cur = snaps.get(it.key) ?? emptySnap();
     const seed = seeds.get(it.key);
+    if (seed && !hasStateEvent && fingerprint(seed) === fingerprint(cur) && !fire) {
+      skipped += 1;
+      continue;
+    }
     const ev = seed
       ? watchEvent(seed, cur, opts.events, { armEpoch: opts.armEpoch, nowEpoch: now, stallMin: opts.stallMin })
       : null;
     seeds.set(it.key, cur);
-    if (ev) {
-      return { item: it, event: ev, seed: seed as Snap, snap: cur, line: formatWake(it, ev, seed as Snap, cur, { wf: opts.wf, stallMin: opts.stallMin }) };
+    if (ev && !fire) {
+      fire = {
+        item: it,
+        event: ev,
+        seed: seed as Snap,
+        snap: cur,
+        line: formatWake(it, ev, seed as Snap, cur, { wf: opts.wf, stallMin: opts.stallMin }),
+      };
     }
   }
-  return null;
+  return { fire, rateRemaining: rate.remaining, rateResetAt: rate.resetAt, skipped };
 }
 
-/** Seed the baseline for every item (best-effort; an item with no seed never fires a delta). */
+/** Seed the baseline for every item (ONE batched request; no fire on seed). */
 export async function seedAll(
   items: Item[],
   opts: { wf: string; signal?: AbortSignal },
 ): Promise<Map<string, Snap>> {
-  const seeds = new Map<string, Snap>();
-  for (const it of items) seeds.set(it.key, await snapshot(it, opts));
-  return seeds;
+  const { snaps } = await batchSnapshot(items, opts);
+  return snaps;
 }
 
 /** A `setTimeout` that resolves early (without throwing) when `signal` aborts. */
@@ -352,17 +544,6 @@ export function sleepAbortable(ms: number, signal?: AbortSignal): Promise<void> 
   });
 }
 
-/** Remaining core API quota, or `null` when the FREE `/rate_limit` read failed. */
-export async function rateRemaining(signal?: AbortSignal): Promise<number | null> {
-  try {
-    const j = await ghJson<{ resources?: { core?: { remaining?: number } } }>("/rate_limit", { signal });
-    const r = j?.resources?.core?.remaining;
-    return typeof r === "number" ? r : null;
-  } catch {
-    return null;
-  }
-}
-
 /** Parse a comma-separated event list into a set (trimmed, lower-case). */
 export function parseEvents(list: string | undefined, dflt: string): Set<string> {
   return new Set(
@@ -371,4 +552,16 @@ export function parseEvents(list: string | undefined, dflt: string): Set<string>
       .map((s) => s.trim().toLowerCase())
       .filter(Boolean),
   );
+}
+
+/** Clamp a requested interval to the floor; returns the effective interval in seconds. */
+export function clampInterval(sec: number | undefined): number {
+  if (typeof sec !== "number" || !Number.isFinite(sec)) return DEFAULT_INTERVAL_S;
+  return Math.max(POLL_FLOOR, Math.floor(sec));
+}
+
+/** Human-readable rate-limit message (used verbatim by the tools). */
+export function rateLimitMessage(e: RateLimitedError): string {
+  const when = e.resetAt > 0 ? ` resets at ${new Date(e.resetAt * 1000).toISOString()}` : "";
+  return `RATE-LIMITED (${e.kind}) — GitHub API rate limit hit.${when} No retry (fail hard).`;
 }

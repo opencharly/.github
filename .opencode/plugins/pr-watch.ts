@@ -26,7 +26,22 @@
  * plugin logs/skips and no-ops; opencode keeps running.
  */
 import { wakeLine } from "../lib/wake-line.ts";
-import { parseEvents, parseItem, pollOnce, seedAll, sleepAbortable, type Item, type Snap } from "../lib/watch.ts";
+import {
+  BACKOFF_FACTOR,
+  DEFAULT_INTERVAL_S,
+  DEFAULT_STALL_MIN,
+  MAX_BACKOFF_S,
+  RATE_FLOOR,
+  RateLimitedError,
+  parseEvents,
+  parseItem,
+  pollOnce,
+  rateLimitMessage,
+  seedAll,
+  sleepAbortable,
+  type Item,
+  type Snap,
+} from "../lib/watch.ts";
 
 // The ONE shared "last non-empty stdout line" helper (R3) — the same module
 // `coord.ts` imports. Re-exported under the historical name this plugin's own
@@ -93,20 +108,39 @@ async function loop(dir: string, deliver: (line: string) => Promise<void>) {
 
   const events = parseEvents(WATCH_EVENTS, WATCH_EVENTS);
   const wf = "charly/pr-validator";
-  const stallMin = 60;
-  const intervalMs = 30_000;
+  const stallMin = DEFAULT_STALL_MIN;
+  const intervalMs = DEFAULT_INTERVAL_S * 1000;
   const armEpoch = Math.floor(Date.now() / 1000);
-  const seeds: Map<string, Snap> = await seedAll(items, { wf });
+  let seeds: Map<string, Snap>;
+  try {
+    seeds = await seedAll(items, { wf });
+  } catch (err) {
+    if (err instanceof RateLimitedError) {
+      warn(rateLimitMessage(err));
+      return; // fail hard: never spin on a rate limit
+    }
+    seeds = new Map();
+  }
 
   void (async () => {
     for (;;) {
       try {
-        const fire = await pollOnce(items, seeds, { events, wf, armEpoch, stallMin });
-        // `pollOnce` updates `seeds` in place for every item it observed (up to and
-        // including the fired one), so the SAME comment/verdict is never delivered
-        // twice — no manual re-seed needed.
-        if (fire) await deliver(fire.line);
-      } catch {
+        const outcome = await pollOnce(items, seeds, { events, wf, armEpoch, stallMin });
+        // `pollOnce` updates `seeds` in place AND skips fingerprint-unchanged items,
+        // so the SAME comment/verdict is never delivered twice — no manual re-seed.
+        if (outcome.fire) await deliver(outcome.fire.line);
+        // A near-exhausted quota (FREE header read) → back off VISIBLY.
+        if (outcome.rateRemaining !== null && outcome.rateRemaining < RATE_FLOOR) {
+          warn(`core quota remaining=${outcome.rateRemaining} < ${RATE_FLOOR} — backing off`);
+          await sleepAbortable(Math.min((intervalMs / 1000) * BACKOFF_FACTOR, MAX_BACKOFF_S) * 1000);
+          continue;
+        }
+      } catch (err) {
+        if (err instanceof RateLimitedError) {
+          // FAIL HARD: surface the rate limit and STOP this watch — never spin.
+          warn(rateLimitMessage(err));
+          return;
+        }
         /* transient (network) — skip this poll, keep watching */
       }
       await sleepAbortable(intervalMs);

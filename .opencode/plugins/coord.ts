@@ -13,11 +13,15 @@
  * as the plugin, even when the `marketplace` gitlink lags.
  *
  * R3 — the shell CLI and this native implementation are deliberately TWO
- * harness-specific implementations, not a forked copy (the operator's chosen clean
- * split): each is native to its harness. They share ONE *contract* — the closed verb
- * set, the canonical two-line footer order, the event vocabulary + wake-line format,
- * and the item grammar — asserted by `scripts/check-opencode-coord.mjs` so the two
- * cannot drift. Do NOT re-unify them through a shell-out.
+ * harness-specific implementations, not a forked copy (the operator's SIGNED-OFF clean
+ * split — a maintainer-account R3 divergence): each is native to its harness. The
+ * shared CONTRACT is defined ONCE in the shell family's docs — the closed verb set, the
+ * canonical two-line footer order, the event vocabulary + wake-line format, and the
+ * item grammar — and `scripts/check-opencode-coord.mjs` pins THIS (TypeScript) side of
+ * it. Drift in the SHELL side alone is not compared by the gate (the shell is not a
+ * dependency — no `.sh`, no pin), so the contract is stated as a SPECIFICATION the TS
+ * implements and the gate pins, never as a claim the two "cannot drift". Do NOT
+ * re-unify them through a shell-out.
  *
  * PLUGIN CONTRACT (measured 2026-09-28, opencode v2.0.18 — see `.opencode/instructions.md`):
  *   - opencode >= 2.0 loads `default export { id, setup(ctx) }`; tools are registered
@@ -57,19 +61,42 @@ import {
   parseEvents,
   parseItem,
   pollOnce,
-  rateRemaining,
   seedAll,
   sleepAbortable,
   watchEvent,
   formatWake,
+  clampInterval,
+  rateLimitMessage,
+  RateLimitedError,
+  POLL_FLOOR,
+  DEFAULT_INTERVAL_S,
+  DEFAULT_STALL_MIN,
+  RATE_FLOOR,
+  BACKOFF_FACTOR,
+  MAX_BACKOFF_S,
   type Fire,
   type Item,
   type Snap,
 } from "../lib/watch.ts";
 
-// Re-exported so consumers/tests can assert the SHARED CONTRACT (the item grammar,
-// the event semantics, and the wake-line format) through this module's own surface.
-export { parseItem, parseEvents, watchEvent, formatWake };
+// Re-exported so consumers/tests can assert the CONTRACT (the item grammar, the
+// event semantics, the wake-line format, and the named rate-limit policy) through
+// this module's own surface.
+export {
+  parseItem,
+  parseEvents,
+  watchEvent,
+  formatWake,
+  clampInterval,
+  rateLimitMessage,
+  RateLimitedError,
+  POLL_FLOOR,
+  DEFAULT_INTERVAL_S,
+  DEFAULT_STALL_MIN,
+  RATE_FLOOR,
+  BACKOFF_FACTOR,
+  MAX_BACKOFF_S,
+};
 export type { Fire, Item, Snap };
 
 export const TIERS = [
@@ -93,6 +120,9 @@ export const VERBS = [
 
 /** The default watcher event set — terminal outcomes plus the silence alarm. */
 export const DEFAULT_EVENTS = "merged,closed,stall";
+
+/** The default `coord_watch` deadline (seconds) — a bounded, session-invoked wait. */
+export const DEFAULT_WATCH_TIMEOUT_S = 3600;
 
 /** Parse `.opencode/coord.conf` (key=value, `#` comments, blanks ignored). */
 export function parseConf(text: string): Record<string, string> {
@@ -198,6 +228,12 @@ export async function postComment(
  * Run a bounded native watch over `items` until the first event or the timeout.
  * Async + `signal`-aware (the poll sleep and every `fetch` take the signal), so it
  * never blocks opencode's event loop and stopping the Session terminates it.
+ *
+ * API EFFICIENCY: ONE batched GraphQL request per poll regardless of item count; an
+ * idle poll costs one call per interval. RATE LIMITS FAIL HARD — a `RateLimitedError`
+ * is RETURNED distinctly (never retried as "no event", never a spin). A near-exhausted
+ * quota (read FREE from the batched response's rate header) backs off VISIBLY. The
+ * `intervalSec` is clamped to `POLL_FLOOR`.
  */
 export async function runWatch(
   items: Item[],
@@ -209,10 +245,18 @@ export async function runWatch(
     timeoutSec: number;
     signal?: AbortSignal;
   },
-): Promise<{ fire: Fire | null; timedOut: boolean }> {
+): Promise<{ fire: Fire | null; timedOut: boolean; rateLimited?: RateLimitedError }> {
   const events = parseEvents(opts.events, DEFAULT_EVENTS);
+  const intervalSec = clampInterval(opts.intervalSec);
   const armEpoch = Math.floor(Date.now() / 1000);
-  const seeds = await seedAll(items, { wf: opts.workflow, signal: opts.signal });
+  let seeds: Map<string, Snap>;
+  try {
+    seeds = await seedAll(items, { wf: opts.workflow, signal: opts.signal });
+  } catch (err) {
+    if (err instanceof RateLimitedError) return { fire: null, timedOut: false, rateLimited: err };
+    if (opts.signal?.aborted) return { fire: null, timedOut: false };
+    seeds = new Map(); // a transient seed failure: proceed; no seed → no delta fire
+  }
   const start = Date.now();
 
   for (;;) {
@@ -220,27 +264,32 @@ export async function runWatch(
     if (opts.timeoutSec > 0 && Date.now() - start >= opts.timeoutSec * 1000) {
       return { fire: null, timedOut: true };
     }
-    // Rate-limit discipline: the watchers share the account's core quota, so back off
-    // (never hammer) when it is nearly exhausted. A failed read is UNKNOWN → no backoff.
-    const rem = await rateRemaining(opts.signal);
-    if (rem !== null && rem < 200) {
-      await sleepAbortable(Math.min(opts.intervalSec * 4, 600) * 1000, opts.signal);
-      continue;
-    }
+    let outcome;
     try {
-      const fire = await pollOnce(items, seeds, {
+      outcome = await pollOnce(items, seeds, {
         events,
         wf: opts.workflow,
         armEpoch,
         stallMin: opts.stallMin,
         signal: opts.signal,
       });
-      if (fire) return { fire, timedOut: false };
     } catch (err) {
-      // A transient API failure skips this poll, never kills the watch.
+      if (err instanceof RateLimitedError) {
+        // FAIL HARD: surface the rate limit distinctly; never retry as "no event".
+        return { fire: null, timedOut: false, rateLimited: err };
+      }
       if (opts.signal?.aborted) return { fire: null, timedOut: false };
+      // A transient (non-rate-limit) API failure skips this poll, never kills the watch.
+      await sleepAbortable(intervalSec * 1000, opts.signal);
+      continue;
     }
-    await sleepAbortable(opts.intervalSec * 1000, opts.signal);
+    if (outcome.fire) return { fire: outcome.fire, timedOut: false };
+    // A near-exhausted quota (FREE header read) → back off VISIBLY, never hammer.
+    if (outcome.rateRemaining !== null && outcome.rateRemaining < RATE_FLOOR) {
+      await sleepAbortable(Math.min(intervalSec * BACKOFF_FACTOR, MAX_BACKOFF_S) * 1000, opts.signal);
+      continue;
+    }
+    await sleepAbortable(intervalSec * 1000, opts.signal);
   }
 }
 
@@ -342,13 +391,19 @@ export default {
               description: "owner/repo#num items to watch",
             },
             events: { type: "string", description: `comma list (default: ${DEFAULT_EVENTS})` },
-            interval: { type: "number", description: "poll cadence, seconds (default 30)" },
-            stallmin: { type: "number", description: "stall window, minutes (default 60)" },
+            interval: {
+              type: "number",
+              description: `poll cadence, seconds (floor ${POLL_FLOOR}, default ${DEFAULT_INTERVAL_S}); sub-floor values are refused/clamped`,
+            },
+            stallmin: { type: "number", description: `stall window, minutes (default ${DEFAULT_STALL_MIN})` },
             workflow: { type: "string", description: "validator run name (default charly/pr-validator)" },
-            timeout: { type: "number", description: "overall deadline, seconds (0 = none)" },
+            timeout: {
+              type: "number",
+              description: `overall deadline, seconds (default ${DEFAULT_WATCH_TIMEOUT_S} = 1h; 0 = unbounded, only with autoRearm)`,
+            },
             autoRearm: {
               type: "boolean",
-              description: "durable intent: accept but ignore the timeout (wait until an event or abort)",
+              description: "durable intent: lift the default deadline (wait until an event, a provided timeout, or abort)",
             },
           },
           required: ["items"],
@@ -363,22 +418,30 @@ export default {
             if (!it) return { content: `coord_watch: malformed item '${raw}' — want owner/repo#num` };
             items.push(it);
           }
-          const timeoutSec = input.autoRearm
-            ? 0
-            : typeof input.timeout === "number" && input.timeout > 0
-              ? input.timeout
-              : 0;
-          const { fire, timedOut } = await runWatch(items, {
+          // BOUNDED BY DEFAULT (R4): a session-invoked wait always carries a wall-clock
+          // deadline. An explicit `timeout` wins; otherwise the named default applies.
+          // `autoRearm` (durable intent) lifts it to unbounded; a `timeout` still wins.
+          const explicit = typeof input.timeout === "number" && input.timeout >= 0 ? input.timeout : undefined;
+          const timeoutSec =
+            explicit !== undefined ? explicit : input.autoRearm ? 0 : DEFAULT_WATCH_TIMEOUT_S;
+          if (typeof input.interval === "number" && input.interval < POLL_FLOOR) {
+            return {
+              content: `coord_watch: interval ${input.interval}s is below the ${POLL_FLOOR}s floor — refusing (never hammer the API)`,
+            };
+          }
+          const intervalSec = clampInterval(input.interval);
+          const { fire, timedOut, rateLimited } = await runWatch(items, {
             events: String(input.events ?? DEFAULT_EVENTS),
-            intervalSec: typeof input.interval === "number" && input.interval >= 1 ? input.interval : 30,
-            stallMin: typeof input.stallmin === "number" && input.stallmin >= 0 ? input.stallmin : 60,
+            intervalSec,
+            stallMin: typeof input.stallmin === "number" && input.stallmin >= 0 ? input.stallmin : DEFAULT_STALL_MIN,
             workflow: String(input.workflow ?? "charly/pr-validator"),
             timeoutSec,
             signal: toolCtx?.signal,
           });
           if (toolCtx?.signal?.aborted) return { content: "coord_watch: aborted (session interrupted)" };
+          if (rateLimited) return { content: `coord_watch: ${rateLimitMessage(rateLimited)}` };
           if (fire) return { content: fire.line };
-          if (timedOut) return { content: `TIMEOUT: no event within ${input.timeout}s` };
+          if (timedOut) return { content: `TIMEOUT: no event within ${timeoutSec}s` };
           return { content: "coord_watch: watch ended with no event" };
         },
       });
