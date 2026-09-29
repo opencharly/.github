@@ -59,11 +59,31 @@ done
 is_local() { case "$1" in dotgithub/*) return 0;; *) return 1;; esac; }
 
 # resolve_path <root> <manifest-path> — the file for a row, or empty if absent.
+#
+# A `dotgithub/`-prefixed path is the .github repo's OWN surface: it resolves at
+# <root>/dotgithub/<p> in the umbrella and at <root>/<p> in a standalone .github
+# checkout (where the repo IS the root).
+#
+# Every other (bare) path names a SIBLING-repo surface relative to the UMBRELLA
+# root (`AGENTS.md`, `layer-charly-internals/…`, `marketplace/…`). Those resolve
+# ONLY when <root> is the umbrella — i.e. it mounts the .github repo as
+# `dotgithub/`. A standalone .github checkout is NOT the umbrella, so a bare path
+# SKIPS cleanly EVEN WHEN a file of the same name exists at the repo root (e.g. the
+# repo's own AGENTS.md signpost, which is NOT the umbrella rulebook the bare
+# `AGENTS.md` rows assert). The `dotgithub/` mount is the discriminator: without
+# it, the root is not the umbrella.
 resolve_path() {
   local rt="$1" p="$2" a b
-  a="$rt/$p"; [[ -f "$a" ]] && { printf '%s\n' "$a"; return; }
-  # Standalone .github checkout: strip the `dotgithub/` repo prefix.
-  case "$p" in dotgithub/*) b="$rt/${p#dotgithub/}"; [[ -f "$b" ]] && { printf '%s\n' "$b"; return; };; esac
+  case "$p" in
+    dotgithub/*)
+      a="$rt/$p"; [[ -f "$a" ]] && { printf '%s\n' "$a"; return; }
+      b="$rt/${p#dotgithub/}"; [[ -f "$b" ]] && { printf '%s\n' "$b"; return; }
+      ;;
+    *)
+      [[ -d "$rt/dotgithub" ]] || { printf ''; return; }
+      a="$rt/$p"; [[ -f "$a" ]] && { printf '%s\n' "$a"; return; }
+      ;;
+  esac
   printf ''
 }
 
@@ -171,6 +191,23 @@ TSV
   out="$(check_manifest "$tmp/skip.tsv" "$tmp/dotgithub" 2>&1)" \
     || { echo "SELF-TEST FAIL: an absent sibling surface was not skipped cleanly" >&2; exit 1; }
   grep -q 'skipped=1' <<<"$out" || { echo "SELF-TEST FAIL: skip not reported (silent pass)" >&2; exit 1; }
+  # A bare (sibling) path must SKIP in a standalone .github checkout EVEN WHEN a file of the
+  # same name exists at the repo root — the repo's own AGENTS.md signpost is not the umbrella
+  # rulebook. Only a root that MOUNTS the .github repo as `dotgithub/` is the umbrella.
+  mkdir -p "$tmp/standalone"
+  printf 'a repo-local signpost, not the umbrella rulebook\n' > "$tmp/standalone/AGENTS.md"
+  cat > "$tmp/bare.tsv" <<TSV
+# claim	surface	path	kind	pattern
+canon	umbrella AGENTS.md	AGENTS.md	require	Agent:. FIRST
+TSV
+  out3="$(check_manifest "$tmp/bare.tsv" "$tmp/standalone" 2>&1)" \
+    || { echo "SELF-TEST FAIL: a bare sibling path did not skip in a standalone checkout" >&2; exit 1; }
+  grep -q 'skipped=1' <<<"$out3" || { echo "SELF-TEST FAIL: a same-named root file was not skipped (false red)" >&2; exit 1; }
+  # The same bare path MUST resolve when the root mounts the .github repo as `dotgithub/`.
+  mkdir -p "$tmp/umbrella/dotgithub"
+  printf 'the umbrella rulebook: Agent:. FIRST\n' > "$tmp/umbrella/AGENTS.md"
+  check_manifest "$tmp/bare.tsv" "$tmp/umbrella" >/dev/null 2>&1 \
+    || { echo "SELF-TEST FAIL: a bare sibling path did not resolve in an umbrella root" >&2; exit 1; }
   # The real manifest's header row must be ignored, never reported as a bad kind.
   out2="$(check_manifest "$HERE/governance-claims.tsv" "$tmp" 2>&1)" || true
   grep -q "unknown kind 'kind'" <<<"$out2" && { echo "SELF-TEST FAIL: the manifest header row was parsed as a claim" >&2; exit 1; }
