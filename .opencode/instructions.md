@@ -155,6 +155,73 @@ is unset; the model's tool-invocation is stochastic, so the C layer's tool-call
 assertions are live-or-skip, while the plugin-load + no-reload assertions are
 deterministic).
 
+### Monitoring AND controlling agents (`.opencode/plugins/agent-progress.ts`)
+
+`agent-progress.ts` registers TWO V2 custom tools, implemented NATIVELY in TypeScript:
+**`agent_progress`** (MONITOR) and **`agent_control`** (CONTROL). Together they answer the
+orchestrator's real question — *what is this subagent actually doing, and how do I stop it?*
+— from the **transcript**, not a turn count.
+
+#### `agent_progress` — the MONITOR (read-only)
+
+- **A "message" is an ASSISTANT TURN, never a progress signal.** `session_message` rows
+  with `type='assistant'` are turns (`data.content: [{type:"reasoning"|"text"|"tool"}]`);
+  counting them penalises an agent for WORKING. The monitor SHOWS the count and never
+  keys a verdict on it. **A high turn count is NOT a stall.**
+- The report, per session: id + title/slug; **turns**, **span** (first→last), **last-turn /
+  last-event age**; the **tool mix** (`shell`/`read`/`write`/`edit`/…); the **last action**
+  (the text/reasoning snippet + the last tool + its input); **artifact hints**
+  (`owner/repo#N`, `gh pr merge`, `merged`, `v…` tags, `pushed`); and a **VERDICT**.
+- The verdict mirrors the rulebook model: **WORKING** (recent turns + tool cadence) /
+  **IDLE** (no turns past `windowMin` — default 15 — and no artifact) / **LOOP** (the same
+  tool+input repeated `≥4`× in the tail, no artifact) / **DONE** (a final report
+  `finish=stop`, no pending action, **or a landed artifact with the session then quiet**).
+  **Rotate/take over ONLY on** >2 orchestrator re-briefs
+  of the same task, idle-past-window with no artifact, or a loop — **never on turn count.**
+- Data source is **VERIFIED**: a **read-only** handle on the opencode store
+  (`$XDG_DATA_HOME/opencode/opencode.db`, `OPENCODE_DB` override) — `new Database(path,
+  { readonly: true })` under `bun:sqlite` (the shipped runtime), `new DatabaseSync(path,
+  { readOnly: true })` under `node:sqlite` (the gate). The live schema is `session_v2` +
+  `session_message`; there is NO `session` table. Async, `context.signal`-aware, and it
+  fails CLEARLY (`cannot open …`, `no session …`) — it never fabricates a verdict.
+
+#### `agent_control` — the CONTROL half (the new part)
+
+Actions (`action`, optional `session`):
+
+- **`list`** — enumerate sessions (id, title, agent, last-activity age, verdict), from the
+  same read-only store as the monitor. (The V2 plugin context has **no `ctx.session.list`**;
+  the store is the enumeration source. The API equivalent is `GET /api/session` +
+  `GET /api/session/active`.)
+- **`interrupt`** — stop a RUNNING session WITHOUT deleting it:
+  `ctx.session.interrupt({ sessionID, continue: false })` (measured; the API equivalent is
+  `POST /api/session/{id}/interrupt`). Returns `{interrupted:true}` plus the turn baseline.
+- **`delete`** — `opencode session delete <id>` (**deletes the session AND its child
+  sessions**; the API equivalent is `DELETE /api/session/{id}`). The tool counts and lists
+  the child sessions it covered, and reports a non-zero exit as **FAILED** — it never
+  believes a delete that did not happen.
+- **`wait`** — block (bounded, default `DEFAULT_WAIT_TIMEOUT_S = 600`s) until a session goes
+  idle: `ctx.session.wait({ sessionID })` (the API equivalent is
+  `POST /api/experimental/session/{id}/wait`).
+- **`confirm_stopped`** — after `interrupt`/`delete`, re-read the transcript and ASSERT **no
+  new turns** (the "CONFIRM it stopped" rule in `AGENTS.md`). Pass the `baselineTurns`
+  returned by `interrupt`; any new turn ⇒ **STILL RUNNING**. Without a baseline it reports
+  the live state and says so — never a fabricated PASS.
+- **SAFETY:** `interrupt`/`delete`/`wait`/`confirm_stopped` require an **EXPLICIT** session
+  id (`requireExplicitSession` refuses `all`/blank/non-`ses_`), and every result reports
+  what it stopped — so a session another slug owns is **never silently killed**. The `list`
+  path is read-only.
+
+**PURE TYPESCRIPT, no `.sh`, no `marketplace` pin** — same directive as `coord.ts`. The
+control half's ONE `execFile` drives the **opencode CLI** (a tool, exactly like `gh` in
+`coord.ts`) — never a `.sh`. `scripts/check-agent-progress.mjs` gates it: **(A)** static (no
+`.sh`/`spawnSync`/`Bun.spawn`, read-only both drivers, DB path, the closed action set + the
+explicit-session rail); **(B)** unit — the classifier, INCLUDING the RCA regression (a
+turn-count-heavy-but-working transcript is `WORKING`, not stalled), the control actions
+against a REAL read-only SQLite fixture, and the refusal paths; **(C)** `LIVE_OPENCODE=1`
+drives the real binary and calls `agent_progress` **and** `agent_control list` (read-only —
+the test NEVER interrupts/deletes a real session; live-or-skip, visibly).
+
 ### Watching for PR events (opencode)
 
 The watcher is the harness-independent `marketplace/scripts/gh_watch.sh` family
