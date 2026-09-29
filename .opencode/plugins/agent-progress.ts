@@ -83,9 +83,6 @@ export const CONTROL_ACTIONS = ["list", "interrupt", "delete", "wait", "confirm_
 /** `wait` deadline (seconds) — a bounded block; 0 would be an unbounded wait (refused). */
 export const DEFAULT_WAIT_TIMEOUT_S = 600;
 
-/** `confirm_stopped` window (seconds): a NEW assistant turn inside it means STILL RUNNING. */
-export const CONFIRM_WINDOW_S = 20;
-
 /** A loop is `LOOP_REPEATS` identical (tool+input) calls within the last `LOOP_TAIL`. */
 export const LOOP_REPEATS = 4;
 export const LOOP_TAIL = 6;
@@ -112,6 +109,15 @@ export const KNOWN_TOOLS = [
   "webfetch",
   "websearch",
 ];
+
+/**
+ * Wire KNOWN_TOOLS into the monitor's report: surface any tool call OUTSIDE the known set,
+ * so a new/unknown tool is visible rather than silently folded into the mix. (This is the
+ * one live use of the constant — the mix itself is built from the transcript's real names.)
+ */
+export function unknownTools(mix: Record<string, number>): string[] {
+  return Object.keys(mix).filter((name) => !KNOWN_TOOLS.includes(name));
+}
 
 /**
  * Resolve the opencode database path. `OPENCODE_DB` wins (an explicit override);
@@ -582,6 +588,10 @@ export function formatAnalysis(a: Analysis): string {
   ].filter(Boolean);
   lines.push(`  ${timing.join(" · ")}`);
   if (a.toolCalls > 0) lines.push(`  tools  ${topTools(a.toolMix, 6)}`);
+  {
+    const unknown = unknownTools(a.toolMix);
+    if (unknown.length) lines.push(`  tools+ ${unknown.join(" ")}`);
+  }
   if (a.loop.isLoop) {
     lines.push(`  loop   ${a.loop.count}× \`${a.loop.tool}\` ${snippet(a.loop.key, 80)}${a.loop.errors ? ` (${a.loop.errors} errored)` : ""}`);
   }
@@ -659,6 +669,7 @@ export const CONTROL_SQL = {
   exists: "SELECT 1 AS present FROM session_v2 WHERE id = ? LIMIT 1",
   turns:
     "SELECT COUNT(*) AS turns, MAX(time_created) AS last FROM session_message WHERE session_id = ? AND type = 'assistant'",
+  children: "SELECT id FROM session_v2 WHERE parent_id = ?",
 };
 
 /** Fetch + analyze ONE session. Throws a clear error when the session does not exist. */
@@ -923,10 +934,7 @@ export async function runControl(
 
     if (action === "delete") {
       // `opencode session delete <id>` deletes the session AND its child sessions.
-      const children = db.all(
-        "SELECT id FROM session_v2 WHERE parent_id = ?",
-        sessionID,
-      ) as Array<{ id: string }>;
+      const children = db.all(CONTROL_SQL.children, sessionID) as Array<{ id: string }>;
       const res = await runDelete(sessionID, { signal: ctx?.signal });
       if (!res.ok) {
         return { content: `agent_control: delete ${sessionID} FAILED (exit ${res.exit}) — ${snippet(res.stderr || res.stdout, 300)}` };

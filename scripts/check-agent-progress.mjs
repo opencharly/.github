@@ -130,6 +130,8 @@ if (mod) {
     formatControlList,
     confirmStopped,
     runControl,
+    KNOWN_TOOLS,
+    unknownTools,
   } = mod;
 
   ok(VERDICTS.length === 4 && VERDICTS.includes("WORKING") && VERDICTS.includes("IDLE") && VERDICTS.includes("LOOP") && VERDICTS.includes("DONE"), "VERDICTS is the closed set WORKING/IDLE/LOOP/DONE");
@@ -343,6 +345,9 @@ if (mod) {
       ok(report.includes(needle), `formatReport renders '${needle}'`);
     }
     ok(topTools({ shell: 3, read: 1 }) === "shell×3 read×1", "topTools orders by count");
+    ok(unknownTools({ shell: 1, weird_tool: 2 }).join() === "weird_tool", "unknownTools surfaces a tool outside KNOWN_TOOLS (wired)");
+    ok(unknownTools({ shell: 1, read: 2 }).length === 0, "unknownTools is empty when every tool is known");
+    ok(KNOWN_TOOLS.includes("shell") && KNOWN_TOOLS.length > 0, "KNOWN_TOOLS is wired and non-empty");
   }
 
   // The tool execute path runs for real against a REAL database file we create.
