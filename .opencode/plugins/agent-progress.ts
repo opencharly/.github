@@ -430,8 +430,11 @@ export function analyzeSession(
     .flatMap((_: any, i: number) => perTurnTexts[tailFrom + i] ?? [])
     .join("\n");
   const recentArtifacts = extractArtifacts(tailText);
-  // Surface the RECENT artifacts (the tail is what says "landed just now"); fall back to
-  // the whole-transcript list for a short session so a landed artifact is never hidden.
+  // The REPORT surfaces the recent (tail) artifacts — what says "landed just now". When
+  // the tail has none (e.g. a truncated tail on a long session), fall back to the
+  // whole-transcript list so a landed artifact is never hidden. The VERDICT deliberately
+  // keys on `recentArtifacts` only: "landed just now" is the progress signal, so a stale
+  // session with only OLD artifacts must NOT read as active.
   const artifacts = recentArtifacts.length ? recentArtifacts : extractArtifacts(allText);
 
   const loop = detectLoop(toolCalls);
@@ -475,8 +478,9 @@ export function analyzeSession(
  * The STABLE terminal state of a STALE session (no turn and no input past the window):
  * `DONE` when the last turn was a final report (`finish=stop`) with no action in flight,
  * `IDLE` otherwise. Returns `null` while a turn is recent OR input is fresh — the caller
- * then reports the session as working. Used by BOTH the classifier and the report, so
- * the VERDICT line can never disagree with the LAST line it summarizes.
+ * then reports the session as working. It is the ONE source of the terminal state, called
+ * by `classify` (the verdict), so the VERDICT's IDLE/DONE agrees with the reason text
+ * `classify` derives from the same ages.
  */
 export function reportStatus(a: Analysis, windowMin = DEFAULT_WINDOW_MIN): "DONE" | "IDLE" | null {
   const windowMs = windowMin * 60_000;
@@ -545,6 +549,16 @@ export function classify(a: Analysis, windowMin = DEFAULT_WINDOW_MIN): { verdict
     reasons.push(`stale loop: ${a.loop.count}× \`${a.loop.tool}\` ${a.loop.key.slice(0, 60)}`);
     return { verdict: "LOOP", reasons };
   }
+  // A RECENT artifact in a stale session is COMPLETION evidence: work landed and the
+  // session went quiet. Reporting IDLE here would print "no artifact" beside a display
+  // that shows the artifact — the display/verdict contradiction. An artifact suppresses
+  // LOOP above for the same reason; here it resolves to DONE.
+  if (recentArtifact) {
+    reasons.push(
+      `landed an artifact (${a.recentArtifacts.slice(0, 4).join(", ")}) then quiet ${formatDuration(staleFor)} > ${windowMin}m`,
+    );
+    return { verdict: "DONE", reasons };
+  }
   reasons.push(`no turns for ${formatDuration(staleFor)} > ${windowMin}m and no artifact`);
   if (a.idleOutcome) reasons.push(`idle_outcome=${a.idleOutcome}`);
   if (a.repeatBriefs.length > 0) reasons.push(`re-briefs: ${a.repeatBriefs.join("; ")}`);
@@ -598,7 +612,14 @@ export function formatAnalysis(a: Analysis): string {
   if (a.lastText) last.push(`${a.lastText.kind}: "${snippet(a.lastText.text)}"`);
   if (a.lastTool) last.push(`\`${a.lastTool.name}\`(${a.lastTool.status}): ${snippet(a.lastTool.key, 100)}`);
   if (last.length) lines.push(`  last   ${last.join("  |  ")}`);
-  if (a.artifacts.length) lines.push(`  artifact  ${a.artifacts.slice(0, 8).join(" · ")}${a.artifacts.length > 8 ? ` (+${a.artifacts.length - 8})` : ""}`);
+  if (a.recentArtifacts.length) {
+    lines.push(`  artifact  ${a.recentArtifacts.slice(0, 8).join(" · ")}${a.recentArtifacts.length > 8 ? ` (+${a.recentArtifacts.length - 8})` : ""}`);
+  } else if (a.artifacts.length) {
+    // No RECENT artifact: the verdict reads "no artifact" (the tail is the progress
+    // signal). Show the whole-transcript history, explicitly labelled, so the report
+    // reconciles with that verdict instead of appearing to contradict it.
+    lines.push(`  artifact  (none recent — transcript history) ${a.artifacts.slice(0, 8).join(" · ")}${a.artifacts.length > 8 ? ` (+${a.artifacts.length - 8})` : ""}`);
+  }
   if (a.repeatBriefs.length) lines.push(`  re-briefs  ${a.repeatBriefs.join("; ")}`);
   lines.push(`  VERDICT  ${a.verdict} — ${a.reasons.join("; ")}`);
   return lines.join("\n");

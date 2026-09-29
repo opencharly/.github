@@ -352,6 +352,26 @@ if (mod) {
       ok(report.includes(needle), `formatReport renders '${needle}'`);
     }
     ok(topTools({ shell: 3, read: 1 }) === "shell×3 read×1", "topTools orders by count");
+    // The artifact DISPLAY reconciles with the verdict (R1): a stale session whose only
+    // artifacts are OLDER than ARTIFACT_TAIL assistant turns renders them as an explicitly
+    // labelled transcript history — so a report showing artifacts can never sit beside a
+    // "no artifact" verdict without saying why.
+    {
+      const staleWithHistory = analyzeSession(
+        session,
+        [
+          user(90, "land it"),
+          assistant(85, [text("merged opencharly/opencharly#7")], "stop"),
+          ...Array.from({ length: 5 }, (_, i) => assistant(70 - i, [text(`idle step ${i}`)])),
+        ],
+        { now, windowMin: 15 },
+      );
+      ok(staleWithHistory.recentArtifacts.length === 0, "analyzeSession: artifacts OLDER than the tail window are not RECENT (the verdict's signal)");
+      ok(staleWithHistory.artifacts.length > 0, "analyzeSession: the whole-transcript artifact list is retained for the display");
+      const staleReport = formatReport([staleWithHistory], { db: "/tmp/x.db", driver: "node:sqlite", windowMin: 15 });
+      ok(/artifact\s+\(none recent — transcript history\)/.test(staleReport), "formatReport: old artifacts are labelled 'none recent — transcript history' (reconciles with the verdict)");
+      ok(/no artifact/.test(staleReport), "formatReport: the stale verdict says 'no artifact' — display and verdict agree (the label explains the history)");
+    }
     ok(unknownTools({ shell: 1, weird_tool: 2 }).join() === "weird_tool", "unknownTools surfaces a tool outside KNOWN_TOOLS (wired)");
     ok(unknownTools({ shell: 1, read: 2 }).length === 0, "unknownTools is empty when every tool is known");
     ok(KNOWN_TOOLS.includes("shell") && KNOWN_TOOLS.length > 0, "KNOWN_TOOLS is wired and non-empty");
@@ -512,6 +532,30 @@ if (mod) {
       const del = await runControl({ action: "delete", session: "ses_live01", db: dbPath }, {});
       if (origBin === undefined) delete process.env.OPENCODE_BIN; else process.env.OPENCODE_BIN = origBin;
       ok(/delete ses_live01 FAILED/.test(del.content), "runControl delete: a failing opencode CLI is reported FAILED (never a false success)");
+
+      // wait: exercised through runControl with a stubbed ctx.session.wait — BOTH the idle
+      // result and the bounded-timeout result (B12: a path with no test fails to exist).
+      {
+        let waitedFor = null;
+        const idleStub = { session: { wait: async (a) => { waitedFor = a; } } };
+        const idle = await runControl({ action: "wait", session: "ses_live01", db: dbPath }, idleStub);
+        ok(waitedFor && waitedFor.sessionID === "ses_live01", "runControl wait: calls ctx.session.wait({sessionID})");
+        ok(/is idle/.test(idle.content) && /turns 2/.test(idle.content), "runControl wait: a returning wait reports idle + the live turn count");
+        const hangStub = { session: { wait: () => new Promise(() => {}) } };
+        const timedOut = await runControl({ action: "wait", session: "ses_live01", db: dbPath, timeoutSec: 1 }, hangStub);
+        ok(/timed out after 1s/.test(timedOut.content), "runControl wait: a wait that never resolves is BOUNDED (reports the timeout, never hangs)");
+        const noWait = await runControl({ action: "wait", session: "ses_live01", db: dbPath }, {});
+        ok(/ctx\.session\.wait is unavailable/.test(noWait.content), "runControl wait: a missing ctx primitive is reported, not faked");
+      }
+
+      // confirm_stopped: the ACTION (not just the pure helper) re-reads the store and
+      // asserts against the baseline the interrupt returned.
+      {
+        const confirmed = await runControl({ action: "confirm_stopped", session: "ses_live01", db: dbPath, baselineTurns: 2 }, {});
+        ok(/confirm_stopped ses_live01 — STOPPED/.test(confirmed.content), "runControl confirm_stopped: unchanged turns vs the baseline ⇒ STOPPED");
+        const still = await runControl({ action: "confirm_stopped", session: "ses_live01", db: dbPath, baselineTurns: 1 }, {});
+        ok(/NOT CONFIRMED/.test(still.content) && /STILL RUNNING/.test(still.content), "runControl confirm_stopped: MORE turns than the baseline ⇒ STILL RUNNING");
+      }
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
