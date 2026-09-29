@@ -188,8 +188,6 @@ export interface ToolCall {
   name: string;
   key: string;
   status: string;
-  turn: number;
-  time: number;
 }
 
 /**
@@ -346,7 +344,7 @@ export function analyzeSession(
         const status = typeof part.state?.status === "string" ? part.state.status : "unknown";
         const key = normalizeInput(name, part.state?.input);
         toolMix[name] = (toolMix[name] ?? 0) + 1;
-        toolCalls.push({ name, key, status, turn: i, time: m.time_created });
+        toolCalls.push({ name, key, status });
         lastTool = { name, key, status };
         if (status === "running") turnRunning = true;
         // A shell tool's INPUT (e.g. `gh pr merge …`) is an artifact surface too.
@@ -613,7 +611,6 @@ export const SQL = {
     "SELECT id, slug, title, parent_id, agent, model, idle_outcome, time_updated FROM session_v2 WHERE time_updated >= ? ORDER BY time_updated DESC LIMIT ?",
   counts:
     "SELECT COUNT(*) AS turns, MIN(time_created) AS first, MAX(time_created) AS last FROM session_message WHERE session_id = ? AND type = 'assistant'",
-  lastEvent: "SELECT MAX(time_created) AS last FROM session_message WHERE session_id = ?",
   tail:
     "SELECT seq, type, time_created, data FROM session_message WHERE session_id = ? ORDER BY seq DESC LIMIT ?",
 };

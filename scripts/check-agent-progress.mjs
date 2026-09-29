@@ -157,7 +157,7 @@ if (mod) {
   eq([...new Set(arts)].length, arts.length, "extractArtifacts dedupes");
 
   // detectLoop — the same (tool+input) repeated inside the trailing window.
-  const mkCall = (name, key, status = "completed", turn = 0, time = 0) => ({ name, key, status, turn, time });
+  const mkCall = (name, key, status = "completed") => ({ name, key, status });
   ok(!detectLoop([]).isLoop, "detectLoop: empty is not a loop");
   ok(
     !detectLoop([mkCall("shell", "ls"), mkCall("read", "/a"), mkCall("shell", "ls"), mkCall("read", "/a"), mkCall("shell", "ls")]).isLoop,
