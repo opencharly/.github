@@ -76,23 +76,6 @@ export const ARTIFACT_TAIL = 4;
 /** The closed verdict set. */
 export const VERDICTS = ["WORKING", "IDLE", "LOOP", "DONE"];
 
-/** The tool names whose input is a single "what am I doing" key (the tool mix). */
-export const KNOWN_TOOLS = [
-  "shell",
-  "bash",
-  "read",
-  "write",
-  "edit",
-  "grep",
-  "glob",
-  "skill",
-  "execute",
-  "subagent",
-  "question",
-  "webfetch",
-  "websearch",
-];
-
 /**
  * Resolve the opencode database path. `OPENCODE_DB` wins (an explicit override);
  * otherwise the XDG data dir (`$XDG_DATA_HOME` or `~/.local/share`), then `/opencode/opencode.db`.
@@ -558,6 +541,7 @@ export function formatAnalysis(a: Analysis): string {
     `span ${a.spanMs === null ? "—" : formatDuration(a.spanMs)}`,
     `last-turn ${a.lastTurnAgeMs === null ? "—" : formatDuration(a.lastTurnAgeMs)} ago`,
     `last-event ${a.lastEventAgeMs === null ? "—" : formatDuration(a.lastEventAgeMs)} ago`,
+    a.userTurns > 0 ? `briefs ${a.userTurns}` : "",
     a.truncated ? "(tail only)" : "",
   ].filter(Boolean);
   lines.push(`  ${timing.join(" · ")}`);
@@ -696,10 +680,16 @@ export async function runProgress(
           `Set OPENCODE_DB to override the path (default: $XDG_DATA_HOME/opencode/opencode.db).`,
       };
     }
-    const onlyAll = input.session === undefined || input.session === null || input.session === "all";
-    if (!onlyAll && typeof input.session !== "string") {
+    // Target selection: `session` (a specific id) wins; otherwise `all: false` restricts
+    // the set to ROOT sessions (no `parent_id`), and the default (`all` unset/true) is
+    // every session active in the look-back.
+    const hasSession =
+      typeof input.session === "string" && input.session !== "" && input.session !== "all";
+    const onlyAll = !hasSession;
+    if (!hasSession && input.session !== undefined && input.session !== null && input.session !== "all") {
       return { content: "agent_progress: `session` must be a ses_… id (or `all`)" };
     }
+    const rootsOnly = input.all === false;
 
     const analyses: Analysis[] = [];
     if (!onlyAll) {
@@ -716,7 +706,8 @@ export async function runProgress(
         typeof input.limit === "number" && input.limit > 0 ? Math.min(input.limit, 50) : DEFAULT_LIMIT;
       const sinceMin =
         typeof input.sinceMin === "number" && input.sinceMin > 0 ? input.sinceMin : DEFAULT_SINCE_MIN;
-      const rows = await listSessions(db, { now, sinceMin, limit });
+      let rows = await listSessions(db, { now, sinceMin, limit: rootsOnly ? 200 : limit });
+      if (rootsOnly) rows = rows.filter((r) => r.parent_id === null || r.parent_id === "").slice(0, limit);
       for (const row of rows) {
         if (ctx.signal?.aborted) return { content: "agent_progress: aborted (session interrupted)" };
         analyses.push(await analyzeOne(db, row.id, { now, windowMin }));

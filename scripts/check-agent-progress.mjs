@@ -369,6 +369,21 @@ if (mod) {
       const all = await mod.runProgress({ db: dbPath, sinceMin: 60, limit: 5 });
       ok(/ses_live01/.test(all.content), "runProgress (all): the recent session is listed");
 
+      // `all: false` is WIRED (not a schema-declared no-op): it restricts the set to ROOT
+      // sessions, so a child (a session with a parent_id) is excluded.
+      {
+        const { DatabaseSync: DS } = await import("node:sqlite");
+        const db2 = new DS(dbPath);
+        db2.prepare("INSERT INTO session_v2 (id,slug,title,parent_id,agent,model,idle_outcome,time_created,time_updated) VALUES (?,?,?,?,?,?,?,?,?)").run(
+          "ses_child1", "child", "a subagent", "ses_live01", "general", "m", null, now - 60_000, now,
+        );
+        db2.close();
+      }
+      const roots = await mod.runProgress({ db: dbPath, sinceMin: 60, limit: 5, all: false });
+      ok(!/ses_child1/.test(roots.content), "runProgress (all:false): a CHILD session is excluded (root sessions only)");
+      const every = await mod.runProgress({ db: dbPath, sinceMin: 60, limit: 5, all: true });
+      ok(/ses_child1/.test(every.content), "runProgress (all:true): a CHILD session is included");
+
       const missing = await mod.runProgress({ session: "ses_nope", db: dbPath });
       ok(/no session ses_nope/.test(missing.content), "runProgress: an unknown session fails CLEARLY (never fabricates)");
 
