@@ -137,6 +137,10 @@ if (mod) {
     watchEvent,
     formatWake,
     parseEvents,
+    parseReviewVerdict,
+    runState,
+    armReport,
+    armNotable,
     TIERS,
     VERBS,
     DEFAULT_EVENTS,
@@ -202,23 +206,35 @@ if (mod) {
 
   // watchEvent — the event semantics shared with gh_watch.sh.
   const evSet = new Set(["merged", "closed", "comment", "verdict", "stall"]);
-  const base = { type: "pr", state: "open", merged: false, comments: 3, verdictId: "10", updatedEpoch: 1000, verdictEpoch: 1000 };
+  const base = { isPr: true, state: "open", merged: false, comments: 3, latestComment: "", reviewVerdict: "", verdictId: "10", verdictStatus: "completed", verdictConclusion: "success", updatedEpoch: 1000, verdictEpoch: 1000 };
+  const it = parseItem("acme/widget#7");
   eq(watchEvent(base, { ...base, merged: true }, evSet, { armEpoch: 0, nowEpoch: 2000, stallMin: 60 }), "merged", "watchEvent: merged fires on merged=true (STATE)");
   eq(watchEvent(base, { ...base, state: "closed" }, evSet, { armEpoch: 0, nowEpoch: 2000, stallMin: 60 }), "closed", "watchEvent: closed fires when closed and unmerged");
   eq(watchEvent(base, { ...base, comments: 4 }, evSet, { armEpoch: 0, nowEpoch: 2000, stallMin: 60 }), "comment", "watchEvent: comment fires on a comment-count change (DELTA)");
   eq(watchEvent(base, { ...base, comments: 3 }, evSet, { armEpoch: 0, nowEpoch: 2000, stallMin: 60 }), null, "watchEvent: an unchanged comment count never fires (seeded)");
   eq(
-    watchEvent(base, { ...base, verdictId: "11", verdictEpoch: 5000 }, evSet, { armEpoch: 4000, nowEpoch: 6000, stallMin: 60 }),
+    watchEvent(base, { ...base, verdictId: "11", verdictEpoch: 5000, verdictStatus: "completed" }, evSet, { armEpoch: 4000, nowEpoch: 6000, stallMin: 60 }),
     "verdict",
-    "watchEvent: verdict fires on a NEW run COMPLETED at/after arm",
+    "watchEvent: verdict fires on a NEW run at/after arm",
+  );
+  // The verdict event covers EVERY run status and a STATUS TRANSITION, not only completion.
+  eq(
+    watchEvent(base, { ...base, verdictId: "10", verdictStatus: "in_progress", verdictConclusion: "" }, evSet, { armEpoch: 4000, nowEpoch: 6000, stallMin: 60 }),
+    "verdict",
+    "watchEvent: verdict fires on a QUEUED→IN_PROGRESS status transition of the SAME run (not only completion)",
   );
   eq(
-    watchEvent(base, { ...base, verdictId: "9", verdictEpoch: 500 }, new Set(["verdict"]), { armEpoch: 4000, nowEpoch: 6000, stallMin: 60 }),
+    watchEvent(base, { ...base, verdictId: "10", verdictStatus: "completed", verdictConclusion: "failure" }, evSet, { armEpoch: 4000, nowEpoch: 6000, stallMin: 60 }),
+    "verdict",
+    "watchEvent: verdict fires on an IN_PROGRESS→COMPLETED transition (conclusion change)",
+  );
+  eq(
+    watchEvent(base, { ...base, verdictId: "9", verdictEpoch: 500, verdictStatus: "completed" }, new Set(["verdict"]), { armEpoch: 4000, nowEpoch: 6000, stallMin: 60 }),
     null,
-    "watchEvent: an OLDER completed run never fires (the arm-epoch gate)",
+    "watchEvent: an OLDER pre-arm run never fires (the arm-epoch gate)",
   );
   eq(
-    watchEvent(base, { ...base, verdictId: "9", verdictEpoch: 500 }, evSet, { armEpoch: 4000, nowEpoch: 6000, stallMin: 60 }),
+    watchEvent(base, { ...base, verdictId: "9", verdictEpoch: 500, verdictStatus: "completed" }, evSet, { armEpoch: 4000, nowEpoch: 6000, stallMin: 60 }),
     "stall",
     "watchEvent: with verdict disabled, an old run falls through to the silence alarm (order mirrors gh_watch.sh)",
   );
@@ -233,16 +249,44 @@ if (mod) {
     "watchEvent: stall never fires on an UNKNOWN state",
   );
 
+  // parseReviewVerdict — the review verdict read from the latest comment body.
+  eq(parseReviewVerdict("## Review — BLOCK\n\n### Blocks\n- x"), "BLOCK", "parseReviewVerdict reads a `## Review — BLOCK` heading");
+  eq(parseReviewVerdict("\n\n## Review — PASS  "), "PASS", "parseReviewVerdict reads a `## Review — PASS` heading (leading blanks skipped)");
+  eq(parseReviewVerdict("## validator INCONCLUSIVE — no review verdict was produced (not a BLOCK)"), "", "parseReviewVerdict does NOT read the INCONCLUSIVE prose 'BLOCK' as a verdict");
+  eq(parseReviewVerdict("BLOCK"), "BLOCK", "parseReviewVerdict accepts a bare leading BLOCK");
+  eq(parseReviewVerdict(""), "", "parseReviewVerdict yields '' for an empty body");
+
+  // runState — the status[/conclusion] the VERDICT wake line carries (EVERY status).
+  eq(runState({ ...base, verdictStatus: "in_progress", verdictConclusion: "" }), "IN_PROGRESS", "runState reports a run in progress (no conclusion yet)");
+  eq(runState({ ...base, verdictStatus: "queued", verdictConclusion: "" }), "QUEUED", "runState reports a QUEUED run");
+  eq(runState({ ...base, verdictStatus: "completed", verdictConclusion: "success" }), "COMPLETED/success", "runState reports status + conclusion on completion");
+  eq(runState({ ...base, verdictStatus: "", verdictConclusion: "" }), "", "runState is empty when no run is observed");
+
+  // armReport — the ARM baseline (latest run status+conclusion AND latest review verdict).
+  const arm = armReport(it, { ...base, reviewVerdict: "BLOCK", verdictStatus: "completed", verdictConclusion: "failure" }, { wf: "charly/pr-validator" });
+  ok(/^ARM {6}acme\/widget#7 {2}state=open {2}run=charly\/pr-validator\/COMPLETED\/failure {2}review=BLOCK /.test(arm), "armReport carries the run status+conclusion AND the parsed review verdict");
+  ok(/review=none/.test(armReport(it, base, { wf: "w" })), "armReport reports review=none when no verdict is present");
+
+  // armNotable — the "I missed the BLOCK / the run is in flight" trigger.
+  ok(armNotable({ ...base, reviewVerdict: "BLOCK" }), "armNotable: a pre-existing BLOCK verdict is actionable at arm");
+  ok(!armNotable({ ...base, reviewVerdict: "PASS" }), "armNotable: a pre-existing PASS is reported but not actionable");
+  ok(armNotable({ ...base, verdictStatus: "in_progress", verdictConclusion: "" }), "armNotable: a run IN FLIGHT at arm is actionable");
+  ok(!armNotable(base), "armNotable: a completed run + no review verdict is not actionable");
+
   // formatWake — the wake-line format shared with gh_watch.sh.
-  const it = parseItem("acme/widget#7");
   eq(formatWake(it, "merged", base, base, { wf: "w", stallMin: 60 }), "MERGED   acme/widget#7  (unblocked)", "formatWake MERGED line");
   ok(formatWake(it, "closed", base, base, { wf: "w", stallMin: 60 }).startsWith("CLOSED   acme/widget#7"), "formatWake CLOSED line");
-  ok(/^VERDICT {2}acme\/widget#7 {2}new w run 11 /.test(formatWake(it, "verdict", base, { ...base, verdictId: "11" }, { wf: "w", stallMin: 60 })), "formatWake VERDICT line");
+  ok(/^VERDICT {2}acme\/widget#7 {2}w {2}IN_PROGRESS {2}https:\/\//.test(formatWake(it, "verdict", base, { ...base, verdictStatus: "in_progress", verdictConclusion: "" }, { wf: "w", stallMin: 60 })), "formatWake VERDICT names the status for an in-flight run");
+  ok(/^VERDICT {2}acme\/widget#7 {2}w {2}COMPLETED\/success {2}https:/.test(formatWake(it, "verdict", base, { ...base, verdictStatus: "completed", verdictConclusion: "success" }, { wf: "w", stallMin: 60 })), "formatWake VERDICT names status/conclusion on completion");
+  const wakeComment = formatWake(it, "comment", base, { ...base, comments: 4, reviewVerdict: "BLOCK" }, { wf: "w", stallMin: 60 });
+  ok(/COMMENT {2}acme\/widget#7 {2}new comment \(3 -> 4\) {2}BLOCK /.test(wakeComment), "formatWake COMMENT carries the parsed review verdict");
   ok(/^STALL {4}acme\/widget#7 {2}no progress for 60m/.test(formatWake(it, "stall", base, base, { wf: "w", stallMin: 60 })), "formatWake STALL line");
 
   eq([...parseEvents("merged,closed,stall", "x")], ["merged", "closed", "stall"], "parseEvents splits + trims");
-  eq([...parseEvents(undefined, "merged,closed,stall")], ["merged", "closed", "stall"], "parseEvents falls back to the default");
-  eq(DEFAULT_EVENTS, "merged,closed,stall", "DEFAULT_EVENTS is the terminal + silence set");
+  eq([...parseEvents(undefined, "merged,closed,comment,verdict,stall")], ["merged", "closed", "comment", "verdict", "stall"], "parseEvents falls back to the default");
+  // THE FIX: the default event set MUST carry the two DELTA events a validator
+  // verdict arrives as (comment = the BLOCK/PASS review, verdict = the run status).
+  eq(DEFAULT_EVENTS, "merged,closed,comment,verdict,stall", "DEFAULT_EVENTS includes comment AND verdict beside the terminal + silence set");
   ok(VERBS.includes("HANDING OVER") && VERBS.includes("TAKING OVER"), "VERBS carries the spaced multi-word labels");
   ok(TIERS.length === 5, "TIERS carries the five documented attribution tiers");
 
@@ -261,6 +305,18 @@ if (mod) {
   {
     process.env.GITHUB_TOKEN = "test-token";
     const reqs = [];
+    // A per-test MOCK of the mocked PR, keyed by GraphQL CALL NUMBER so a test can make
+    // the arm observation (call 1) differ from a later poll — a status transition, a new
+    // comment — deterministically. `gqlCalls` counts batched GraphQL requests.
+    let gqlCalls = 0;
+    // Default: merged on call 1, a completed/success validator run, no comments.
+    let mockFor = (call) => ({
+      merged: true,
+      runStatus: "completed",
+      runConclusion: "success",
+      commentCount: 0,
+      commentBody: null,
+    });
     const server = createServer((req, res) => {
       let body = "";
       req.on("data", (c) => (body += c));
@@ -271,20 +327,30 @@ if (mod) {
           res.end(JSON.stringify(o));
         };
         if (req.url === "/graphql") {
-          // Answer EVERY requested alias (i0..iN) with the SAME merged:true/closed PR.
           let names = [];
           try {
             const q = JSON.parse(body).query;
             names = [...q.matchAll(/\bi(\d+):/g)].map((m) => m[1]);
           } catch { /* ignore */ }
+          const m = mockFor(++gqlCalls);
+          // The REAL GraphQL shape: status/conclusion live on the CheckSuite, the run's
+          // own `updatedAt` orders it (WorkflowRun has no status/conclusion field).
+          const suite = m.runStatus
+            ? { status: m.runStatus, conclusion: m.runStatus === "completed" ? m.runConclusion : null, workflowRun: { databaseId: 900, workflow: { name: "charly/pr-validator" }, updatedAt: "2026-01-01T00:00:00Z" } }
+            : null;
+          const suites = suite ? { nodes: [suite] } : { nodes: [] };
+          const comments = m.commentCount
+            ? { totalCount: m.commentCount, nodes: [{ body: m.commentBody ?? "", createdAt: "2026-01-01T00:00:00Z" }] }
+            : { totalCount: 0, nodes: [] };
           const data = {};
           for (const n of names) {
             data[`i${n}`] = {
               pullRequest: {
-                state: "CLOSED", merged: true, updatedAt: "2026-01-01T00:00:00Z",
-                commits: { nodes: [{ commit: { oid: `oid${n}`, committedDate: "2026-01-01T00:00:00Z", checkSuites: { nodes: [] } } }] },
+                state: m.merged ? "CLOSED" : "OPEN", merged: m.merged, updatedAt: "2026-01-01T00:00:00Z",
+                comments,
+                commits: { nodes: [{ commit: { oid: `oid${n}`, committedDate: "2026-01-01T00:00:00Z", checkSuites: suites } }] },
               },
-              issue: { state: "CLOSED", updatedAt: "2026-01-01T00:00:00Z", comments: { totalCount: 0 } },
+              issue: { state: "OPEN", updatedAt: "2026-01-01T00:00:00Z", comments },
             };
           }
           if (!names.length) return json({ errors: [{ message: "parse" }] });
@@ -325,13 +391,49 @@ if (mod) {
       ok(post && /"body":"STATUS\\n\\nhi\\n\\n\*Agent: `slug-x`/.test(String(post.body)), "the POST body is the canonical comment (verb + body + footer)");
 
       // calls-per-poll = 1 for N=3 items: each POLL (including the initial seed) is
-      // ONE batched GraphQL request carrying ALL 3 aliases.
+      // ONE batched GraphQL request carrying ALL 3 aliases. Here the PR is NOT merged on
+      // the arm seed and merges on the next poll, so the seed + one poll = 2 requests —
+      // and EACH single request aliases all 3 items.
+      mockFor = (call) => ({ merged: call >= 2, runStatus: "completed", runConclusion: "success", commentCount: 0, commentBody: null });
       reqs.length = 0;
+      gqlCalls = 0;
       const watch = await tools.coord_watch.execute({ items: ["acme/widget#1", "acme/widget#2", "acme/widget#3"], events: "merged", interval: 60, timeout: 20 });
       eq(watch.content, "MERGED   acme/widget#1  (unblocked)", "coord_watch.execute polls batched GraphQL and returns the wake line");
       const gql = reqs.filter((r) => r.url === "/graphql");
       eq(gql.length, 2, `calls-per-poll = 1 for 3 items (seed + 1 poll = 2 requests for 3 aliased items; got ${gql.length})`);
       ok(/i0: repository/.test(String(gql[0]?.body)) && /i2: repository/.test(String(gql[0]?.body)), "EACH single request aliases ALL 3 items (i0..i2) — calls-per-poll is independent of item count");
+
+      // THE ARM REPORT: a PR that is ALREADY BLOCKed (a pre-existing review verdict)
+      // wakes IMMEDIATELY with the baseline — no wait for a comment that may never come.
+      mockFor = () => ({ merged: false, runStatus: "completed", runConclusion: "failure", commentCount: 1, commentBody: "## Review — BLOCK\n\n### Blocks\n- x" });
+      reqs.length = 0;
+      gqlCalls = 0;
+      const armed = await tools.coord_watch.execute({ items: ["acme/widget#1"], events: "comment,verdict", interval: 60, timeout: 3600 });
+      ok(/^ARM {6}acme\/widget#1 {2}state=open {2}run=charly\/pr-validator\/COMPLETED\/failure {2}review=BLOCK /.test(armed.content), `coord_watch ARM report fires on a pre-existing BLOCK (got ${JSON.stringify(armed.content)})`);
+      eq(reqs.filter((r) => r.url === "/graphql").length, 1, "the ARM report costs exactly ONE batched call (no poll loop)");
+
+      // RUN STATUS IS OBSERVED IN EVERY STATUS: an in-flight run at arm is surfaced
+      // immediately with its status (QUEUED/IN_PROGRESS), not only on completion.
+      mockFor = () => ({ merged: false, runStatus: "queued", runConclusion: "", commentCount: 0, commentBody: null });
+      reqs.length = 0;
+      gqlCalls = 0;
+      const queued = await tools.coord_watch.execute({ items: ["acme/widget#1"], events: "verdict", interval: 60, timeout: 3600 });
+      ok(/^ARM {6}acme\/widget#1 {2}state=open {2}run=charly\/pr-validator\/QUEUED {2}review=none /.test(queued.content), `an in-flight QUEUED run is surfaced at ARM with its status (got ${JSON.stringify(queued.content)})`);
+      eq(reqs.filter((r) => r.url === "/graphql").length, 1, "an in-flight run at arm also costs exactly ONE batched call");
+
+      mockFor = () => ({ merged: false, runStatus: "in_progress", runConclusion: "", commentCount: 0, commentBody: null });
+      gqlCalls = 0;
+      const inflight = await tools.coord_watch.execute({ items: ["acme/widget#1"], events: "verdict", interval: 60, timeout: 3600 });
+      ok(/run=charly\/pr-validator\/IN_PROGRESS/.test(inflight.content), "an IN_PROGRESS run is reported with its status (no conclusion yet)");
+
+      // A run STATUS TRANSITION fires `verdict` (not only completion): the arm seed sees
+      // a COMPLETED/success run (not notable), then the next poll sees the SAME run id
+      // re-running (IN_PROGRESS) — a re-run. The wake line names the new status.
+      mockFor = (call) => ({ merged: false, runStatus: call <= 1 ? "completed" : "in_progress", runConclusion: "success", commentCount: 0, commentBody: null });
+      reqs.length = 0;
+      gqlCalls = 0;
+      const transition = await tools.coord_watch.execute({ items: ["acme/widget#1"], events: "verdict", interval: 60, timeout: 20 });
+      ok(/VERDICT {2}acme\/widget#1 {2}charly\/pr-validator {2}IN_PROGRESS {2}https:\/\//.test(transition.content), `verdict fires on a COMPLETED→IN_PROGRESS status transition (got ${JSON.stringify(transition.content)})`);
 
       const missing = await tools.coord_watch.execute({});
       ok(/at least one item/.test(missing.content), "coord_watch.execute rejects an empty items list with a clear message");

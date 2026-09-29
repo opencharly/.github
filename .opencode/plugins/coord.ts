@@ -65,6 +65,12 @@ import {
   sleepAbortable,
   watchEvent,
   formatWake,
+  armReport,
+  armReportEnabled,
+  armNotable,
+  armStateFire,
+  parseReviewVerdict,
+  runState,
   clampInterval,
   rateLimitMessage,
   RateLimitedError,
@@ -77,6 +83,7 @@ import {
   type Fire,
   type Item,
   type Snap,
+  type ArmReport,
 } from "../lib/watch.ts";
 
 // Re-exported so consumers/tests can assert the CONTRACT (the item grammar, the
@@ -87,6 +94,12 @@ export {
   parseEvents,
   watchEvent,
   formatWake,
+  armReport,
+  armReportEnabled,
+  armNotable,
+  armStateFire,
+  parseReviewVerdict,
+  runState,
   clampInterval,
   rateLimitMessage,
   RateLimitedError,
@@ -118,8 +131,15 @@ export const VERBS = [
   "RESOLVED",
 ];
 
-/** The default watcher event set — terminal outcomes plus the silence alarm. */
-export const DEFAULT_EVENTS = "merged,closed,stall";
+/**
+ * The default watcher event set. It MUST include the two DELTA events a validator
+ * verdict arrives as — `comment` (the BLOCK/PASS review comment) and `verdict` (the
+ * `charly/pr-validator` run reaching a status) — beside the terminal outcomes and the
+ * silence alarm. Omitting them is the defect this set exists to prevent: a BLOCK
+ * arrives as a COMMENT and a completed run as a VERDICT, so a `merged,closed,stall`
+ * default would never wake on either.
+ */
+export const DEFAULT_EVENTS = "merged,closed,comment,verdict,stall";
 
 /** The default `coord_watch` deadline (seconds) — a bounded, session-invoked wait. */
 export const DEFAULT_WATCH_TIMEOUT_S = 3600;
@@ -234,6 +254,12 @@ export async function postComment(
  * is RETURNED distinctly (never retried as "no event", never a spin). A near-exhausted
  * quota (read FREE from the batched response's rate header) backs off VISIBLY. The
  * `intervalSec` is clamped to `POLL_FLOOR`.
+ *
+ * AT ARM: a STATE event already in force (an already-merged/closed item, `watchEvent`
+ * with seed===cur) WINS — it is a genuine wake and never loops. Otherwise, when the arm
+ * baseline is notable (a pre-existing BLOCK verdict or an in-flight run), the watch
+ * returns its ARM report IMMEDIATELY (`armFired`) rather than waiting for a comment that
+ * may never come.
  */
 export async function runWatch(
   items: Item[],
@@ -245,24 +271,52 @@ export async function runWatch(
     timeoutSec: number;
     signal?: AbortSignal;
   },
-): Promise<{ fire: Fire | null; timedOut: boolean; rateLimited?: RateLimitedError }> {
+): Promise<{
+  fire: Fire | null;
+  /** The ARM baseline reports (one per item), delivered as the FIRST emission. */
+  reports: ArmReport[];
+  /** True when the ARM baseline alone was notable enough to wake (no wait needed). */
+  armFired: boolean;
+  timedOut: boolean;
+  rateLimited?: RateLimitedError;
+}> {
   const events = parseEvents(opts.events, DEFAULT_EVENTS);
   const intervalSec = clampInterval(opts.intervalSec);
   const armEpoch = Math.floor(Date.now() / 1000);
+  const none = { fire: null, reports: [] as Fire[], armFired: false, timedOut: false };
   let seeds: Map<string, Snap>;
+  let reports: ArmReport[] = [];
   try {
-    seeds = await seedAll(items, { wf: opts.workflow, signal: opts.signal });
+    const seeded = await seedAll(items, { wf: opts.workflow, signal: opts.signal, events });
+    seeds = seeded.seeds;
+    reports = seeded.reports;
   } catch (err) {
-    if (err instanceof RateLimitedError) return { fire: null, timedOut: false, rateLimited: err };
-    if (opts.signal?.aborted) return { fire: null, timedOut: false };
+    if (err instanceof RateLimitedError) return { ...none, rateLimited: err };
+    if (opts.signal?.aborted) return none;
     seeds = new Map(); // a transient seed failure: proceed; no seed → no delta fire
+  }
+  // A STATE event already in force at arm (merged/closed/stall) is a genuine wake and
+  // MUST resolve BEFORE the arm report — otherwise an already-merged item with a
+  // pre-existing BLOCK would re-emit its ARM baseline forever and never report MERGED.
+  // The ARM report still travels WITH it, so the baseline is always the first line.
+  const armFire = armStateFire(items, seeds, events, {
+    armEpoch,
+    nowEpoch: Math.floor(Date.now() / 1000),
+    stallMin: opts.stallMin,
+    wf: opts.workflow,
+  });
+  if (armFire) return { fire: armFire, reports, armFired: false, timedOut: false };
+  // A pre-existing BLOCK/verdict or an IN-FLIGHT run at arm is the missed-verdict case:
+  // wake IMMEDIATELY with the baseline rather than waiting for a new comment.
+  if (reports.some((r) => armNotable(r.snap))) {
+    return { fire: null, reports, armFired: true, timedOut: false };
   }
   const start = Date.now();
 
   for (;;) {
-    if (opts.signal?.aborted) return { fire: null, timedOut: false };
+    if (opts.signal?.aborted) return { ...none, reports };
     if (opts.timeoutSec > 0 && Date.now() - start >= opts.timeoutSec * 1000) {
-      return { fire: null, timedOut: true };
+      return { fire: null, reports, armFired: false, timedOut: true };
     }
     let outcome;
     try {
@@ -276,14 +330,14 @@ export async function runWatch(
     } catch (err) {
       if (err instanceof RateLimitedError) {
         // FAIL HARD: surface the rate limit distinctly; never retry as "no event".
-        return { fire: null, timedOut: false, rateLimited: err };
+        return { ...none, reports, rateLimited: err };
       }
-      if (opts.signal?.aborted) return { fire: null, timedOut: false };
+      if (opts.signal?.aborted) return { ...none, reports };
       // A transient (non-rate-limit) API failure skips this poll, never kills the watch.
       await sleepAbortable(intervalSec * 1000, opts.signal);
       continue;
     }
-    if (outcome.fire) return { fire: outcome.fire, timedOut: false };
+    if (outcome.fire) return { fire: outcome.fire, reports, armFired: false, timedOut: false };
     // A near-exhausted quota (FREE header read) → back off VISIBLY, never hammer.
     if (outcome.rateRemaining !== null && outcome.rateRemaining < RATE_FLOOR) {
       await sleepAbortable(Math.min(intervalSec * BACKOFF_FACTOR, MAX_BACKOFF_S) * 1000, opts.signal);
@@ -430,7 +484,7 @@ export default {
             };
           }
           const intervalSec = clampInterval(input.interval);
-          const { fire, timedOut, rateLimited } = await runWatch(items, {
+          const { fire, reports, armFired, timedOut, rateLimited } = await runWatch(items, {
             events: String(input.events ?? DEFAULT_EVENTS),
             intervalSec,
             stallMin: typeof input.stallmin === "number" && input.stallmin >= 0 ? input.stallmin : DEFAULT_STALL_MIN,
@@ -440,9 +494,16 @@ export default {
           });
           if (toolCtx?.signal?.aborted) return { content: "coord_watch: aborted (session interrupted)" };
           if (rateLimited) return { content: `coord_watch: ${rateLimitMessage(rateLimited)}` };
-          if (fire) return { content: fire.line };
-          if (timedOut) return { content: `TIMEOUT: no event within ${timeoutSec}s` };
-          return { content: "coord_watch: watch ended with no event" };
+          // The ARM report fires FIRST: the baseline the watch armed on — a pre-existing
+          // BLOCK/verdict or an in-flight run is surfaced IMMEDIATELY (the missed-verdict
+          // case), never withheld for a comment that may never come.
+          const baseline = reports.map((r) => r.line).join("\n");
+          if (fire) return { content: baseline ? `${baseline}\n${fire.line}` : fire.line };
+          if (armFired) return { content: baseline || "coord_watch: armed" };
+          if (timedOut) {
+            return { content: baseline ? `${baseline}\nTIMEOUT: no event within ${timeoutSec}s` : `TIMEOUT: no event within ${timeoutSec}s` };
+          }
+          return { content: baseline || "coord_watch: watch ended with no event" };
         },
       });
     });

@@ -100,7 +100,31 @@ hand-writing the footer:
   (a CLAIM).
 - **`coord_watch`** — a bounded, session-invoked one-shot wait
   (`events`/`timeout`/`stallmin`) that polls the GitHub API NATIVELY and returns the
-  wake line. The BACKGROUND continuous watch stays `pr-watch.ts`'s job.
+  **ARM report** (the baseline it armed on) plus the wake line. The BACKGROUND
+  continuous watch stays `pr-watch.ts`'s job.
+
+**EVENT SEMANTICS — the DEFAULT set carries the verdicts.** The default event set is
+`merged,closed,comment,verdict,stall` (the same vocabulary the shell `gh_watch.sh`
+family uses). It deliberately INCLUDES `comment` and `verdict`: a `charly/pr-validator`
+**BLOCK arrives as a COMMENT** and the run reaching a status is a **VERDICT**, so a
+default of only `merged,closed,stall` would silently never wake on either — the defect
+this default corrects.
+
+- **`verdict` = the watched workflow run in EVERY status** — `QUEUED`/`WAITING`/
+  `IN_PROGRESS`/`RUNNING`/`COMPLETED` — carrying **status + conclusion**; it fires on a
+  run **STATUS TRANSITION** (queued→running→completed), not only on completion. The
+  wake line names the status/conclusion and the run URL:
+  `VERDICT  owner/repo#12  charly/pr-validator  IN_PROGRESS  https://github.com/.../actions/runs/<id>`
+  `VERDICT  owner/repo#12  charly/pr-validator  COMPLETED/success  ...`
+- **`comment`** reads the LATEST comment's first non-blank line and, when the validator
+  posts `## Review — BLOCK` / `## Review — PASS`, carries that parsed verdict in the
+  wake line.
+- **The ARM report** is the FIRST emission per item at arm time: the CURRENT baseline —
+  the latest run's status + conclusion AND the latest review comment's parsed verdict,
+  e.g. `ARM  owner/repo#12  state=open  run=charly/pr-validator/COMPLETED/failure  review=BLOCK  <url>`.
+  It exists precisely so arming on a PR that is ALREADY BLOCKed (or has a run already in
+  flight) wakes IMMEDIATELY with that fact, instead of waiting for a comment that may
+  never come (the "I missed the validation run and the block" case).
 
 Identity (`agent`/`harness`/`model`/`confidence`) defaults from
 `.opencode/coord.conf` (git-ignored; copy `.opencode/coord.conf.example`) then
@@ -258,6 +282,11 @@ recently updated root session in this directory).
 Config: one item per line in `.opencode/pr-watch.items` (`acme/widget#12`; blank lines
 and `#` comments ignored). The shipped file contains only comments, so the plugin is
 **inert until you add an item**. It polls GitHub natively (no `gh_watch.sh`, no
-`marketplace` pin). Plugins load once at startup — **restart** to activate.
+`marketplace` pin) for `comment,merged,closed,verdict` — the default DELTA set INCLUDES
+`verdict`, so a validator BLOCK (a comment) and a run reaching a status both wake the
+session — and delivers the **ARM report** as its FIRST emission per item (the baseline it
+armed on: latest run status+conclusion AND latest review verdict), so arming on an
+already-BLOCKed PR wakes at once. Plugins load once at startup — **restart** to activate.
 `scripts/check-pr-watch.mjs` asserts the delivery primitives are present as CODE
-(comments stripped), so a commented-out or absent call fails the gate.
+(comments stripped) and that the delivered event set carries `comment` + `verdict`, so a
+commented-out or absent call fails the gate.

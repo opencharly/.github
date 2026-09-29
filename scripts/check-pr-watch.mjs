@@ -49,7 +49,7 @@ const eq = (a, b, m) =>
   ok(JSON.stringify(a) === JSON.stringify(b), `${m} (got ${JSON.stringify(a)})`);
 
 const mod = await import(pathToFileURL(pluginPath).href);
-const { parseItems, pickSessionID, lastWakeLine } = mod;
+const { parseItems, pickSessionID, lastWakeLine, WATCH_EVENTS } = mod;
 
 ok(
   mod.default !== null && typeof mod.default === "object" && typeof mod.default.setup === "function",
@@ -61,6 +61,15 @@ ok(
     typeof lastWakeLine === "function",
   "pure helpers parseItems/pickSessionID/lastWakeLine are exported",
 );
+
+// THE FIX: the delivered event set MUST include `comment` (the BLOCK/PASS review) AND
+// `verdict` (the charly/pr-validator run reaching a status) beside the terminal outcomes.
+{
+  const set = new Set(String(WATCH_EVENTS).split(",").map((s) => s.trim()));
+  for (const ev of ["comment", "verdict", "merged", "closed"]) {
+    ok(set.has(ev), `WATCH_EVENTS includes '${ev}' (got ${WATCH_EVENTS})`);
+  }
+}
 
 eq(
   parseItems("acme/widget#12\n\n# comment\n  acme/other#3  \n"),
@@ -119,6 +128,9 @@ for (const needle of [
   // the NATIVE poll engine (lib/watch.ts) — no shell spawn.
   "pollOnce",
   "sleepAbortable",
+  // the ARM report at arm time (the missed-verdict case) — emitted as the FIRST wake.
+  "seedAll",
+  "reports",
 ]) {
   ok(
     !syntheticCode.includes(needle),

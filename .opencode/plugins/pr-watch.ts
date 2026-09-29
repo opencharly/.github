@@ -41,6 +41,8 @@ import {
   sleepAbortable,
   type Item,
   type Snap,
+  type Fire,
+  type ArmReport,
 } from "../lib/watch.ts";
 
 // The ONE shared "last non-empty stdout line" helper (R3) — the same module
@@ -48,8 +50,13 @@ import {
 // check asserts.
 export const lastWakeLine = wakeLine;
 
-/** The watcher event set delivered to the session (delta + terminal outcomes). */
-export const WATCH_EVENTS = "comment,merged,closed";
+/**
+ * The watcher event set delivered to the session. It MUST include `comment` (the
+ * BLOCK/PASS review comment) AND `verdict` (the `charly/pr-validator` run reaching a
+ * status) — omitting either is the defect that let a BLOCK pass silently — beside the
+ * terminal outcomes.
+ */
+export const WATCH_EVENTS = "comment,merged,closed,verdict";
 
 export function parseItems(text: string): string[] {
   return text
@@ -112,8 +119,11 @@ async function loop(dir: string, deliver: (line: string) => Promise<void>) {
   const intervalMs = DEFAULT_INTERVAL_S * 1000;
   const armEpoch = Math.floor(Date.now() / 1000);
   let seeds: Map<string, Snap>;
+  let reports: ArmReport[] = [];
   try {
-    seeds = await seedAll(items, { wf });
+    const seeded = await seedAll(items, { wf, events });
+    seeds = seeded.seeds;
+    reports = seeded.reports;
   } catch (err) {
     if (err instanceof RateLimitedError) {
       warn(rateLimitMessage(err));
@@ -121,6 +131,11 @@ async function loop(dir: string, deliver: (line: string) => Promise<void>) {
     }
     seeds = new Map();
   }
+
+  // The ARM report is the FIRST emission: the baseline the watch armed on — a
+  // pre-existing BLOCK/verdict or an in-flight run is delivered IMMEDIATELY (the
+  // missed-verdict case), so arming on an already-BLOCKed PR wakes the session at once.
+  for (const r of reports) await deliver(r.line);
 
   void (async () => {
     for (;;) {
