@@ -120,6 +120,8 @@ if (mod) {
     topTools,
     VERDICTS,
     DEFAULT_WINDOW_MIN,
+    DEFAULT_LIMIT,
+    DEFAULT_SINCE_MIN,
     ARTIFACT_TAIL,
     LOOP_REPEATS,
     LOOP_TAIL,
@@ -132,6 +134,11 @@ if (mod) {
     runControl,
     KNOWN_TOOLS,
     unknownTools,
+    resolveTarget,
+    resolveLimit,
+    resolveSinceMin,
+    sortByVerdict,
+    collectAnalyses,
   } = mod;
 
   ok(VERDICTS.length === 4 && VERDICTS.includes("WORKING") && VERDICTS.includes("IDLE") && VERDICTS.includes("LOOP") && VERDICTS.includes("DONE"), "VERDICTS is the closed set WORKING/IDLE/LOOP/DONE");
@@ -405,6 +412,39 @@ if (mod) {
       }
       ok(!wrote, `the store handle is READ-ONLY — a write is refused by ${handle.driver}`);
       handle.close();
+
+      // R1: the `all` input the schema advertises is HONOURED (not inert).
+      eq(resolveTarget({}), { mode: "all" }, "resolveTarget: no `session`/`all` ⇒ the whole set");
+      eq(resolveTarget({ session: "all" }), { mode: "all" }, "resolveTarget: `session: all` ⇒ the whole set");
+      eq(resolveTarget({ all: true, session: "ses_x" }), { mode: "all" }, "resolveTarget: `all: true` forces the whole set (overrides `session`)");
+      eq(resolveTarget({ session: "ses_live01" }), { mode: "one", sessionID: "ses_live01" }, "resolveTarget: a ses_… id picks one session");
+      ok("error" in resolveTarget({ all: false }), "resolveTarget: `all: false` without a `session` is refused");
+      eq(resolveTarget({ all: false, session: "ses_live01" }), { mode: "one", sessionID: "ses_live01" }, "resolveTarget: `all: false` + a `session` picks it");
+      ok("error" in resolveTarget({ session: "not-a-session" }), "resolveTarget: a non-ses_ id is refused (never silently scanned)");
+
+      // R3: the ONE shared collector both tool branches call — and limit/sinceMin clamping.
+      ok(resolveLimit({ limit: 100 }) === 50 && resolveLimit({}) === DEFAULT_LIMIT, "resolveLimit clamps `limit` (cap 50, DEFAULT_LIMIT fallback)");
+      ok(resolveSinceMin({ sinceMin: 30 }) === 30 && resolveSinceMin({}) === DEFAULT_SINCE_MIN, "resolveSinceMin honours `sinceMin` (DEFAULT_SINCE_MIN fallback)");
+      {
+        const handle3 = await mod.openReadonly(dbPath);
+        const collected = await collectAnalyses(handle3, { now, windowMin: 15, sinceMin: 60, limit: 5 });
+        handle3.close();
+        ok(collected.length === 1 && collected[0].sessionID === "ses_live01", "collectAnalyses: the shared loop enumerates the real store (ONE helper for agent_progress + agent_control)");
+      }
+      {
+        const aborted = new AbortController();
+        aborted.abort();
+        const handle4 = await mod.openReadonly(dbPath);
+        const none = await collectAnalyses(handle4, { now, windowMin: 15, sinceMin: 60, limit: 5, signal: aborted.signal });
+        handle4.close();
+        ok(none.length === 0, "collectAnalyses: an aborted signal stops the loop promptly (no sessions analyzed)");
+      }
+      {
+        const a = { sessionID: "a", verdict: "DONE" };
+        const b = { sessionID: "b", verdict: "LOOP" };
+        const c = { sessionID: "c", verdict: "WORKING" };
+        eq(sortByVerdict([a, b, c]).map((x) => x.verdict), ["LOOP", "WORKING", "DONE"], "sortByVerdict: LOOP/WORKING/DONE (loudest first, ONE shared comparator)");
+      }
 
       // ── CONTROL (agent_control) ─────────────────────────────────────────────
       ok(

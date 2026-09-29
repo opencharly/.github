@@ -500,7 +500,6 @@ export function classify(a: Analysis, windowMin = DEFAULT_WINDOW_MIN): { verdict
   const turnAge = a.lastTurnAgeMs;
   const eventAge = a.lastEventAgeMs;
   const fresh = (age: number | null) => age !== null && age <= windowMs;
-  const stale = (age: number | null) => age === null || age > windowMs;
   const cadence = a.toolCalls >= 2;
   const recentArtifact = a.recentArtifacts.length > 0;
   const loop = a.loop.isLoop && !recentArtifact;
@@ -659,7 +658,6 @@ export const SQL = {
     "SELECT id, slug, title, parent_id, agent, model, idle_outcome, time_updated FROM session_v2 WHERE time_updated >= ? ORDER BY time_updated DESC LIMIT ?",
   counts:
     "SELECT COUNT(*) AS turns, MIN(time_created) AS first, MAX(time_created) AS last FROM session_message WHERE session_id = ? AND type = 'assistant'",
-  lastEvent: "SELECT MAX(time_created) AS last FROM session_message WHERE session_id = ?",
   tail:
     "SELECT seq, type, time_created, data FROM session_message WHERE session_id = ? ORDER BY seq DESC LIMIT ?",
 };
@@ -667,8 +665,6 @@ export const SQL = {
 /** SQL for the CONTROL half (`list`/`confirm_stopped`) — read-only, like `SQL`. */
 export const CONTROL_SQL = {
   exists: "SELECT 1 AS present FROM session_v2 WHERE id = ? LIMIT 1",
-  turns:
-    "SELECT COUNT(*) AS turns, MAX(time_created) AS last FROM session_message WHERE session_id = ? AND type = 'assistant'",
   children: "SELECT id FROM session_v2 WHERE parent_id = ?",
 };
 
@@ -709,6 +705,58 @@ export async function listSessions(
   return db.all(SQL.recentSessions, since, opts.limit) as SessionRow[];
 }
 
+/** Clamp `limit`/`sinceMin` from a request (`DEFAULT_LIMIT`/`DEFAULT_SINCE_MIN` fallbacks). */
+export function resolveLimit(input: Record<string, any>): number {
+  return typeof input.limit === "number" && input.limit > 0 ? Math.min(input.limit, 50) : DEFAULT_LIMIT;
+}
+export function resolveSinceMin(input: Record<string, any>): number {
+  return typeof input.sinceMin === "number" && input.sinceMin > 0 ? input.sinceMin : DEFAULT_SINCE_MIN;
+}
+
+/**
+ * Resolve the request's target. `all` is HONOURED (the schema advertises it): `all:true`
+ * forces the whole set (ignoring `session`); `all:false` REQUIRES a `session`; absent, the
+ * presence of a non-`all` `session` picks one, else the whole set. Returns a bare error
+ * (callers prefix it with the tool name).
+ */
+export function resolveTarget(
+  input: Record<string, any>,
+): { mode: "all" } | { mode: "one"; sessionID: string } | { error: string } {
+  if (input.all === true) return { mode: "all" };
+  const s = input.session;
+  const isSession = typeof s === "string" && s !== "" && s !== "all";
+  if (input.all === false) {
+    if (!isSession) return { error: "`all:false` requires an explicit `session` id" };
+  }
+  if (!isSession) return { mode: "all" };
+  const id = String(s);
+  if (!/^ses_/.test(id)) return { error: `'${id}' is not a session id (want ses_…)` };
+  return { mode: "one", sessionID: id };
+}
+
+/** Loudest first: LOOP/IDLE (needs attention), then WORKING, then DONE. */
+export const VERDICT_RANK: Record<string, number> = { LOOP: 0, IDLE: 1, WORKING: 2, DONE: 3 };
+export function sortByVerdict(analyses: Analysis[]): Analysis[] {
+  return analyses.sort((x, y) => (VERDICT_RANK[x.verdict] ?? 9) - (VERDICT_RANK[y.verdict] ?? 9));
+}
+
+/**
+ * The ONE "list sessions in the look-back and analyze each" loop, shared by `agent_progress`
+ * (all) and `agent_control` (list). `signal`-aware; stops promptly on abort.
+ */
+export async function collectAnalyses(
+  db: SqliteHandle,
+  opts: { now: number; windowMin: number; sinceMin: number; limit: number; signal?: AbortSignal },
+): Promise<Analysis[]> {
+  const rows = await listSessions(db, { now: opts.now, sinceMin: opts.sinceMin, limit: opts.limit });
+  const out: Analysis[] = [];
+  for (const row of rows) {
+    if (opts.signal?.aborted) break;
+    out.push(await analyzeOne(db, row.id, { now: opts.now, windowMin: opts.windowMin }));
+  }
+  return out;
+}
+
 /**
  * The whole operation: resolve the DB, pick the sessions, analyze each, and render the
  * report. Async and `signal`-aware (an abort between sessions stops promptly). Any
@@ -734,42 +782,29 @@ export async function runProgress(
           `Set OPENCODE_DB to override the path (default: $XDG_DATA_HOME/opencode/opencode.db).`,
       };
     }
-    const onlyAll = input.session === undefined || input.session === null || input.session === "all";
-    if (!onlyAll && typeof input.session !== "string") {
-      return { content: "agent_progress: `session` must be a ses_… id (or `all`)" };
-    }
+    const target = resolveTarget(input);
+    if ("error" in target) return { content: `agent_progress: ${target.error}` };
 
-    const analyses: Analysis[] = [];
-    if (!onlyAll) {
-      if (!/^ses_/.test(String(input.session))) {
-        return { content: `agent_progress: '${input.session}' is not a session id (want ses_…)` };
-      }
+    let analyses: Analysis[];
+    if (target.mode === "one") {
       try {
-        analyses.push(await analyzeOne(db, String(input.session), { now, windowMin }));
+        analyses = [await analyzeOne(db, target.sessionID, { now, windowMin })];
       } catch (err: any) {
         return { content: `agent_progress: ${err?.message ?? String(err)}` };
       }
     } else {
-      const limit =
-        typeof input.limit === "number" && input.limit > 0 ? Math.min(input.limit, 50) : DEFAULT_LIMIT;
-      const sinceMin =
-        typeof input.sinceMin === "number" && input.sinceMin > 0 ? input.sinceMin : DEFAULT_SINCE_MIN;
-      const rows = await listSessions(db, { now, sinceMin, limit });
-      for (const row of rows) {
-        if (ctx.signal?.aborted) return { content: "agent_progress: aborted (session interrupted)" };
-        analyses.push(await analyzeOne(db, row.id, { now, windowMin }));
-      }
+      analyses = await collectAnalyses(db, {
+        now,
+        windowMin,
+        sinceMin: resolveSinceMin(input),
+        limit: resolveLimit(input),
+        signal: ctx.signal,
+      });
+      if (ctx.signal?.aborted) return { content: "agent_progress: aborted (session interrupted)" };
     }
+    sortByVerdict(analyses);
 
-    // Loudest first: LOOP/IDLE (needs attention), then WORKING, then DONE.
-    const rank: Record<string, number> = { LOOP: 0, IDLE: 1, WORKING: 2, DONE: 3 };
-    analyses.sort((x, y) => (rank[x.verdict] ?? 9) - (rank[y.verdict] ?? 9));
-
-    const note = onlyAll
-      ? `all sessions active in the last ${
-          typeof input.sinceMin === "number" && input.sinceMin > 0 ? input.sinceMin : DEFAULT_SINCE_MIN
-        }m`
-      : undefined;
+    const note = target.mode === "all" ? `all sessions active in the last ${resolveSinceMin(input)}m` : undefined;
     return { content: formatReport(analyses, { db: dbPath, driver: db.driver, windowMin, note }) };
   } catch (err: any) {
     return { content: `agent_progress: unexpected error — ${err?.message ?? String(err)}` };
@@ -798,7 +833,8 @@ export function requireExplicitSession(input: Record<string, any>): { sessionID:
 
 /** The turn baseline of a session: count + last-turn time. The evidence `confirm_stopped` checks. */
 export function turnStats(db: SqliteHandle, sessionID: string): { turns: number; lastTurn: number | null } {
-  const row = db.all(CONTROL_SQL.turns, sessionID)[0] as { turns: number; last: number | null } | undefined;
+  // Reuse the monitor's authoritative counts query (ONE counts query — R3).
+  const row = db.all(SQL.counts, sessionID)[0] as { turns: number; first: number | null; last: number | null } | undefined;
   return { turns: Number(row?.turns ?? 0), lastTurn: row?.last == null ? null : Number(row.last) };
 }
 
@@ -896,16 +932,16 @@ export async function runControl(
     }
 
     if (action === "list") {
-      const limit = typeof input.limit === "number" && input.limit > 0 ? Math.min(input.limit, 50) : DEFAULT_LIMIT;
-      const sinceMin = typeof input.sinceMin === "number" && input.sinceMin > 0 ? input.sinceMin : DEFAULT_SINCE_MIN;
-      const rows = await listSessions(db, { now, sinceMin, limit });
-      const analyses: Analysis[] = [];
-      for (const row of rows) {
-        if (ctx?.signal?.aborted) return { content: "agent_control: aborted (session interrupted)" };
-        analyses.push(await analyzeOne(db, row.id, { now, windowMin }));
-      }
-      const rank: Record<string, number> = { LOOP: 0, IDLE: 1, WORKING: 2, DONE: 3 };
-      analyses.sort((x, y) => (rank[x.verdict] ?? 9) - (rank[y.verdict] ?? 9));
+      // ONE shared loop with agent_progress's `all` branch (R3).
+      const analyses = await collectAnalyses(db, {
+        now,
+        windowMin,
+        sinceMin: resolveSinceMin(input),
+        limit: resolveLimit(input),
+        signal: ctx?.signal,
+      });
+      if (ctx?.signal?.aborted) return { content: "agent_control: aborted (session interrupted)" };
+      sortByVerdict(analyses);
       return { content: formatControlList(analyses) };
     }
 
