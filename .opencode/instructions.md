@@ -175,7 +175,8 @@ orchestrator's real question — *what is this subagent actually doing, and how 
 - The verdict mirrors the rulebook model: **WORKING** (recent turns + tool cadence) /
   **IDLE** (no turns past `windowMin` — default 15 — and no artifact) / **LOOP** (the same
   tool+input repeated `≥4`× in the tail, no artifact) / **DONE** (a final report
-  `finish=stop`, no pending action). **Rotate/take over ONLY on** >2 orchestrator re-briefs
+  `finish=stop`, no pending action, **or a landed artifact with the session then quiet**).
+  **Rotate/take over ONLY on** >2 orchestrator re-briefs
   of the same task, idle-past-window with no artifact, or a loop — **never on turn count.**
 - Data source is **VERIFIED**: a **read-only** handle on the opencode store
   (`$XDG_DATA_HOME/opencode/opencode.db`, `OPENCODE_DB` override) — `new Database(path,

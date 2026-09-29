@@ -495,8 +495,9 @@ export function reportStatus(a: Analysis, windowMin = DEFAULT_WINDOW_MIN): "DONE
 /**
  * The classifier. `WORKING` (recent turns + tool cadence) / `IDLE` (no turns past the
  * window and no artifact) / `LOOP` (the same tool+input repeated, no artifact) / `DONE`
- * (a final report, no pending action). A turn-count-heavy-but-recent transcript is
- * WORKING — never stalled — because a turn is NOT a progress signal.
+ * (a final report `finish=stop`, no pending action, OR a RECENT artifact with the session
+ * then quiet). A turn-count-heavy-but-recent transcript is WORKING — never stalled —
+ * because a turn is NOT a progress signal.
  */
 export function classify(a: Analysis, windowMin = DEFAULT_WINDOW_MIN): { verdict: string; reasons: string[] } {
   const reasons: string[] = [];
@@ -1062,7 +1063,8 @@ export default {
           "last tool + its input), artifact hints (PR/merge/tag/push), and a verdict: " +
           "WORKING (recent turns + tool cadence) / IDLE (no turns past the window and no " +
           "artifact) / LOOP (the same tool+input repeated, no artifact) / DONE (a final " +
-          "report, no pending action). Rotate/take over ONLY on: >2 orchestrator " +
+          "report, no pending action, OR a landed artifact with the session then quiet). " +
+          "Rotate/take over ONLY on: >2 orchestrator " +
           "re-briefs, idle-past-window with no artifact, or a loop — NEVER on turn count. " +
           "Reads the opencode store read-only; implemented natively in TypeScript.",
         input: {

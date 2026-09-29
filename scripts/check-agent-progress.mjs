@@ -299,6 +299,25 @@ if (mod) {
     "classify: quiet past the window with a final report + an artifact ⇒ DONE",
   );
 
+  // DONE — a stale session whose ONLY signal is a RECENT artifact (no `finish=stop` final
+  // report). This pins the artifact-completion arm: delete it and the session would fall
+  // through to IDLE while the report prints the artifact — the display/verdict contradiction.
+  // The tool input is the REAL store shape (an object), so the artifact is truly extracted.
+  {
+    const staleArtifactOnly = analyzeSession(
+      session,
+      [
+        user(60, "work"),
+        assistant(40, [tool("shell", { command: "gh pr merge 7" })], "tool-calls"),
+        assistant(35, [text("about to merge")], "tool-calls"),
+      ],
+      { now, windowMin: 15 },
+    );
+    ok(staleArtifactOnly.recentArtifacts.length > 0, "classify fixture: the shell tool input yields a RECENT artifact (real store shape)");
+    eq(staleArtifactOnly.verdict, "DONE", "classify: a stale session with a RECENT artifact and NO final report ⇒ DONE (artifact completion; the display/verdict-reconciling arm)");
+    ok(/landed an artifact/.test(staleArtifactOnly.reasons.join("; ")), "classify: the artifact-completion DONE names the landed artifact");
+  }
+
   // DONE is NOT reached while an action is still pending (a running tool).
   {
     const a = analyzeSession(
