@@ -21,7 +21,15 @@
  *     STALL — and its SEMANTICS (merged/closed are STATE events, firing from the arm
  *     baseline; comment/verdict are DELTA events seeded at arm, so a pre-existing
  *     comment or run never false-fires; stall is a SILENCE alarm keyed on the item's
- *     `updated_at` while it is open+unmerged);
+ *     `updated_at` while it is open+unmerged). `verdict` covers the watched workflow
+ *     run in EVERY status (queued/waiting/in_progress/running/completed) and fires on a
+ *     run STATUS TRANSITION — status + conclusion carried in the wake line — not only
+ *     on completion;
+ *   * the ARM report — the FIRST emission per item at arm time, carrying the CURRENT
+ *     baseline (the latest run's status + conclusion AND the latest review comment's
+ *     parsed BLOCK/PASS verdict). It exists precisely because a pre-existing BLOCK or
+ *     run must be surfaced the moment a watch arms (the "I missed the validation run
+ *     and the block" case), which the DELTA seeding alone can never do;
  *   * the item grammar (`owner/repo#num`, `owner/repo/pull|issues/num`, a full
  *     `https://github.com/...` URL).
  *
@@ -228,7 +236,17 @@ export interface Snap {
   state: string;
   merged: boolean;
   comments: number | null;
+  /** First non-blank line of the LATEST comment/review body ("" when none). */
+  latestComment: string;
+  /** The parsed review verdict of the latest comment — "BLOCK" | "PASS" | "". */
+  reviewVerdict: string;
   verdictId: string;
+  /** The latest watched-workflow run's status, lower-case (queued/waiting/in_progress/
+   *  running/completed/…) — "" when no run exists. NOT only "completed". */
+  verdictStatus: string;
+  /** The latest run's conclusion, lower-case (success/failure/skipped/…) — "" when the
+   *  run has not completed (a queued/running run carries no conclusion yet). */
+  verdictConclusion: string;
   updatedEpoch: number;
   verdictEpoch: number;
   latestCommit: string;
@@ -240,9 +258,50 @@ const toEpoch = (iso: unknown): number => {
   return Number.isFinite(ms) ? Math.floor(ms / 1000) : 0;
 };
 
+/** Normalise a GitHub run status/conclusion to lower-case (null/absent → ""). */
+export function normalizeStatus(v: unknown): string {
+  return String(v ?? "").trim().toLowerCase();
+}
+
+/** The first non-blank (trimmed) line of a body, or "". */
+export function firstNonBlankLine(body: unknown): string {
+  for (const raw of String(body ?? "").split("\n")) {
+    const line = raw.trim();
+    if (line) return line;
+  }
+  return "";
+}
+
+/**
+ * Parse the review verdict from a validator comment body. The validator posts a
+ * `## Review — BLOCK` / `## Review — PASS` heading, so match that heading form FIRST;
+ * a bare leading `BLOCK`/`PASS` is also accepted. The heading-preferring match is
+ * deliberate: the INCONCLUSIVE comment (`## validator INCONCLUSIVE … not a BLOCK`)
+ * carries the word "BLOCK" in prose and MUST NOT be read as a verdict.
+ */
+export function parseReviewVerdict(body: unknown): string {
+  const first = firstNonBlankLine(body);
+  if (!first) return "";
+  const m =
+    /^#{1,6}\s*Review\b[^A-Za-z0-9]{0,4}(BLOCK|PASS)\b/i.exec(first) ??
+    /^(BLOCK|PASS)\b/i.exec(first);
+  return m ? m[1].toUpperCase() : "";
+}
+
 /** A stable per-item fingerprint — a delta event is only considered when it changes. */
 export function fingerprint(s: Snap): string {
-  return [s.state, s.merged ? 1 : 0, s.updatedEpoch, s.comments ?? "", s.verdictId, s.latestCommit].join("|");
+  return [
+    s.state,
+    s.merged ? 1 : 0,
+    s.updatedEpoch,
+    s.comments ?? "",
+    s.verdictId,
+    s.verdictStatus,
+    s.verdictConclusion,
+    s.reviewVerdict,
+    s.latestComment,
+    s.latestCommit,
+  ].join("|");
 }
 
 /** A blank observation (state UNKNOWN) — used when a field is absent. */
@@ -252,7 +311,11 @@ function emptySnap(): Snap {
     state: "unknown",
     merged: false,
     comments: null,
+    latestComment: "",
+    reviewVerdict: "",
     verdictId: "",
+    verdictStatus: "",
+    verdictConclusion: "",
     updatedEpoch: nowEpoch(),
     verdictEpoch: 0,
     latestCommit: "",
@@ -283,10 +346,11 @@ export async function batchSnapshot(
       `i${i}: repository(owner: $o${i}, name: $r${i}) {
         pullRequest(number: $n${i}) {
           state merged updatedAt
+          comments(last: 1) { totalCount nodes { body createdAt } }
           commits(last: 1) { nodes { commit { oid committedDate
-            checkSuites(first: 50) { nodes { workflowRun { databaseId workflow { name } status conclusion updatedAt } } } } } }
+            checkSuites(first: 50) { nodes { status conclusion workflowRun { databaseId workflow { name } updatedAt } } } } } }
         }
-        issue(number: $n${i}) { state updatedAt comments { totalCount } }
+        issue(number: $n${i}) { state updatedAt comments(last: 1) { totalCount nodes { body createdAt } } }
       }`,
     );
   });
@@ -338,22 +402,37 @@ export async function batchSnapshot(
       s.updatedEpoch = toEpoch(pr.updatedAt) || s.updatedEpoch;
       const commit = pr.commits?.nodes?.[0]?.commit;
       if (commit?.oid) s.latestCommit = String(commit.oid);
-      // verdict = the newest COMPLETED run of the watched workflow in the latest commit's check suites.
-      const runs: any[] = [];
+      // The latest comment/review — its body yields the parsed BLOCK/PASS verdict.
+      const pc = pr.comments?.nodes?.at(-1)?.body;
+      s.latestComment = firstNonBlankLine(pc);
+      s.reviewVerdict = parseReviewVerdict(pc);
+      const pcc = pr.comments?.totalCount;
+      if (typeof pcc === "number") s.comments = pcc;
+      // verdict = the newest run of the watched workflow in the latest commit's check
+      // suites, in EVERY status (queued/waiting/in_progress/running/completed) — a
+      // queued/running run is OBSERVED, never filtered out. The run's status/conclusion
+      // live on the CheckSuite (`WorkflowRun.status` is NOT a GraphQL field); the run's
+      // own `updatedAt` orders them.
+      const runs: Array<{ suite: any; run: any }> = [];
       for (const suite of commit?.checkSuites?.nodes ?? []) {
         const run = suite?.workflowRun;
-        if (run && run?.workflow?.name === opts.wf && run?.status === "completed") runs.push(run);
+        if (run && run?.workflow?.name === opts.wf) runs.push({ suite, run });
       }
-      runs.sort((a, b) => toEpoch(b.updatedAt) - toEpoch(a.updatedAt));
+      runs.sort((a, b) => toEpoch(b.run.updatedAt) - toEpoch(a.run.updatedAt));
       if (runs[0]) {
-        s.verdictId = String(runs[0].databaseId);
-        s.verdictEpoch = toEpoch(runs[0].updatedAt);
+        s.verdictId = String(runs[0].run.databaseId);
+        s.verdictStatus = normalizeStatus(runs[0].suite?.status);
+        s.verdictConclusion = normalizeStatus(runs[0].suite?.conclusion);
+        s.verdictEpoch = toEpoch(runs[0].run.updatedAt);
       }
     } else if (issue) {
       s.state = String(issue.state ?? "unknown").toLowerCase();
       s.updatedEpoch = toEpoch(issue.updatedAt) || s.updatedEpoch;
       const cc = issue.comments?.totalCount;
       if (typeof cc === "number") s.comments = cc;
+      const ic = issue.comments?.nodes?.at(-1)?.body;
+      s.latestComment = firstNonBlankLine(ic);
+      s.reviewVerdict = parseReviewVerdict(ic);
     }
     snaps.set(it.key, s);
   });
@@ -376,6 +455,11 @@ export interface EventOptions {
  * The order (merged, closed, comment, verdict, stall) matches `gh_watch.sh` so a
  * multi-condition item resolves identically in both harnesses. Returns the event
  * name, or `null` when nothing fires.
+ *
+ * `verdict` fires on a run STATUS TRANSITION — a NEW run appearing (id change,
+ * gated to be genuinely post-arm), or the SAME run advancing status/conclusion
+ * (queued→running→completed). It is NOT limited to completion, so a queued or
+ * in-progress validator run wakes the watch.
  */
 export function watchEvent(
   seed: Snap,
@@ -393,13 +477,7 @@ export function watchEvent(
   ) {
     return "comment";
   }
-  if (
-    events.has("verdict") &&
-    cur.verdictId !== "" &&
-    cur.verdictId !== seed.verdictId &&
-    cur.verdictEpoch > 0 &&
-    cur.verdictEpoch >= opts.armEpoch
-  ) {
+  if (events.has("verdict") && cur.verdictId !== "" && verdictTransitioned(seed, cur, opts.armEpoch)) {
     return "verdict";
   }
   // stall requires an OBSERVED open state — never alarm on an unknown state.
@@ -416,7 +494,60 @@ export function watchEvent(
   return null;
 }
 
-/** The wake line for a fired event, byte-compatible with `gh_watch.sh`'s stdout. */
+/**
+ * Whether the watched-workflow run transitioned between `seed` and `cur`. A NEW run id
+ * must be genuinely new (completed/updated at/after arm) so a pre-existing OLDER run
+ * never false-fires on the first poll after seeding; the SAME run firing is inherently
+ * post-arm (it was observed at arm) and fires on a status or conclusion change.
+ */
+export function verdictTransitioned(seed: Snap, cur: Snap, armEpoch: number): boolean {
+  if (cur.verdictId === "") return false;
+  if (cur.verdictId !== seed.verdictId) {
+    return cur.verdictEpoch > 0 && cur.verdictEpoch >= armEpoch;
+  }
+  return cur.verdictStatus !== seed.verdictStatus || cur.verdictConclusion !== seed.verdictConclusion;
+}
+
+/** `STATUS` or `STATUS/conclusion` for a run — "" when no run is observed. */
+export function runState(snap: Snap): string {
+  if (!snap.verdictStatus) return "";
+  const status = snap.verdictStatus.toUpperCase();
+  return snap.verdictConclusion ? `${status}/${snap.verdictConclusion}` : status;
+}
+
+/** Whether the armed event set carries a DELTA event whose pre-arm state could be missed. */
+export function armReportEnabled(events: Set<string>): boolean {
+  return events.has("comment") || events.has("verdict");
+}
+
+/**
+ * The STATE event (merged/closed/stall) already in force for an item AT ARM, or null.
+ * A state event fires from the arm baseline by design (an already-merged PR arming
+ * `merged` wakes immediately), so it must resolve BEFORE the informational ARM report —
+ * otherwise an already-merged item with a pre-existing BLOCK would re-emit its baseline
+ * and never report MERGED. Seed is passed as `cur` because `watchEvent` keys STATE events
+ * on the observation alone (delta events cannot fire from `seed === cur`).
+ */
+export function armStateFire(
+  items: Item[],
+  seeds: Map<string, Snap>,
+  events: Set<string>,
+  opts: { armEpoch: number; nowEpoch: number; stallMin: number; wf: string },
+): Fire | null {
+  for (const it of items) {
+    const snap = seeds.get(it.key);
+    if (!snap) continue;
+    const ev = watchEvent(snap, snap, events, opts);
+    if (ev) {
+      return { item: it, event: ev, seed: snap, snap, line: formatWake(it, ev, snap, snap, opts) };
+    }
+  }
+  return null;
+}
+
+/**
+ * The wake line for a fired event, byte-compatible with `gh_watch.sh`'s stdout.
+ */
 export function formatWake(
   it: Item,
   event: WatchEventName,
@@ -430,16 +561,46 @@ export function formatWake(
       return `MERGED   ${it.key}  (unblocked)`;
     case "closed":
       return `CLOSED   ${it.key}  closed without merging — find its successor`;
-    case "comment":
-      return `COMMENT  ${it.key}  new comment (${seed.comments} -> ${cur.comments})  ${url}/${
+    case "comment": {
+      const verdict = cur.reviewVerdict ? `  ${cur.reviewVerdict}` : "";
+      return `COMMENT  ${it.key}  new comment (${seed.comments} -> ${cur.comments})${verdict}  ${url}/${
         cur.isPr ? "pull" : "issues"
       }/${it.num}`;
+    }
     case "verdict":
-      return `VERDICT  ${it.key}  new ${opts.wf} run ${cur.verdictId}  ${url}/actions/runs/${cur.verdictId}`;
+      return `VERDICT  ${it.key}  ${opts.wf}  ${runState(cur) || "UNKNOWN"}  ${url}/actions/runs/${cur.verdictId}`;
     case "stall":
       return `STALL    ${it.key}  no progress for ${opts.stallMin}m (open, unmerged) — takeover candidate`;
   }
   return "";
+}
+
+/**
+ * The ARM report for one item — the CURRENT baseline the watch armed on: the latest
+ * watched-workflow run's status/conclusion (every status, not only completed) AND the
+ * latest review comment's parsed verdict. Emitted as the FIRST line for the item when a
+ * delta-bearing watch arms, so a PR that is ALREADY BLOCKed (or already running a
+ * validator) wakes immediately with that fact rather than waiting for a new comment.
+ */
+export function armReport(it: Item, cur: Snap, opts: { wf: string }): string {
+  const url = `https://github.com/${it.owner}/${it.repo}/${cur.isPr ? "pull" : "issues"}/${it.num}`;
+  const state = cur.merged ? "merged" : cur.state || "unknown";
+  const run = runState(cur) || "none";
+  const review = cur.reviewVerdict || "none";
+  return `ARM      ${it.key}  state=${state}  run=${opts.wf}/${run}  review=${review}  ${url}`;
+}
+
+/**
+ * Whether an arm baseline is ACTIONABLE — the "I missed the validation run and the
+ * block" case the delta seeding would otherwise hide: a BLOCK review verdict already
+ * present, or a watched-workflow run already in flight (queued/waiting/in_progress/
+ * running). Arming into this wakes IMMEDIATELY with the ARM baseline instead of waiting
+ * for a new comment. A mere PASS is REPORTED in the baseline but is not actionable
+ * enough to short-circuit the wait.
+ */
+export function armNotable(snap: Snap): boolean {
+  if (snap.reviewVerdict === "BLOCK") return true;
+  return snap.verdictStatus !== "" && snap.verdictStatus !== "completed";
 }
 
 /** A fired event plus the seed/observation that produced it. */
@@ -448,6 +609,14 @@ export interface Fire {
   event: WatchEventName;
   line: string;
   seed: Snap;
+  snap: Snap;
+}
+
+/** The ARM baseline report for one item — the state a watch armed on (not an event). */
+export interface ArmReport {
+  item: Item;
+  /** The CURRENT baseline line: latest run status+conclusion AND latest review verdict. */
+  line: string;
   snap: Snap;
 }
 
@@ -519,13 +688,27 @@ export async function pollOnce(
   return { fire, rateRemaining: rate.remaining, rateResetAt: rate.resetAt, skipped };
 }
 
-/** Seed the baseline for every item (ONE batched request; no fire on seed). */
+/**
+ * Seed the ARM baseline for every item (ONE batched request; no delta fire on seed) and,
+ * when the armed event set carries a DELTA event (`comment`/`verdict`), build the ARM
+ * report for each item — the CURRENT baseline that a pre-existing BLOCK or run would
+ * otherwise be missed behind. Callers deliver `reports` as the FIRST emission per item,
+ * so arming on an already-BLOCKed PR wakes immediately with that fact.
+ */
 export async function seedAll(
   items: Item[],
-  opts: { wf: string; signal?: AbortSignal },
-): Promise<Map<string, Snap>> {
+  opts: { wf: string; signal?: AbortSignal; events?: Set<string> },
+): Promise<{ seeds: Map<string, Snap>; reports: ArmReport[] }> {
   const { snaps } = await batchSnapshot(items, opts);
-  return snaps;
+  const reports: ArmReport[] = [];
+  if (opts.events && armReportEnabled(opts.events)) {
+    for (const it of items) {
+      const snap = snaps.get(it.key);
+      if (!snap) continue;
+      reports.push({ item: it, line: armReport(it, snap, { wf: opts.wf }), snap });
+    }
+  }
+  return { seeds: snaps, reports };
 }
 
 /** A `setTimeout` that resolves early (without throwing) when `signal` aborts. */
