@@ -31,12 +31,15 @@ on:
 # already there). A PLAIN per-repo workflow with the same `types:` DOES fire on those events,
 # so the event is delivered — the required-workflow trigger path simply does not act on
 # non-default activity types. A body-only fix after the head was pushed is therefore cleared
-# MANUALLY by re-running the EXISTING failed run — `gh run rerun <run-id>` (find it with
-# `gh run list --repo <r> --json databaseId,headSha,conclusion`): a re-run reuses the SAME
-# GITHUB_SHA and updates THAT run's check run IN PLACE — no duplicate same-name check run, no
-# POISON. (The `rerun`-LABEL sweep that once automated this was RETIRED: adding the label for
-# any reason — e.g. after a comment — re-ran the gate without a body change. `gh run rerun` is
-# the ONE body-fix path now, and only a human/agent who actually edited the body runs it.)
+# MANUALLY by re-running the EXISTING failed run through the REST API —
+# `gh api -X POST repos/<owner>/<repo>/actions/runs/<run-id>/rerun` (find it with
+# `gh run list --repo <r> --json databaseId,headSha,conclusion`). NOT `gh run rerun`: gh
+# resolves the run's workflow against the target repo, 404s on THIS org-required workflow and
+# exits 1 without re-running. The re-run is a new attempt on the SAME GITHUB_SHA whose newer
+# check run supersedes the failure. (The `rerun`-LABEL sweep that once automated this was
+# RETIRED: adding the label for any reason — e.g. after a comment — re-ran the gate without a
+# body change. The REST re-run is the ONE body-fix path now, and only a human/agent who
+# actually edited the body runs it.)
 
 # ONE run per PR: a re-dispatch/push cancels the in-flight run, so the head can never
 # carry duplicate same-name `validate / validate` check runs (a duplicate FAILED run
