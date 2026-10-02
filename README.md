@@ -117,16 +117,20 @@ copy inherits the files here — so a change lands **once**, not in every repo.
   fixture that pins the block-scalar-preservation rule), and the governance-reconcile gate, so
   every cutover script is exercised on every `.github` PR. Coverage that never runs
   enforces nothing.
-- **Body-only fix after a push — MANUAL (`gh run rerun`).** A REQUIRED workflow acts ONLY on
+- **Body-only fix after a push — MANUAL (the REST re-run).** A REQUIRED workflow acts ONLY on
   the default push-driven `pull_request` types and IGNORES `on.types` — MEASURED *and* confirmed
   by the GitHub docs ("Troubleshooting rules": ruleset workflows ignore `branches`/`paths`/
   `types`; they run only on the default activity types `opened, synchronize, reopened`), so a
   body edit does NOT fire it, even with `edited` listed. A corrected PR body is therefore
   cleared by explicitly re-running the EXISTING failed `charly/pr-validator` run:
-  **`gh run rerun <run-id>`** — find the run with `gh run list --repo <owner>/<repo> --json
-  databaseId,headSha,conclusion`. A re-run reuses the SAME `GITHUB_SHA` and updates THAT run's
-  `validate / validate` check run IN PLACE (no duplicate same-name check run), so it clears the
-  POISON state without an empty re-freeze commit. There is **no automatic `rerun`-label channel**
+  **`gh api -X POST repos/<owner>/<repo>/actions/runs/<run-id>/rerun`** — find the run with
+  `gh run list --repo <owner>/<repo> --json databaseId,headSha,conclusion`. Not `gh run rerun`:
+  this workflow is defined HERE, and gh (measured on 2.100.0) resolves a run's workflow against
+  the TARGET repo, gets `HTTP 404 … /actions/workflows/<id>` and exits 1 without re-running
+  anything (opencharly/layer-charly-internals#71). The re-run is a new attempt on the SAME
+  `GITHUB_SHA` with a NEW `validate / validate` check run; the merge gate reads the newest check
+  run per name, so a passing re-run supersedes the failure without an empty re-freeze commit
+  (measured on opencharly/docs#142). There is **no automatic `rerun`-label channel**
   any more: the `rerun` label + scheduled sweep was RETIRED because a label added for any reason
   — including a comment — re-ran the gate without a body change.
 
