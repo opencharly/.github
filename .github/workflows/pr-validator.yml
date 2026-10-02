@@ -740,6 +740,15 @@ jobs:
           AI_REVIEW_MODEL: ${{ vars.AI_REVIEW_MODEL }}
           AI_REVIEW_BASE_URL: ${{ vars.AI_REVIEW_BASE_URL }}
           ATTEMPT_TIMEOUT: ${{ vars.AI_REVIEW_ATTEMPT_TIMEOUT }}
+          # The abort evidence — which runner this job landed on, and whether the review
+          # step ever ran. Measured live (opencharly/.github#158): one head's run on
+          # `charly-githubrunner-no-4` executed 14 steps in 2m42s and produced an EMPTY
+          # manifest (no `review.log`, empty `review_rc`), while every run on `-no-1` ran
+          # 15 steps and produced 1330-1917 lines of review. This artifact is the only
+          # machine-readable output for this ruleset workflow (`gh run view`/`gh run
+          # rerun` 404 on it), so it must carry the fields that name an early abort.
+          RUNNER_NAME: ${{ runner.name }}
+          REVIEW_OUTCOME: ${{ steps.review.outcome }}
         run: |
           D="${RUNNER_TEMP}/validator-evidence"
           mkdir -p "$D"
@@ -761,6 +770,8 @@ jobs:
             echo "vars_ai_review_model=${AI_REVIEW_MODEL:-<unset>}"
             echo "vars_ai_review_base_url=${AI_REVIEW_BASE_URL:-<unset>}"
             echo "vars_ai_review_attempt_timeout=${ATTEMPT_TIMEOUT:-<unset>}"
+            echo "runner_name=${RUNNER_NAME:-<unset>}"
+            echo "step_outcome_review=${REVIEW_OUTCOME:-<unset>}"
           } > "$D/manifest.txt"
           for f in /tmp/review.log /tmp/review.txt /tmp/review.untrusted.txt; do
             b=$(basename "$f")
@@ -780,6 +791,8 @@ jobs:
               # not found"). Single quotes cannot be used because these lines expand ${VAR}.
               echo "| review exit code | \`${REVIEW_RC:-n/a}\` |"
               echo "| provider HTTP error | \`${PROVIDER_ERROR:-none}\` |"
+              echo "| runner | \`${RUNNER_NAME:-n/a}\` |"
+              echo "| step \`Run the review engine\` | \`${REVIEW_OUTCOME:-n/a}\` |"
               echo "| class inputs | provider_unanswered=\`${PROVIDER_UNANSWERED:-}\` engine_defective=\`${ENGINE_DEFECTIVE:-}\` discarded=\`${DISCARDED_VERDICT:-}\` |"
               echo "| provider / model / base_url | \`${AI_REVIEW_PROVIDER:-<unset>}\` / \`${AI_REVIEW_MODEL:-<unset>}\` / \`${AI_REVIEW_BASE_URL:-<unset>}\` |"
               echo "| attempt-cap var | \`${ATTEMPT_TIMEOUT:-<unset>}\` |"
