@@ -792,7 +792,7 @@ jobs:
               echo "| review exit code | \`${REVIEW_RC:-n/a}\` |"
               echo "| provider HTTP error | \`${PROVIDER_ERROR:-none}\` |"
               echo "| runner | \`${RUNNER_NAME:-n/a}\` |"
-              echo "| step `Run the review engine` | \`${REVIEW_OUTCOME:-n/a}\` |"
+              echo "| step \`Run the review engine\` | \`${REVIEW_OUTCOME:-n/a}\` |"
               echo "| class inputs | provider_unanswered=\`${PROVIDER_UNANSWERED:-}\` engine_defective=\`${ENGINE_DEFECTIVE:-}\` discarded=\`${DISCARDED_VERDICT:-}\` |"
               echo "| provider / model / base_url | \`${AI_REVIEW_PROVIDER:-<unset>}\` / \`${AI_REVIEW_MODEL:-<unset>}\` / \`${AI_REVIEW_BASE_URL:-<unset>}\` |"
               echo "| attempt-cap var | \`${ATTEMPT_TIMEOUT:-<unset>}\` |"
