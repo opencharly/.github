@@ -34,82 +34,46 @@
 #                   never merge).
 #   AMBIGUOUS    -> exit 2 — mixed PASS+BLOCK lines in one review, exit 0.
 #
-# RCA 2026-09-19 (MEASURED; supersedes the 2026-09-12 "awaiting headers" and the
-# earlier 2026-09-19 "5-minute workflow cap" narratives, BOTH deleted in this PR
-# per R5 — no superseded narrative is retained).
+# GENERATION BOUNDS — how a review stays inside the job.
+# deepseek-v4.1-flash is a REASONING model: nearly all of a review's output is
+# reasoning, and its length grows with the PR context — a long review is a
+# GENERATION-LENGTH problem, not a scheduling one. The bounds are engine knobs
+# (opencharly/plugin-review) that this workflow forwards from org vars, and the
+# run's own `request —` debug line reports the values in force (the emitted
+# INCONCLUSIVE notice quotes it). THIS COMMENT NAMES NO VALUE, which would drift;
+# read them with `gh variable get <NAME> --org opencharly`.
+#   * AI_REVIEW_REASONING_EFFORT — the thinking depth. It must STAY SET to a
+#     non-empty value until opencharly/plugin-review#36 is welded into the org
+#     pin: this workflow forwards an UNSET var as '' (below), and the pinned engine
+#     reads THAT ONE knob as "send no reasoning_effort", so the provider applies
+#     its own, unbounded, default instead of the declared `high`.
+#   * AI_REVIEW_MAX_TOKENS — the shared reasoning+answer budget (unset: the
+#     engine default, 262144).
+#   * AI_REVIEW_ATTEMPT_TIMEOUT — the whole-request cap on the ONE model call
+#     (unset: the engine default, 15m) — and AI_REVIEW_STREAM_IDLE_TIMEOUT, the
+#     silence bound between streamed chunks (unset: 3m).
+# A cap only DETECTS a generation that is too long; the effort and the token
+# budget BOUND it. Raising a cap never fixes an unbounded generation (R4).
 #
-# Two symptoms, one root cause:
-#   13m49s runs      -> "turn request attempt N/3 failed: LLM request exceeded
-#                        the 5m0s whole-request deadline: context deadline exceeded"
-#   empty reviews    -> "turn 2: final content len=0" (`verdict_lines=0`)
+# THE ACTIVE ENGINE is whatever the org pin vars.CHARLY_VERSION welds — read it
+# with `gh variable get CHARLY_VERSION --org opencharly`; this comment names no version,
+# because a literal here would drift the moment the pin moves.
+# There is NO built-in fallback TAG: ensure-charly uses vars.CHARLY_VERSION verbatim
+# (TAG="$CHARLY_VERSION"; it FAILS LOUD, exit 3, when the pin is unset or invisible) and
+# replaces any on-PATH charly whose version differs from the pin.
 #
-# ROOT CAUSE: the review engine sent NO generation bound — no `reasoning_effort`
-# and no `max_tokens` — and deepseek-v4.1-flash is a REASONING model. Measured
-# against the REAL validator context (28 KB rulebook + 79 KB PR thread + 120 KB
-# diff), the unbounded request generated 1.75 MB of reasoning over 786 s before
-# answering. A whole-request cap kills that mid-generation (the retry re-sends
-# it: two 5m stalls); a cap set too tight instead truncates the reasoning into an
-# EMPTY completion. The cap did not CAUSE the defect — an unbounded generation
-# did — which is why raising the cap only moves the symptom.
-#
-# THE FIX, split by owner:
-#   * engine (opencharly/plugin-review#10): the runaway was an UNBOUNDED
-#     generation — the tool loop deleted in plugin-review v2026.264.1425 is the
-#     fix (the model is given the whole PR in ONE message, no fragmented
-#     reasoning). The engine then defaults to `reasoning_effort: high` +
-#     `max_tokens: 262144`, which is the intended quality default.
-#   * this workflow: pass the engine's bounds through from org vars
-#     (AI_REVIEW_REASONING_EFFORT, AI_REVIEW_MAX_TOKENS) when an operator sets
-#     them, pass the stream-idle bound, and leave the whole-request deadline
-#     EMPTY so the engine default applies. No org var is set today, so the gate
-#     runs at the engine default HIGH — measured on the pinned fixed engine:
-#     a small PR returns a verdict in ~70 s, a +370/-108 PR in ~285 s.
-#
-# (A short-lived mitigation set AI_REVIEW_REASONING_EFFORT=low +
-# AI_REVIEW_MAX_TOKENS=65536 during the pre-fix runaway; it was also
-# visibility=private, so every public repo ignored it and ran at HIGH anyway.
-# Both vars are DELETED now that the engine is fixed — R5.)
-#
-# ACTIVE (verified against the pinned bundle with `strings`, never asserted):
-#   * The org pin `vars.CHARLY_VERSION = v2026.267.0045` welds
-#     `plugin-review@v2026.266.1944`. In that bundled plugin, `strings` finds the
-#     generation/idle/context knobs this workflow passes —
-#     AI_REVIEW_STREAM_IDLE_TIMEOUT, AI_REVIEW_TOOL_RESULT_MAX_BYTES,
-#     AI_REVIEW_ATTEMPT_TIMEOUT, AI_REVIEW_MAX_ATTEMPTS,
-#     AI_REVIEW_REASONING_EFFORT, AI_REVIEW_MAX_TOKENS, AI_REVIEW_CONTEXT_TOKENS,
-#     AI_REVIEW_CONTEXT_MARGIN, AI_REVIEW_SESSION_ID and AI_REVIEW_TEMPERATURE —
-#     so passing them through is effective, not inert.
-#   * The sampling/penalty/stop/prompt knobs this workflow ALSO forwards
-#     (AI_REVIEW_TOP_P, _FREQUENCY_PENALTY, _PRESENCE_PENALTY,
-#     _STOP, _PROMPT_EXTRA, _POST_COMMENT) are ALSO present in the org pin's
-#     welded plugin (verified with `strings`: each has a hit). Passing them is
-#     effective today, not inert.
-#   * There is NO built-in fallback TAG: ensure-charly uses vars.CHARLY_VERSION
-#     verbatim (it FAILS LOUD, exit 3, when the pin is unset/invisible), and
-#     verifies any on-PATH charly against the pin — downloading the pinned
-#     release when they differ. So the ACTIVE engine is always the org pin.
-#
-# No non-streaming / whole-generation RCA survives in this workflow (R5): the
-# superseded 2026-09-12 narrative is deleted, not retained as history.
-#
-
-# This workflow still retries NOTHING in-job (R4): a run that produced no verdict
-# is a class to REPORT, not a flake to paper over. The runner image stays
+# This workflow retries NOTHING in-job (R4): a run that produced no verdict is a
+# class to REPORT, not a flake to paper over. The runner image stays
 # operator-selectable via vars.REVIEW_RUNNER_LABEL (runs-on: below).
 #
-# STRUCTURAL ANSWER (this workflow): classify a provider-unanswered run as
-# INCONCLUSIVE, report it plainly on the PR, and keep the required check RED, so
-# a run that produced no verdict can neither silently pass code nor be mistaken
-# for a code finding. The classification consumes plugin-review's explicit terminal marker,
-# carried by the pinned charly release below. The marker is THREE ADJACENT
-# STRING CONSTANTS in the bundled plugin-review binary — `strings` reports
-# each one verbatim, and the exact commands + their full output are in this
-# PR's body:
-#   1. "inconclusive: all %d attempts timed out "
-#   2. " the LLM provider did not respond within the attempt timeout (provider unanswered); this is NOT a review verdict "
-#   3. " re-run the gate"
-# The runtime message is 1 + 2 + 3 (the header states this so the pin's claim is
-# checkable against the published asset, never taken on trust).
+# STRUCTURAL ANSWER (this workflow): classify a verdict-less run as INCONCLUSIVE,
+# report it plainly on the PR, and keep the required check RED, so it can neither
+# pass code nor be mistaken for a code finding. The class comes from the engine's
+# OWN terminal line (`inconclusive: …`, plugin-review classify()), which names one
+# of three classes — the whole-request cap, an empty completion (the token budget
+# spent on reasoning before any answer), or a provider that stopped answering —
+# and the emitted comment quotes that line and the engine's `request —` line as
+# MEASURED in the run, never a canned narrative (opencharly/.github#133).
 # The review TEXT is still NEVER routed through $GITHUB_OUTPUT (see below).
 #
 # T4 — THIS FILE IS THE ORG-WIDE MERGE GUARDRAIL. A change to it requires
@@ -222,7 +186,7 @@ jobs:
             exit 3
           fi
           TAG="$CHARLY_VERSION"
-          WANT="${TAG#v}"   # the pin tag minus its leading 'v', e.g. v2026.267.0045 -> 2026.267.0045
+          WANT="${TAG#v}"   # the pin tag minus its leading 'v': v<CalVer> -> <CalVer>
           if command -v charly >/dev/null 2>&1; then
             HAVE="$(charly version 2>/dev/null | grep -oE '[0-9]{4}\.[0-9]{3}\.[0-9]{4}' | head -1)"
             if [ "$HAVE" = "$WANT" ]; then
@@ -265,36 +229,16 @@ jobs:
           AI_REVIEW_PROVIDER: ${{ inputs.ai_review_provider || vars.AI_REVIEW_PROVIDER }}
           AI_REVIEW_MODEL:     ${{ inputs.ai_review_model || vars.AI_REVIEW_MODEL }}
           AI_REVIEW_BASE_URL:  ${{ inputs.ai_review_base_url || vars.AI_REVIEW_BASE_URL }}
-          AI_REVIEW_MAX_TURNS: ${{ vars.AI_REVIEW_MAX_TURNS || '20' }}
           # The engine STREAMS. The meaningful bound is SILENCE between chunks
           # (the idle bound), which this workflow now passes through; the
           # whole-request deadline is left UNSET so the engine's own generous
           # default applies unless an org explicitly overrides it.
           #
-          # The PRIMARY cause of the ~14m runs (run 35451451001) was the engine's
-          # unbounded reasoning generation (owner: opencharly/plugin-review#10);
-          # the hardcoded 5m whole-request cap HERE was the amplifier — it killed
-          # a progressing generation mid-flight and the per-turn retry re-sent the
-          # same request. Removing the cap stops the amplification; bounding the
-          # generation (the engine PR) removes the cause. A progressing generation
-          # must never be cut off; only a SILENT one should fail — which is what
-          # the idle bound is for.
-          # ACTIVE on the org pin v2026.267.0045 (its welded plugin-review has
-          # `strings` hits for all three knobs — evidence in the body).
-          # A DEFINED-EMPTY var is treated as UNSET by that engine: getenvAny
-          # (candy/plugin-review/parse.go) returns "" for any env whose value is
-          # "", and every knob caller guards with `if v := getenvAny(…); v != ""`.
-          # So `|| ''` means "no override", NOT "parse 0".
-          #
-          # Empty therefore selects the ENGINE default, which is NOT "no cap":
-          # newLLMClient maps `total <= 0` to defaultAttemptTimeout = 15 * time.Minute
-          # (idle default 3 * time.Minute; source excerpt in the body). That is a
-          # PER-TURN cap inside the turn loop (up to AI_REVIEW_MAX_TURNS turns), so
-          # it is NOT bounded by this job's timeout-minutes: 20 wall clock — the
-          # wall clock can be reached across several turns without any single turn
-          # exceeding 15 m. The per-turn bounds (idle silence, and the engine's
-          # bounded generation) are what keep a run short; the job wall clock is
-          # the last-resort backstop, not a per-turn ceiling.
+          # An org var left UNSET is forwarded as '' (`|| ''`). For the idle
+          # bound and the whole-request cap the pinned engine treats '' as unset and
+          # applies its default (idle 3m, cap 15m on the ONE model call — the engine
+          # makes a single call, there is no turn loop). The job's timeout-minutes
+          # wall clock is the last-resort backstop above that cap.
           AI_REVIEW_STREAM_IDLE_TIMEOUT: ${{ vars.AI_REVIEW_STREAM_IDLE_TIMEOUT || '' }}
           AI_REVIEW_ATTEMPT_TIMEOUT: ${{ vars.AI_REVIEW_ATTEMPT_TIMEOUT || '' }}
           # SAMPLING (vendor-recommended for deepseek-v4.1-flash: temp=1.0,
@@ -323,14 +267,12 @@ jobs:
           # "no override", never "empty set".
           AI_REVIEW_MAINTAINER: ${{ vars.AI_REVIEW_MAINTAINER || '' }}
           AI_REVIEW_POST_COMMENT: ${{ vars.AI_REVIEW_POST_COMMENT || '' }}
-          AI_REVIEW_TOOL_RESULT_MAX_BYTES: ${{ vars.AI_REVIEW_TOOL_RESULT_MAX_BYTES || '' }}
-          # The GENERATION bounds (the measured root-cause fix, owned by the
-          # engine). ACTIVE on the org pin v2026.267.0045, whose welded
-          # plugin-review reads both (verified with `strings`). Empty means "use
-          # the engine default": high thinking plus a max_tokens budget sized
-          # above what thinking consumes — the combination measured to return a
-          # verdict in tens of seconds instead of the old 13-minute run. An
-          # operator may override either without a rebuild.
+          # The GENERATION bounds (owned by the engine). An empty MAX_TOKENS is the
+          # engine default (262144). An empty REASONING_EFFORT is NOT, on the
+          # pinned engine: it sends no reasoning_effort at all — which is why the
+          # org var is SET to `high` (see the header; opencharly/plugin-review#36
+          # makes empty mean the default). An operator may override either
+          # without a rebuild.
           AI_REVIEW_REASONING_EFFORT: ${{ vars.AI_REVIEW_REASONING_EFFORT || '' }}
           AI_REVIEW_MAX_TOKENS: ${{ vars.AI_REVIEW_MAX_TOKENS || '' }}
           # FULL DEBUG TRACE (opt-in via vars). AI_REVIEW_DEBUG makes the engine
@@ -345,9 +287,9 @@ jobs:
           AI_REVIEW_SESSION_ID: ${{ vars.AI_REVIEW_SESSION_ID || '' }}
           # NOTE: AI_REVIEW_OUT is deliberately NOT forwarded — the review step
           # passes `--out /tmp/review.txt` explicitly, which the engine honours.
-          # Zero retries: a failed first attempt is terminal — no repeat cycle.
-          # Default 1 org-wide; any repo may opt back to retries via its own var.
-          AI_REVIEW_MAX_ATTEMPTS: ${{ vars.AI_REVIEW_MAX_ATTEMPTS || '1' }}
+          # (No attempt/turn/tool-result knobs are forwarded: the engine makes ONE
+          # model call and never retries, so AI_REVIEW_MAX_ATTEMPTS, _MAX_TURNS and
+          # _TOOL_RESULT_MAX_BYTES have no reader — R5.)
           AI_REVIEW_API_KEY:   ${{ secrets.AI_REVIEW_API_KEY }}
           GITHUB_TOKEN:        ${{ github.token }}
         run: |
@@ -366,10 +308,35 @@ jobs:
           echo "review rc=$rc"
           cat /tmp/review.log
 
-          # The plugin names the class explicitly (the INCONCLUSIVE terminal marker
-          # carried by the pinned release).
+          # The engine names its terminal class in ONE line (`inconclusive: …`, from
+          # plugin-review's classify() / verdictExit() / budgetError()). The class is derived
+          # from THAT line's OWN text, so the whole-request cap, an empty completion and a
+          # provider stall are never folded into one another (opencharly/.github#133). A
+          # marker this workflow keeps no narrative for yields `engine-terminal-other`, and
+          # the notice then DEFERS to the engine's own line instead of inventing a cause. The
+          # line, and the engine's `request —` line (the bounds in force), are carried to the
+          # notice as MEASURED evidence — two bounded lines, never the log.
+          terminal=$(grep -m1 -oE 'inconclusive: .*' /tmp/review.log | cut -c1-500 || true)
+          request=$(grep -m1 -oE 'request — reasoning_effort=.*' /tmp/review.log | cut -c1-400 || true)
+          inconclusive_class=""
+          if [ -n "$terminal" ]; then
+            case "$terminal" in
+              *"exceeded AI_REVIEW_ATTEMPT_TIMEOUT"*)            inconclusive_class="attempt-cap" ;;
+              *"produced no answer"*)                            inconclusive_class="empty-completion" ;;
+              *"provider never answered or stopped streaming"*)  inconclusive_class="provider-unanswered" ;;
+              *)                                                 inconclusive_class="engine-terminal-other" ;;
+            esac
+          fi
+          # provider_unanswered keeps its meaning: the engine SAID the provider stalled — or,
+          # ONLY when the engine named no class at all (a step abort, a kill, an HTTP refusal),
+          # the log carries a stall marker. The fallback deliberately does NOT match
+          # `inconclusive:`: that substring is true for EVERY class the engine names, so
+          # matching it here is exactly what folded every class into this one (#133).
           provider_unanswered=false
-          if grep -qiE 'inconclusive:|provider unanswered|Client[.]Timeout exceeded|context deadline exceeded' /tmp/review.log; then
+          if [ "$inconclusive_class" = "provider-unanswered" ]; then
+            provider_unanswered=true
+          elif [ -z "$terminal" ] &&
+             grep -qiE 'provider unanswered|Client[.]Timeout exceeded|context deadline exceeded' /tmp/review.log; then
             provider_unanswered=true
           fi
 
@@ -432,6 +399,9 @@ jobs:
           fi
           {
             echo "review_rc=$rc"
+            echo "inconclusive_class=$inconclusive_class"
+            echo "engine_terminal=$terminal"
+            echo "engine_request=$request"
             echo "provider_unanswered=$provider_unanswered"
             echo "engine_defective=$engine_defective"
             echo "provider_error=$provider_error"
@@ -574,22 +544,46 @@ jobs:
           ENGINE_DEFECTIVE: ${{ steps.review.outputs.engine_defective }}
           DISCARDED_VERDICT: ${{ steps.review.outputs.discarded_verdict }}
           REVIEW_RC: ${{ steps.review.outputs.review_rc }}
+          INCONCLUSIVE_CLASS: ${{ steps.review.outputs.inconclusive_class }}
+          ENGINE_TERMINAL: ${{ steps.review.outputs.engine_terminal }}
+          ENGINE_REQUEST: ${{ steps.review.outputs.engine_request }}
         run: |
           class="verdict-less review output"
-          # The narrative is CLASS-AWARE and the DEFAULT is EVIDENCE-BOUNDED. The shared
-          # streaming narrative is assigned ONLY to the classes whose signature it describes
-          # (narrative=streaming, below) — never as a fall-through, because a fall-through
-          # asserts a cause the log does not support, which is the misattribution this removes.
+          # Each class carries its OWN root cause; the DEFAULT is EVIDENCE-BOUNDED and
+          # asserts no cause the run does not show. The measured engine lines (below the
+          # root cause) come from the run itself, never from this template.
           rootcause="**Root cause.** The review plan produced no Verdict line, and this log carries NONE of the recognised signatures: no completed turn 1, no stall marker, and no HTTP rejection. The gate therefore REPORTS the class instead of inventing a cause."
-          remedy1="1. open the diagnostics tail below — it names the failing step;"
+          remedy1="1. open this run's evidence artifact — it holds the full review log and names the failing step;"
           remedy2="2. classify from THAT evidence (a provider status, a stall, a timeout, a crashed plan) rather than from this template."
-          narrative=""
+          # The THREE ENGINE-TERMINAL classes come FIRST, ahead of every workflow-side
+          # signature below: the engine's own `inconclusive:` line is the run's direct
+          # statement of why it ended, while every branch under it is a heuristic over
+          # log signatures. A direct statement outranks a heuristic, so when the engine
+          # named the class, that class is the cause and no signature is re-litigated —
+          # including the LAST of the three, which defers to a marker this workflow has
+          # no narrative for rather than falling through to a signature story.
           # BOTH signals first. A log that shows a COMPLETED turn 1 AND an HTTP rejection is not a
           # plain protocol fault: the refusal lands on a LATER request whose context each turn
           # enlarged — the engine-defective class (opencharly/.github#97) with a specific status,
           # not a denial that the engine ever ran. Ordering this ahead is what makes the
           # single-signal branch's claim below true rather than merely convenient.
-          if [ "$ENGINE_DEFECTIVE" = "true" ] && [ -n "$PROVIDER_ERROR" ]; then
+          if [ "$INCONCLUSIVE_CLASS" = "attempt-cap" ]; then
+            class="whole-request cap (the ONE review call ran past AI_REVIEW_ATTEMPT_TIMEOUT and was cut; not retried)"
+            rootcause="**Root cause (measured in this run).** The engine's own terminal line names the class: the generation ran longer than the whole-request cap. A generation that long is a reasoning length problem — compare \`reasoning_effort\` and \`max_tokens\` in the request line below with the org vars (an empty \`reasoning_effort\` means none was sent; opencharly/plugin-review#36)."
+            remedy1="1. bound the generation: \`AI_REVIEW_REASONING_EFFORT\` and \`AI_REVIEW_MAX_TOKENS\` (org vars);"
+            remedy2="2. raise \`AI_REVIEW_ATTEMPT_TIMEOUT\` only for a legitimately long turn — a cap detects a long generation, it does not bound it (R4)."
+          elif [ "$INCONCLUSIVE_CLASS" = "empty-completion" ]; then
+            class="empty completion (the token budget was spent on reasoning before any answer; not retryable)"
+            rootcause="**Root cause (measured in this run).** The engine's own terminal line names the class: the model used the shared \`max_tokens\` budget on reasoning and produced no answer (opencharly/plugin-review#12). A re-run with the same bounds reproduces it."
+            remedy1="1. raise \`AI_REVIEW_MAX_TOKENS\` so reasoning leaves room for the answer, or lower \`AI_REVIEW_REASONING_EFFORT\`;"
+            remedy2="2. do not re-run with unchanged bounds — the class is deterministic (R4)."
+          elif [ "$INCONCLUSIVE_CLASS" = "engine-terminal-other" ]; then
+            class="the engine's own terminal line names the class (this workflow keeps no"
+            class="$class narrative for this marker, so it DEFERS to the line): $(printf '%s' "$ENGINE_TERMINAL" | cut -c1-180)"
+            rootcause="**Root cause (measured in this run).** The engine classified the run ITSELF, and its terminal line is quoted below. For a marker this workflow has no bespoke narrative for, the gate does not re-derive a cause from a signature: the engine's own line IS the diagnosis, and the instruction that line carries (every engine class names the knob to change) is the remedy. A signature heuristic must never overwrite what the engine stated."
+            remedy1="1. act on the instruction in the engine's quoted line above — it names the knob and the direction;"
+            remedy2="2. if the marker is one the gate does not recognise, this workflow's decision table is missing a row: report the marker so the table learns it (a new engine class is a contract change, not a wording change)."
+          elif [ "$ENGINE_DEFECTIVE" = "true" ] && [ -n "$PROVIDER_ERROR" ]; then
             class="provider rejected a LATER request (HTTP ${PROVIDER_ERROR}) after turn 1 completed — the enlarged-context class (opencharly/.github#97, see the T13 engine-change exception)"
             rootcause="**Root cause.** The engine COMPLETED turn 1 (the endpoint answered) and the provider then REFUSED a later request with **HTTP ${PROVIDER_ERROR}**: each turn appends its tool results to the context, and past a size or rate limit the endpoint rejects the request outright. Both facts are in the diagnostics below. This is therefore NOT reported as a plain protocol fault — the rejection is a SYMPTOM of the unbounded context growth, and the durable fix is the engine's bound on tool-result payloads (owner: plugin-review)."
             remedy1="1. read the provider message in the diagnostics — it names the limit it enforced;"
@@ -606,25 +600,21 @@ jobs:
             remedy2="2. fix it at the review client or in the org AI_REVIEW_* variables, then re-run. An HTTP rejection is deterministic — do NOT retry blindly (R4)."
           elif [ "$ENGINE_DEFECTIVE" = "true" ]; then
             class="engine-defective (the review engine completed turn 1 and failed a later turn — the context-dependent timeout/empty-content class; opencharly/.github#97, see the T13 engine-change exception)"
-            narrative="streaming"
+            rootcause="**Root cause.** The engine COMPLETED turn 1 (the endpoint answered) and a LATER turn failed — the context-dependent class a provider story cannot explain (opencharly/.github#97)."
+            remedy1="1. route it to the engine owner (opencharly/plugin-review) with this run's evidence artifact;"
+            remedy2="2. an engine change takes the T13 path: maintainer sign-off and an operator-performed merge."
           elif [ "$PROVIDER_UNANSWERED" = "true" ]; then
-            class="provider unanswered (the provider returned no response headers within the attempt timeout)"
-            narrative="streaming"
+            class="provider unanswered (the provider stopped answering within the stream-idle bound)"
+            rootcause="**Root cause.** The model endpoint stopped answering — no response headers, or a stream that went silent past \`AI_REVIEW_STREAM_IDLE_TIMEOUT\`. That is a provider/endpoint matter, not a code finding."
+            remedy1="1. escalate to the operator: the provider and its \`AI_REVIEW_*\` configuration are theirs;"
+            remedy2="2. a re-run is a fresh attempt: re-run once on the operator's word, never blindly in a loop (R4)."
           elif [ "$DISCARDED_VERDICT" = "true" ]; then
             class="charly review exited rc=${REVIEW_RC} with a non-BLOCK"
             class="$class verdict — FAIL-CLOSED: a non-zero review exit may"
             class="$class only carry a real BLOCK finding, discarded"
-            rootcause='**Root cause.** The review exited non-zero and had written a verdict that is NOT BLOCK. That verdict is untrustworthy by construction (T3/T4): a crashed or non-clean run may only carry a real BLOCK finding, so the file was moved aside and the run is INCONCLUSIVE rather than a pass.'
+            rootcause='**Root cause.** The review exited non-zero and had written a verdict that is NOT BLOCK. That verdict is untrustworthy by construction (T3/T4): a crashed or non-clean run may only carry a real BLOCK finding, so the file was moved aside and the run is reported as INCONCLUSIVE.'
             remedy1="1. re-run once the engine is healthy;"
             remedy2="2. never treat a non-zero run PASS as a verdict — fail-closed is by design (T3/T4)."
-          fi
-          # The streaming narrative is assigned ONLY here, to the classes whose signature it
-          # describes. No branch above falls through to it (see the bounded default), so a log
-          # without that signature cannot receive it.
-          if [ "$narrative" = "streaming" ]; then
-            rootcause='**Root cause.** The ENGINE sent no generation bound (`reasoning_effort` / `max_tokens`), so a reasoning model generated megabytes of reasoning before answering (measured: 1.75 MB / 786 s on the real context). THIS WORKFLOW then converted that into a hard failure by handing the engine a hardcoded 5-minute whole-request `AI_REVIEW_ATTEMPT_TIMEOUT` (the engine streams, so a whole-generation deadline is the wrong bound) — the cap killed the generation mid-flight and the per-turn retry re-sent the SAME request. The primary cause is the unbounded generation (owner: the engine, opencharly/plugin-review#10); the hardcoded cap is the workflow-side amplifier this PR removes.'
-            remedy1='1. bound the generation in the engine (opencharly/plugin-review#10); pass `AI_REVIEW_STREAM_IDLE_TIMEOUT` (the correct bound for a streaming engine) and leave `AI_REVIEW_ATTEMPT_TIMEOUT` UNSET so no whole-generation cap cuts a progressing stream;'
-            remedy2='2. if this persists, raise the idle bound or the tool-result cap (`AI_REVIEW_TOOL_RESULT_MAX_BYTES`) rather than capping total generation time.'
           fi
           {
             echo '## validator INCONCLUSIVE — no review verdict was produced (not a BLOCK; no code finding)'
@@ -637,6 +627,15 @@ jobs:
             echo
             echo "$rootcause"
             echo
+            if [ -n "$ENGINE_REQUEST$ENGINE_TERMINAL" ]; then
+              echo "**Measured in this run** (the engine's own lines):"
+              echo
+              echo '```text'
+              if [ -n "$ENGINE_REQUEST" ]; then echo "$ENGINE_REQUEST"; fi
+              if [ -n "$ENGINE_TERMINAL" ]; then echo "$ENGINE_TERMINAL"; fi
+              echo '```'
+              echo
+            fi
             echo '**Durable remedy.**'
             echo "$remedy1"
             echo "$remedy2"

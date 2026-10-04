@@ -31,15 +31,12 @@ review-contract:
             AI_REVIEW_ATTEMPT_TIMEOUT: "900"
             AI_REVIEW_CONTEXT_TOKENS: "1048576"
             AI_REVIEW_CONTEXT_MARGIN: "16384"
-            AI_REVIEW_MAX_TURNS: "60"
             AI_REVIEW_TEMPERATURE: "1.0"
             AI_REVIEW_TOP_P: "0.95"
             AI_REVIEW_FREQUENCY_PENALTY: "0.5"
             AI_REVIEW_PRESENCE_PENALTY: "1.0"
-            AI_REVIEW_TOOL_RESULT_MAX_BYTES: "65536"
             AI_REVIEW_POST_COMMENT: "true"
             AI_REVIEW_DEBUG: "1"
-            AI_REVIEW_MAX_ATTEMPTS: "1"
             # The account-gated sign-off control: the maintainer set the review
             # rulebook names as CONFIGURATION. Forwarded to the review step as the
             # env var AI_REVIEW_MAINTAINER; the rulebook's "Maintainer sign-off"

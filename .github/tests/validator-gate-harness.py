@@ -29,26 +29,56 @@ WHAT IT DOES
     code GitHub would report for the required check.
 
 SCENARIOS ASSERTED END TO END (exit code + classification output + PR comment)
-  1. pass                verdict PASS -> no gate fires -> auto-merge -> exit 0
-  2. block               verdict BLOCK -> Gate (BLOCK)                -> exit 1
-  3. provider-unanswered no Verdict line, provider marker in the log
-                         -> Gate (inconclusive) posts the comment     -> exit 3
-  4. verdict-less        review.txt with no Verdict line
-                         -> Gate (inconclusive) posts the comment     -> exit 3
-  5. mixed               PASS + BLOCK in one review output
-                         -> Gate (ambiguous)                          -> exit 2
-  6. pass-with-error     the review exits NON-ZERO while writing a PASS line
-                         into review.txt -> that untrusted output is
-                         DISCARDED, the run is INCONCLUSIVE (exit 3), the
-                         INCONCLUSIVE comment is posted and auto-merge is NOT
-                         armed (the fail-closed guard on the captured rc).
-  7. block-with-error    the review exits NON-ZERO carrying BLOCK -> a finding
-                         is a finding: BLOCK is reported (exit 1), NOT
-                         discarded into INCONCLUSIVE, and auto-merge is NOT
-                         armed.
+  VERDICT classes
+    pass                verdict PASS -> no gate fires -> auto-merge -> exit 0
+    block               verdict BLOCK -> Gate (BLOCK)                 -> exit 1
+    mixed               PASS + BLOCK in one review output
+                        -> Gate (ambiguous)                           -> exit 2
+    pass-with-error     the review exits NON-ZERO while writing a PASS line
+                        into review.txt -> that untrusted output is
+                        DISCARDED, the run is INCONCLUSIVE (exit 3), the
+                        INCONCLUSIVE comment is posted and auto-merge is NOT
+                        armed (the fail-closed guard on the captured rc).
+    block-with-error    the review exits NON-ZERO carrying BLOCK -> a finding
+                        is a finding: BLOCK is reported (exit 1), NOT
+                        discarded into INCONCLUSIVE, and auto-merge is NOT
+                        armed.
+  INCONCLUSIVE classes (each -> exit 3 and the notice posted on the PR)
+    provider-unanswered a stall marker in the log, no completed turn 1
+    engine-defective    a COMPLETED turn 1 then a later failure
+    provider-error      an explicit HTTP 4xx/5xx rejection
+    unanswered-plus-error  both, with no completed turn 1
+    mixed-signals       a completed turn 1 + a rejection (the composed class)
+    non-error-status    a 2xx line must NOT be read as a refusal
+    verdict-less        review.txt with no Verdict line
+    attempt-cap         the engine's own terminal line
+                        `exceeded AI_REVIEW_ATTEMPT_TIMEOUT` -> whole-request cap
+    empty-completion    the engine's own terminal line
+                        `produced no answer` -> empty completion
+    engine-terminal-other  an engine class this workflow keeps no narrative
+                        for (the REAL `PR too large to review in one context`
+                        line) -> the gate DEFERS to the engine's own line and
+                        quotes it, instead of falling through to a signature
+  AUTO-CLOSE (the policy bound on an unreviewable PR)
+    auto-close-at-threshold / -multi-page / -over-threshold-count /
+    -below-threshold / -inconclusive-at-threshold
+  EVIDENCE
+    pass-with-unwritable-evidence
 
-  EVERY scenario also asserts the gh call log (expect_auto_merge): only
-  scenario 1 may contain "gh pr merge --auto". The exit code alone would not
+  The three terminal-line classes (attempt-cap, empty-completion,
+  engine-terminal-other) are the MISATTRIBUTION GUARD for opencharly/.github#133:
+  before this change EVERY class the engine named was folded into "provider
+  unanswered" - the classifier's fallback matched the bare substring
+  `inconclusive:`, which is true for all of them - so each scenario asserts that the
+  notice names ITS OWN class AND excludes the other classes' words. A canned
+  narrative cannot satisfy them: they also require the run's own engine lines in the
+  posted body. The provider-unanswered fake carries the engine's REAL terminal
+  wording (`the LLM provider never answered or stopped streaming`), not the
+  retired "all 3 attempts timed out" line, which described a per-turn retry loop the
+  engine no longer has and certified behaviour it does not have.
+
+  EVERY scenario also asserts the gh call log (expect_auto_merge): only the plain
+  pass scenario may contain "gh pr merge --auto". The exit code alone would not
   prove the merge was not armed - a fail-closed classification must be proven,
   not inferred.
 
@@ -60,13 +90,15 @@ SCENARIOS ASSERTED END TO END (exit code + classification output + PR comment)
   happy path (clone + build the pinned charly) needs network and is not run offline.
 
   Plus structural guards: the review step contains NO in-job retry (no sleep, no
-  for-attempt loop) - the R4 regression guard for the dropped retry band-aid - the
-  workflow pins a charly release WITH the taxonomy marker, never the old one, and
-  the header names the CORRECTED root cause (a NON-STREAMING request under a
-  whole-generation HTTP deadline that a too-short attempt cap cut off -
-  opencharly/.github#91), asserts the superseded throttled-egress RCA is GONE,
-  documents the org-settable AI_REVIEW_ATTEMPT_TIMEOUT lever, and carries no
-  re-run-and-see remedy anywhere.
+  for-attempt loop) - the R4 regression guard for the dropped retry band-aid; the
+  header names no pinned release VERSION and no org-var VALUE (either would drift)
+  and instead points at `gh variable get` and the run's own `request -` line; the
+  header states the generation bounds are the cause-class (a cap DETECTS a long
+  generation, it never BOUNDS one) and carries no re-run-and-see remedy; the three
+  knobs the engine no longer reads (AI_REVIEW_MAX_ATTEMPTS, _MAX_TURNS,
+  _TOOL_RESULT_MAX_BYTES) are neither forwarded nor kept in the review contract;
+  and the emitted INCONCLUSIVE notice quotes the RUN'S OWN terminal + request
+  lines instead of a canned narrative (opencharly/.github#133).
 
 HOW TO RUN
     python3 .github/tests/validator-gate-harness.py
@@ -339,7 +371,47 @@ FAKE_CHARLY = NL.join([
     "    exit 0",
     "    ;;",
     "  provider-unanswered)",
-    "    echo \"inconclusive: all 3 attempts timed out - the LLM provider did not respond within the attempt timeout (provider unanswered); this is NOT a review verdict - re-run the gate\" >&2",
+    "    # A stall marker with NO completed turn 1. The terminal line is the engine's REAL",
+    "    # wording (review.go's classify(), the timeout class) - the previous fake said",
+    "    # 'all 3 attempts timed out', which described a per-turn RETRY LOOP the engine no",
+    "    # longer has (R5) and a wording it never emits, so it certified behaviour the",
+    "    # engine does not have. The classifier keys on that real wording, and the class",
+    "    # must still reach the posted notice as 'provider unanswered'.",
+    "    echo 'plugin-review[debug]: request — reasoning_effort=\"high\" max_tokens=262144 attempt_timeout=15m0s idle=3m0s' >&2",
+    "    echo 'inconclusive: the LLM provider never answered or stopped streaming (idle bound 3m0s); this is NOT a review verdict - re-run the gate' >&2",
+    "    exit 1",
+    "    ;;",
+    "  attempt-cap)",
+    "    # The WHOLE-REQUEST CAP class, as the engine REALLY reports it (review.go's",
+    "    # classify()): a distinct `inconclusive:` terminal line, together with the",
+    "    # `request -` debug line that names the bounds in force. Before the #133 fix",
+    "    # the workflow had no reader for either: it matched the substring",
+    "    # `inconclusive:` and reported the run as PROVIDER UNANSWERED, so an operator",
+    "    # read a provider story for a generation that was simply too long. Both lines",
+    "    # must reach the posted notice unchanged.",
+    "    echo 'plugin-review[debug]: request — reasoning_effort=\"medium\" max_tokens=262144 attempt_timeout=18m0s idle=3m0s sampling=temp=1.0,top_p=0.95 context_bytes=(system=32768 user=261820) files=76 comments=12' >&2",
+    "    echo 'inconclusive: the turn exceeded AI_REVIEW_ATTEMPT_TIMEOUT=18m0s (whole-request cap; not retried) at reasoning_effort=\"medium\" max_tokens=262144; this is NOT a review verdict - bound the generation with AI_REVIEW_REASONING_EFFORT, or raise AI_REVIEW_ATTEMPT_TIMEOUT for a legitimately long turn' >&2",
+    "    exit 1",
+    "    ;;",
+    "  empty-completion)",
+    "    # The EMPTY-COMPLETION class: the shared max_tokens budget was spent on",
+    "    # reasoning, so no answer was produced. A DIFFERENT terminal line, a DIFFERENT",
+    "    # durable remedy, and - like attempt-cap - folded into PROVIDER UNANSWERED",
+    "    # before the #133 fix. The two classes must never be conflated: the notice for",
+    "    # one must exclude the other's words.",
+    "    echo 'inconclusive: the model produced no answer and this is not retryable (empty completion: the shared max_tokens budget was spent on reasoning) ; raise AI_REVIEW_MAX_TOKENS (currently 65536) so the reasoning budget leaves room for the answer, or lower AI_REVIEW_REASONING_EFFORT (currently \"high\")' >&2",
+    "    exit 1",
+    "    ;;",
+    "  engine-terminal-other)",
+    "    # AN ENGINE CLASS THIS WORKFLOW KEEPS NO NARRATIVE FOR (opencharly/.github#133). The",
+    "    # engine's FAIL-CLOSED context guard (review.go's budgetError) refused the request",
+    "    # BEFORE sending it, and named that in its terminal line. Pre-fix the bare substring",
+    "    # `inconclusive:` matched, so this run was reported as PROVIDER UNANSWERED and the",
+    "    # operator was told to escalate to a provider that was never called - while the",
+    "    # actionable instruction (`split the PR into smaller PRs`) sat unread in the log.",
+    "    # The gate must now DEFER to the engine's own line and quote it verbatim.",
+    "    echo 'plugin-review[debug]: request — reasoning_effort=\"high\" max_tokens=262144 attempt_timeout=15m0s idle=3m0s context_bytes=(system=32768 user=521820) files=214 comments=31' >&2",
+    "    echo 'inconclusive: PR too large to review in one context — the input is ~166000 tokens and the output reserve is 262144, exceeding the 1048576-token window (margin 16384). This is NOT a review verdict; split the PR into smaller PRs, or raise AI_REVIEW_CONTEXT_TOKENS if the model window is larger' >&2",
     "    exit 1",
     "    ;;",
     "  engine-defective)",
@@ -675,6 +747,94 @@ SCENARIOS = [
             "AI_REVIEW_STREAM_IDLE_TIMEOUT",
         ],
         "expect_review_outputs": {"provider_unanswered": "true", "review_rc": "1",
+                                  "discarded_verdict": "false"},
+    },
+    {
+        # THE WHOLE-REQUEST CAP (opencharly/.github#133). The engine's terminal line
+        # names this class explicitly, so the notice must name it too — and must NOT
+        # repeat the retired provider story. Before the fix the run matched the bare
+        # substring `inconclusive:` and was reported as "provider unanswered" with the
+        # deleted 5-minute-cap narrative attached; this scenario's fake log carries the
+        # real terminal line, which pre-fix reaches NEITHER the class selection NOR the
+        # posted body, so both the class assertion and the "Measured in this run" block
+        # fail on the pre-fix workflow.
+        "name": "attempt-cap",
+        "fake": "attempt-cap",
+        "expect_exit": 3,
+        "expect_steps": ["review", "parse", "Auto-close after N BLOCK/INCONCLUSIVE verdicts", "Gate (inconclusive)", "evidence"],
+        "expect_verdict": "INCONCLUSIVE",
+        "expect_comment": True,
+        "expect_comment_contains": [
+            "## validator INCONCLUSIVE",
+            "whole-request cap",
+            "in-job retries: none",
+            # The run's OWN lines, not a template: the bounds the engine reported and the
+            # terminal line that named the class must both survive into the posted body.
+            "**Measured in this run**",
+            'reasoning_effort="medium"',
+            "AI_REVIEW_ATTEMPT_TIMEOUT=18m0s",
+        ],
+        # The anti-misattribution half: neither the other class's words nor the retired
+        # provider story may appear for a cap-cut run.
+        "expect_comment_excludes": ["provider unanswered", "empty completion"],
+        "expect_auto_merge": False,
+        "expect_review_outputs": {"inconclusive_class": "attempt-cap",
+                                  "provider_unanswered": "false", "review_rc": "1",
+                                  "discarded_verdict": "false"},
+    },
+    {
+        # THE EMPTY-COMPLETION class (#133): a DIFFERENT terminal line, a DIFFERENT
+        # durable remedy. Conflating it with the cap class (or with provider-unanswered)
+        # sends the operator after the wrong knob.
+        "name": "empty-completion",
+        "fake": "empty-completion",
+        "expect_exit": 3,
+        "expect_steps": ["review", "parse", "Auto-close after N BLOCK/INCONCLUSIVE verdicts", "Gate (inconclusive)", "evidence"],
+        "expect_verdict": "INCONCLUSIVE",
+        "expect_comment": True,
+        "expect_comment_contains": [
+            "## validator INCONCLUSIVE",
+            "empty completion",
+            "in-job retries: none",
+            "**Measured in this run**",
+            "produced no answer",
+            "AI_REVIEW_MAX_TOKENS",
+        ],
+        "expect_comment_excludes": ["provider unanswered", "whole-request cap"],
+        "expect_auto_merge": False,
+        "expect_review_outputs": {"inconclusive_class": "empty-completion",
+                                  "provider_unanswered": "false", "review_rc": "1",
+                                  "discarded_verdict": "false"},
+    },
+    {
+        # AN ENGINE CLASS THE WORKFLOW HAS NO NARRATIVE FOR (#133). The engine's fail-closed
+        # context guard refused the request BEFORE sending it, and said so in its terminal
+        # line. The gate must DEFER to that line and quote it — never fall through to a
+        # signature story. Pre-fix this log matched the bare `inconclusive:` substring, so
+        # the run was posted as "provider unanswered": the operator was pointed at a
+        # provider that was never called, while the engine's own actionable instruction
+        # ("split the PR into smaller PRs") sat unread in the log. The fake carries the
+        # engine's REAL budgetError line; the excludes are the anti-misattribution half.
+        "name": "engine-terminal-other",
+        "fake": "engine-terminal-other",
+        "expect_exit": 3,
+        "expect_steps": ["review", "parse", "Auto-close after N BLOCK/INCONCLUSIVE verdicts", "Gate (inconclusive)", "evidence"],
+        "expect_verdict": "INCONCLUSIVE",
+        "expect_comment": True,
+        "expect_comment_contains": [
+            "## validator INCONCLUSIVE",
+            "DEFERS to the line",
+            "in-job retries: none",
+            # The engine's OWN words must reach the body: the class line echoes the marker,
+            # and the measured block quotes the terminal line verbatim.
+            "**Measured in this run**",
+            "PR too large to review in one context",
+            "split the PR into smaller PRs",
+        ],
+        "expect_comment_excludes": ["provider unanswered", "whole-request cap", "empty completion"],
+        "expect_auto_merge": False,
+        "expect_review_outputs": {"inconclusive_class": "engine-terminal-other",
+                                  "provider_unanswered": "false", "review_rc": "1",
                                   "discarded_verdict": "false"},
     },
     {
@@ -1053,9 +1213,14 @@ def run_harness():
          "structural: header records the T4 maintainer sign-off requirement")
     note("vars.REVIEW_RUNNER_LABEL" in text,
          "structural: header names the operator lever vars.REVIEW_RUNNER_LABEL")
-    note("NO generation bound" in text and "1.75 MB of reasoning" in text,
-         "structural: header names the MEASURED root cause (an unbounded reasoning "
-         "generation, not the timeout cap)")
+    note("GENERATION-LENGTH problem, not a scheduling one" in text
+         and "A cap only DETECTS a generation that is too long" in text,
+         "structural: the header names the generation-bound MECHANISM (a long review is "
+         "a generation-length problem; a cap DETECTS it, the effort/token budget BOUNDS "
+         "it) rather than a retired timeout narrative")
+    note("hardcoded 5-minute" not in text and "5m0s whole-request deadline" not in text,
+         "structural: the retired hardcoded-5-minute narrative is GONE (the cap is an "
+         "org-settable knob with no built-in value in this file)")
     note("throttles/blocks datacenter/shared runner egress" not in text,
          "structural: no throttled-egress RCA anywhere in the workflow")
     note("non-streaming request under a whole-generation deadline" not in text.lower(),
@@ -1063,26 +1228,30 @@ def run_harness():
     note("narrative below it" not in text,
          "structural: the header carries no dangling reference to a superseded "
          "narrative it claims to retain (R5: deleted in the same commit)")
-    note("supersedes the 2026-09-12" in text and "BOTH deleted in this PR" in text,
-         "structural: the header states both superseded narratives are DELETED in "
-         "this PR, not retained below")
-    note("opencharly/plugin-review#10" in text,
-         "structural: header routes the durable generation bound to its owner "
-         "(the engine, opencharly/plugin-review#10)")
+    note("RCA 2026-09-19" not in text and "awaiting headers" not in text
+         and "turn request attempt N/3 failed" not in text,
+         "structural: the superseded 2026-09-12 / 2026-09-19 RCAs are ABSENT from the "
+         "file entirely (R5: deleted, never retained below as history)")
+    note("opencharly/plugin-review#36" in text,
+         "structural: header routes the LIVE generation-bound defect to its owner (the "
+         "engine: the empty-effort knob, opencharly/plugin-review#36)")
     note("the generation knobs are INERT" not in text and "INERT until the engine release" not in text,
          "structural: header no longer claims the generation knobs are INERT")
-    note("v2026.267.0045" in text and "plugin-review@v2026.266.1944" in text,
-         "structural: header's inventory names the ACTUAL org pin and its welded "
-         "plugin-review")
+    note("v2026.267.0045" not in text and "plugin-review@v2026.266" not in text
+         and "this comment names no version" in text,
+         "structural: the header names NO pinned release (a literal drifts the moment "
+         "CHARLY_VERSION moves) and points at the live pin instead")
     note("NO built-in fallback TAG" in text and 'TAG="$CHARLY_VERSION"' in text,
          "structural: the header states there is NO fallback TAG (the pin is used "
          "verbatim) — the claim the pin-enforcement fix made true")
     note("the engine is not at fault" not in text.lower(),
          "structural: no emitted narrative exonerates the engine of the unbounded "
          "generation (header and emitted RCA agree)")
-    note("PRIMARY cause of the ~14m runs" in text,
-         "structural: header/env state the primary cause is the engine's unbounded "
-         "generation, with the workflow cap as the amplifier")
+    note("must STAY SET to a" in text and "opencharly/plugin-review#36" in text,
+         "structural: header states the OPERATIONAL invariant for the effort knob (the "
+         "org var must stay SET to a non-empty value until plugin-review#36 is welded) — "
+         "the reason an unset var silently degrades the gate to an unbounded provider "
+         "default instead of failing loud")
     note("remedies: re-run" not in text,
          "structural: no re-run-and-see remedy anywhere in the workflow text")
     note("AI_REVIEW_STREAM_IDLE_TIMEOUT" in text,
@@ -1141,9 +1310,16 @@ def run_harness():
                  "functional: with the org var UNSET " + knob + " is EMPTY (debug off)")
             note(subst(review_env[knob], ns_set_d) == "1",
                  "functional: with the org var SET " + knob + " resolves to the set value")
-    note("AI_REVIEW_TOOL_RESULT_MAX_BYTES" in review_env,
-         "functional: the review step EXPORTS AI_REVIEW_TOOL_RESULT_MAX_BYTES (the "
-         "context-growth cap the streaming engine applies)")
+    # R5: the knobs the pinned engine no longer READS are not forwarded. Each was
+    # removed because the engine has no `getenvAny` caller for it — the tool loop and
+    # the per-turn retry loop were deleted in plugin-review v2026.264.1425, so
+    # MAX_TURNS / TOOL_RESULT_MAX_BYTES / MAX_ATTEMPTS reach nothing. Forwarding them
+    # kept advertising a tunable that is inert; a knob with no reader is not a knob.
+    for dead in ("AI_REVIEW_TOOL_RESULT_MAX_BYTES", "AI_REVIEW_MAX_TURNS",
+                 "AI_REVIEW_MAX_ATTEMPTS"):
+        note(dead not in review_env,
+             "functional: the review step does NOT forward " + dead + " (the pinned "
+             "engine has no reader for it — the knob is DELETED, not left as a no-op)")
     # The ONE prompt mechanism (this change): AI_REVIEW_PROMPT is forwarded from the
     # org variable and REPLACES the engine's generic embedded default. The dead
     # REVIEW_PROMPT_PATH file mechanism and the AI_REVIEW_PROMPT_EXTRA append knob
@@ -1193,29 +1369,45 @@ def run_harness():
              "together with the counter)")
     note("## Review — BLOCK" in auto_close_run,
          "structural: the auto-close counter still matches the BLOCK verdict's exact header")
-    if "AI_REVIEW_TOOL_RESULT_MAX_BYTES" in review_env:
-        raw_t = review_env["AI_REVIEW_TOOL_RESULT_MAX_BYTES"]
-        ns_unset_t = Ctx({"vars": Ctx({}), "inputs": Ctx({}), "secrets": Ctx({})})
-        note(subst(raw_t, ns_unset_t) == "",
-             "functional: with the org var UNSET the tool-result cap is EMPTY "
-             "(the engine default applies)")
-    note("AI_REVIEW_MAX_ATTEMPTS" in review_env,
-         "functional: the review step EXPORTS AI_REVIEW_MAX_ATTEMPTS for the plugin "
-         "(pre-knob tree exported nothing, so every review retried twice)")
-    if "AI_REVIEW_MAX_ATTEMPTS" in review_env:
-        raw_a = review_env["AI_REVIEW_MAX_ATTEMPTS"]
-        ns_unset_a = Ctx({"vars": Ctx({}), "inputs": Ctx({}), "secrets": Ctx({})})
-        ns_set_a = Ctx({"vars": Ctx({"AI_REVIEW_MAX_ATTEMPTS": "3"}),
-                        "inputs": Ctx({}), "secrets": Ctx({})})
-        note(subst(raw_a, ns_unset_a) == "1",
-             "functional: with the org var UNSET attempts RESOLVE to single-attempt "
-             "(fail hard)")
-        note(subst(raw_a, ns_set_a) == "3",
-             "functional: with the org var SET attempts RESOLVE to the set value")
+    note("AI_REVIEW_MAX_ATTEMPTS" not in review_env
+         and "AI_REVIEW_TOOL_RESULT_MAX_BYTES" not in review_env,
+         "structural: the retired retry/context knobs stay OUT of the review step's env "
+         "block (the assertion above is functional; this pins the block surface too)")
     note("engine_defective=false" in text and "'turn 1: [0-9]+ tool call'" in text,
          "structural: the engine-defective classification is DERIVED from the run's own "
          "signature (a completed turn 1) - pre-fix: absent, so every verdict-less run was "
          "labelled provider-unanswered")
+    # PRECEDENCE (load-bearing, and NOT caught by any functional scenario): the engine's
+    # own terminal class is a DIRECT statement of why the run ended, while every branch
+    # below it is a heuristic over log signatures. A direct statement outranks a
+    # heuristic, so the two terminal classes must be tested BEFORE the engine-defective
+    # signature. A log can carry BOTH (a cut generation that also shows a completed turn
+    # 1), and moving these branches down would silently relabel an attempt-cap or
+    # empty-completion run as engine-defective - a diagnosis regression that no scenario
+    # above would fail on, because each scenario pins one isolated class.
+    note(concl_run.index('INCONCLUSIVE_CLASS" = "attempt-cap"')
+         < concl_run.index('ENGINE_DEFECTIVE" = "true"')
+         and concl_run.index('INCONCLUSIVE_CLASS" = "empty-completion"')
+         < concl_run.index('ENGINE_DEFECTIVE" = "true"')
+         and concl_run.index('INCONCLUSIVE_CLASS" = "engine-terminal-other"')
+         < concl_run.index('ENGINE_DEFECTIVE" = "true"'),
+         "structural: the engine-terminal classes (attempt-cap / empty-completion / "
+         "engine-terminal-other) are tested BEFORE the workflow-side engine-defective "
+         "signature (the engine's own statement outranks a heuristic)")
+    # THE ANTI-FOLDING GUARD (opencharly/.github#133). The pre-fix classifier keyed the
+    # "provider unanswered" flag on a single substring match that INCLUDED `inconclusive:`
+    # - true for EVERY class the engine names - so every class collapsed into that one
+    # label and one canned narrative. The fallback must keep matching only the real stall
+    # markers; re-adding `inconclusive:` there silently re-opens the whole defect, and no
+    # functional scenario would catch it (each one pins a single class).
+    stall_fallback = [ln for ln in review_run.splitlines() if "Client[.]Timeout exceeded" in ln]
+    note(len(stall_fallback) == 1 and "inconclusive:" not in stall_fallback[0],
+         "structural: the no-terminal-line fallback does NOT match `inconclusive:` - that "
+         "substring is true for EVERY engine class, so matching it there is what folded "
+         "every class into provider-unanswered")
+    note("provider never answered or stopped streaming" in review_run,
+         "structural: the classifier keys on the engine's REAL terminal wording "
+         "(review.go's timeout class), not on a retired line the engine never emits")
     # NOTE: the SELECTION of the class is asserted FUNCTIONALLY by the `engine-defective`
     # scenario below - its fake log carries a completed turn 1 + a provider marker, and its
     # expect_comment_contains requires the class in the posted INCONCLUSIVE notice. It is
