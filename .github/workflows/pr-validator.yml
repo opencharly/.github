@@ -290,6 +290,10 @@ jobs:
           # without a rebuild.
           AI_REVIEW_REASONING_EFFORT: ${{ vars.AI_REVIEW_REASONING_EFFORT || '' }}
           AI_REVIEW_MAX_TOKENS: ${{ vars.AI_REVIEW_MAX_TOKENS || '' }}
+          # The OUTPUT/completion cap (distinct from the reasoning+answer budget
+          # above). The engine reads AI_REVIEW_MAX_COMPLETION_TOKENS but the gate
+          # never forwarded it, so the org could not pin it — forward it now.
+          AI_REVIEW_MAX_COMPLETION_TOKENS: ${{ vars.AI_REVIEW_MAX_COMPLETION_TOKENS || '' }}
           # FULL DEBUG TRACE (opt-in via vars). AI_REVIEW_DEBUG makes the engine
           # emit, per turn, the wall time, prompt/context bytes, reasoning bytes,
           # finish_reason, token usage (incl. reasoning tokens) and per-tool
