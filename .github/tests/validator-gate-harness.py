@@ -1564,8 +1564,10 @@ def run_harness():
     cr_tmp = make_tmpdir("validator-head-checks.")
     write_executable(os.path.join(cr_tmp, "curl"), FAKE_CURL_CHECKRUNS)
 
-    def run_head_checks(script_text, case):
-        script = os.path.join(cr_tmp, case + ".sh")
+    # `name` only names the temp script: the FAKE_CR_CASE the fake `curl` keys on is always
+    # `case`, so a pre-fix run can reuse a real case's payload without clobbering its file.
+    def run_head_checks(script_text, case, name=None):
+        script = os.path.join(cr_tmp, (name or case) + ".sh")
         with open(script, "w", encoding="utf-8") as fh:
             fh.write(script_text)
         env = dict(os.environ)
@@ -1602,12 +1604,16 @@ def run_harness():
     # R7 — the `gap` case must FAIL without the change, or it pins nothing. The pre-fix
     # body read `filter=latest`, which GitHub drops the check name from mid-re-run; the
     # same payload then looks like a clean head and the gate arms auto-merge. Reconstruct
-    # that one-line difference and assert it PASSES, i.e. the shipped `filter=all` is what
-    # makes `gap` red.
-    rc_legacy, _ = run_head_checks(head_run.replace("filter=all", "filter=latest"), "gap-legacy")
+    # that one-line difference and run it against the SAME `gap` payload the real body is
+    # asserted on above (FAKE_CR_CASE must be `gap` — any other name misses every branch of
+    # the fake and falls through to an EMPTY check set, where rc=0 holds for ANY body and
+    # the assertion pins nothing).
+    rc_legacy, _ = run_head_checks(head_run.replace("filter=all", "filter=latest"),
+                                  "gap", "gap-prefix")
     note(rc_legacy == 0,
-         "functional: the PRE-FIX body (filter=latest) PASSES the `gap` payload, so the "
-         "`gap` case genuinely reproduces the charly#796 defect (fails without the change) "
+         "functional: the PRE-FIX body (filter=latest) PASSES the `gap` payload — the "
+         "`gap` case genuinely reproduces the charly#796 defect (the same payload is rc=1 "
+         "for the shipped body and rc=0 here, so the case pins the change) "
          "— got rc=" + str(rc_legacy))
 
     tmpdir = make_tmpdir("validator-gate-harness.")
