@@ -16,8 +16,8 @@
 #
 # Runs the plugin-review charly plugin to review this PR and gate it with a
 # deterministic Verdict: PASS|BLOCK, ONE review comment, $GITHUB_OUTPUT outputs.
-# (A policy auto-close step posts a SECOND, distinct notice when a PR exceeds the
-# BLOCK threshold; that notice is not a review comment.)
+# (A policy auto-close step posts a SECOND, distinct notice on the BLOCK threshold or
+# on the FIRST INCONCLUSIVE verdict; that notice is not a review comment.)
 # The engine invoked is whatever the pinned charly release (vars.CHARLY_VERSION)
 # welds. This workflow passes no plan path: the plain `charly review --out ...`
 # form is accepted by BOTH the pre-rewrite engine and the embedded-prompt engine,
@@ -486,27 +486,37 @@ jobs:
           fi
           echo "verdict=$distinct" >> "$GITHUB_OUTPUT"
 
-      # AUTO-CLOSE after N non-PASS verdicts (workflow policy,
-      # AI_REVIEW_AUTO_CLOSE_AFTER, default 5). A PR that keeps collecting verdicts —
-      # because the author re-pushes without fixing the raised findings, OR because the
-      # provider keeps producing no answer (INCONCLUSIVE) — inflates the reviewer's own
-      # context with its comment thread and risks a runaway review. Counting the
-      # validator's OWN non-PASS verdict comments (BLOCK **and** INCONCLUSIVE) and
-      # closing at the threshold, with a message telling the author to open a NEW
-      # fully-fixed PR, bounds that loop for BOTH classes. An INCONCLUSIVE is not a code
-      # finding, so the "fix every finding" advice applies to any BLOCK in the thread;
-      # the close is the bounded loop-terminator either way. Runs BEFORE the BLOCK and
-      # INCONCLUSIVE gates so the close + message land, then the matching gate still
-      # fails the check (the close is a policy action, not a verdict). 0 disables it.
-      # The count is the PR's own review comments, so it survives across runs with no
-      # external state.
-      - name: Auto-close after N BLOCK/INCONCLUSIVE verdicts
+      # AUTO-CLOSE — the thread-terminator, ONE bound per verdict class (workflow policy):
+      #   * ONE `INCONCLUSIVE` closes the PR IMMEDIATELY (`INCONCLUSIVE_THRESHOLD`, 1).
+      #     An INCONCLUSIVE is the provider producing NO answer: not a code finding, and
+      #     not a pass either — so the only useful move is a CLEAN thread with a single
+      #     fresh run, never a second verdict on this one.
+      #   * `BLOCK`s keep `AI_REVIEW_AUTO_CLOSE_AFTER` (default 5): a finding IS
+      #     actionable on the same thread, so a fixing push is the normal path — and the
+      #     bound catches an author who re-pushes without fixing.
+      # A PR that keeps collecting verdicts inflates the reviewer's own context with its
+      # comment thread and risks a runaway review. Closing at the class bound, with a
+      # notice telling the author to open a CLEAN PR FROM SCRATCH (every finding already
+      # fixed), bounds that loop for BOTH classes. `AI_REVIEW_AUTO_CLOSE_AFTER=0` (or a
+      # non-numeric value) is the ONE off switch and disables auto-close for BOTH classes
+      # — the INCONCLUSIVE rule is deliberately NOT carved out of it. Runs BEFORE the
+      # BLOCK and INCONCLUSIVE gates so the close + message land, then the matching gate
+      # still fails the check (the close is a policy action, not a verdict). The count is
+      # the PR's own review comments PLUS this run's own verdict — whose notice the gate
+      # posts AFTER this step, which is exactly why this step runs first, and which is
+      # what makes ONE INCONCLUSIVE close on its very first run.
+      - name: Auto-close (BLOCK threshold or ONE INCONCLUSIVE)
         if: steps.parse.outputs.verdict == 'BLOCK' || steps.parse.outputs.verdict == 'INCONCLUSIVE'
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ inputs.pr-number }}
           REPO: ${{ github.repository }}
+          VERDICT: ${{ steps.parse.outputs.verdict }}
           THRESHOLD: ${{ vars.AI_REVIEW_AUTO_CLOSE_AFTER || '5' }}
+          # The BLOCK bound is an org variable; the INCONCLUSIVE bound is a CONSTANT of
+          # this policy (1) and is deliberately NOT org-configurable: "the provider
+          # produced no answer" is a fact about the engine, not a per-repo tuning choice.
+          INCONCLUSIVE_THRESHOLD: '1'
         run: |
           case "$THRESHOLD" in
             ''|*[!0-9]*) echo "::warning::AI_REVIEW_AUTO_CLOSE_AFTER=$THRESHOLD is not a number — disabling auto-close"; exit 0;;
@@ -515,25 +525,47 @@ jobs:
             echo "auto-close disabled (threshold=$THRESHOLD)"
             exit 0
           fi
-          # Count the validator's OWN non-PASS verdict comments — the exact
+          inc_threshold="${INCONCLUSIVE_THRESHOLD:-1}"
+          case "$inc_threshold" in
+            ''|*[!0-9]*) echo "::warning::INCONCLUSIVE_THRESHOLD=$inc_threshold is not a number — the INCONCLUSIVE rule is inactive"; inc_threshold=0;;
+          esac
+          # Count the validator's OWN verdict comments PER CLASS — the exact
           # "## Review — BLOCK" header AND the exact "## validator INCONCLUSIVE"
-          # header every review comment carries. The count MUST be page-correct:
+          # header every comment carries. The count MUST be page-correct:
           # `gh api --paginate ... --jq` applies the filter PER PAGE (so a
           # >30-comment thread yields several numbers), which the guard below would
           # reject and silently disable auto-close on exactly the long threads this
           # feature exists to bound. `--paginate | jq -s` collects the pages into ONE
-          # array first.
-          nonpass=$(gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments?per_page=100" 2>/dev/null \
-            | jq -s '[.[][] | select(.user.login=="github-actions[bot]") | select((.body | contains("## Review — BLOCK")) or (.body | contains("## validator INCONCLUSIVE")))] | length' 2>/dev/null || true)
-          case "$nonpass" in
-            ''|*[!0-9]*) echo "::warning::could not count BLOCK/INCONCLUSIVE comments (got '$nonpass') — not auto-closing"; exit 0;;
+          # array first. The two classes are counted SEPARATELY because their bounds
+          # differ (ONE INCONCLUSIVE vs AI_REVIEW_AUTO_CLOSE_AFTER BLOCKs).
+          counts=$(gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments?per_page=100" 2>/dev/null \
+            | jq -s -r '[.[][] | select(.user.login=="github-actions[bot]") | .body] as $b
+              | "\(($b | map(select(contains("## Review — BLOCK"))) | length)) \(($b | map(select(contains("## validator INCONCLUSIVE"))) | length))"' 2>/dev/null || true)
+          blocks="${counts%% *}"
+          inconclusives="${counts##* }"
+          case "$blocks" in
+            ''|*[!0-9]*) echo "::warning::could not count the BLOCK/INCONCLUSIVE comments (got '$counts') — not auto-closing"; exit 0;;
           esac
-          echo "BLOCK/INCONCLUSIVE verdicts on this PR: $nonpass (threshold $THRESHOLD)"
-          if [ "$nonpass" -lt "$THRESHOLD" ]; then
-            echo "below threshold — not closing"
+          case "$inconclusives" in
+            ''|*[!0-9]*) echo "::warning::could not count the BLOCK/INCONCLUSIVE comments (got '$counts') — not auto-closing"; exit 0;;
+          esac
+          # THIS run's verdict is not in the thread yet (the gate posts its notice after
+          # this step), so an INCONCLUSIVE verdict is counted here by construction.
+          this_run_inconclusive=0
+          if [ "$VERDICT" = "INCONCLUSIVE" ]; then this_run_inconclusive=1; fi
+          inc_total=$((inconclusives + this_run_inconclusive))
+          nonpass=$((blocks + inc_total))
+          echo "BLOCK/INCONCLUSIVE verdicts on this PR: $nonpass ($blocks BLOCK, $inc_total INCONCLUSIVE)"
+          echo "bounds — BLOCK=$THRESHOLD (AI_REVIEW_AUTO_CLOSE_AFTER), INCONCLUSIVE=$inc_threshold"
+          if [ "$inc_threshold" -gt 0 ] && [ "$inc_total" -ge "$inc_threshold" ]; then
+            close_why="ONE \`INCONCLUSIVE\` verdict (INCONCLUSIVE_THRESHOLD=$inc_threshold)"
+          elif [ "$blocks" -ge "$THRESHOLD" ]; then
+            close_why="${blocks} \`BLOCK\` verdicts (AI_REVIEW_AUTO_CLOSE_AFTER=$THRESHOLD)"
+          else
+            echo "below both bounds — not closing"
             exit 0
           fi
-          msg=$(printf '## Auto-closed: %s unanswered BLOCK/INCONCLUSIVE verdicts\n\nThis PR has received **%s** non-PASS validator verdicts — `BLOCK` (findings not fixed) and/or `INCONCLUSIVE` (the provider produced no answer) — so the gate is auto-closing it (threshold `AI_REVIEW_AUTO_CLOSE_AFTER=%s`).\n\n**Why:** re-running the validator against the same unfixed head only adds another verdict and grows this PR'\''s comment thread, which is what drives the reviewer into a runaway. The loop is bounded here instead.\n\n**What to do:** open a **NEW** pull request from a fresh branch. Fix **every** finding from any `BLOCK` verdict below before opening it. If the thread is all `INCONCLUSIVE` (no findings — the provider never answered), the close is a policy bound, not a code finding: re-open a fresh PR once the provider/engine condition is resolved.\n\nThis is a policy action, not a code finding — the validator verdict on this run stands.' "$nonpass" "$nonpass" "$THRESHOLD")
+          msg=$(printf '## Auto-closed: %s non-PASS verdicts on this thread — open a clean PR from scratch\n\n**Closed after** %s.\n\nVerdicts on this thread: **%s** `BLOCK` and **%s** `INCONCLUSIVE` (`AI_REVIEW_AUTO_CLOSE_AFTER=%s` bounds the `BLOCK` class; **ONE** `INCONCLUSIVE` is the `INCONCLUSIVE` bound).\n\n**The rule:** open a clean pull request from scratch — a **fresh branch and a fresh thread** — after **%s `BLOCK` verdicts** (or `AI_REVIEW_AUTO_CLOSE_AFTER`) **or ONE `INCONCLUSIVE` verdict**. Never another push, re-run, or re-open on this thread.\n\n**Why:** every further run on this thread spends a full verdict to say nothing new, and grows this PR'\''s comment thread — which is what drives the reviewer into a runaway. The loop is bounded here instead.\n\n**What to do:**\n1. Fix **every** finding in the `BLOCK` verdict(s) below, **then** open the clean pull request from scratch with those fixes already in.\n2. If the thread is all `INCONCLUSIVE` (no findings — the provider never answered), the close is a **policy bound, not a code finding**: open the clean pull request from scratch once the provider/engine condition is resolved.\n\nThis is a policy action, not a code finding — the validator verdict on this run stands.' "$nonpass" "$close_why" "$blocks" "$inc_total" "$THRESHOLD" "$THRESHOLD")
           gh pr comment "$PR_NUMBER" --repo "$REPO" --body "$msg" || echo "::warning::could not post the auto-close notice (non-fatal)"
           gh pr close "$PR_NUMBER" --repo "$REPO" || echo "::warning::could not close the PR (non-fatal)"
 
@@ -612,7 +644,7 @@ jobs:
             class="provider rejected the request (HTTP ${PROVIDER_ERROR}) — a provider/protocol/config matter, not an engine verdict"
             rootcause="**Root cause.** The model endpoint answered **HTTP ${PROVIDER_ERROR}** — an explicit REJECTION: the provider parsed the request and refused it, and its own message is in the diagnostics below. This log carries NO stall marker (which is what the no-headers class requires) and no completed-turn-1-then-stall pair (which is the engine-defective signature), so neither of those classes describes this run: the rejection itself is the cause."
             remedy1="1. read the provider message in the diagnostics below — it names the missing or wrong element;"
-            remedy2="2. fix it at the review client or in the org AI_REVIEW_* variables, then re-run. An HTTP rejection is deterministic — do NOT retry blindly (R4)."
+            remedy2="2. fix it at the review client or in the org AI_REVIEW_* variables, then open a CLEAN PR from scratch. An HTTP rejection is deterministic — do NOT retry blindly (R4)."
           elif [ "$ENGINE_DEFECTIVE" = "true" ]; then
             class="engine-defective (the review engine completed turn 1 and failed a later turn — the context-dependent timeout/empty-content class; opencharly/.github#97, see the T13 engine-change exception)"
             rootcause="**Root cause.** The engine COMPLETED turn 1 (the endpoint answered) and a LATER turn failed — the context-dependent class a provider story cannot explain (opencharly/.github#97)."
@@ -622,13 +654,13 @@ jobs:
             class="provider unanswered (the provider stopped answering within the stream-idle bound)"
             rootcause="**Root cause.** The model endpoint stopped answering — no response headers, or a stream that went silent past \`AI_REVIEW_STREAM_IDLE_TIMEOUT\`. That is a provider/endpoint matter, not a code finding."
             remedy1="1. escalate to the operator: the provider and its \`AI_REVIEW_*\` configuration are theirs;"
-            remedy2="2. a re-run is a fresh attempt: re-run once on the operator's word, never blindly in a loop (R4)."
+            remedy2="2. a fresh attempt must be a CLEAN PR from scratch (a fresh branch): this thread is auto-closed by policy on ONE \`INCONCLUSIVE\`, so never re-run or re-open it (R4)."
           elif [ "$DISCARDED_VERDICT" = "true" ]; then
             class="charly review exited rc=${REVIEW_RC} with a non-BLOCK"
             class="$class verdict — FAIL-CLOSED: a non-zero review exit may"
             class="$class only carry a real BLOCK finding, discarded"
             rootcause='**Root cause.** The review exited non-zero and had written a verdict that is NOT BLOCK. That verdict is untrustworthy by construction (T3/T4): a crashed or non-clean run may only carry a real BLOCK finding, so the file was moved aside and the run is reported as INCONCLUSIVE.'
-            remedy1="1. re-run once the engine is healthy;"
+            remedy1="1. open a CLEAN PR from scratch once the engine is healthy — this thread is auto-closed by policy on ONE \`INCONCLUSIVE\`;"
             remedy2="2. never treat a non-zero run PASS as a verdict — fail-closed is by design (T3/T4)."
           fi
           {
@@ -654,6 +686,8 @@ jobs:
             echo '**Durable remedy.**'
             echo "$remedy1"
             echo "$remedy2"
+            echo
+            echo '**Thread policy.** A thread gets ONE run per verdict: the auto-close step closes this PR on **ONE `INCONCLUSIVE`** (and on `AI_REVIEW_AUTO_CLOSE_AFTER` `BLOCK`s), so the next attempt must be a **clean PR from scratch** — a fresh branch and a fresh thread — with every finding already fixed. Never re-run or re-open this thread.'
             echo
             echo 'A run that produced no verdict keeps this required check **RED**: unreviewed code must never merge.'
             echo

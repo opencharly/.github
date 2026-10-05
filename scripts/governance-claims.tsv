@@ -43,6 +43,18 @@ rerun_manual	dotgithub README	dotgithub/README.md	require	actions/runs/.*/rerun
 rerun_manual	dotgithub README	dotgithub/README.md	forbid	gh run rerun <run-id>
 rerun_manual	org-wide required workflow	dotgithub/.github/workflows/org-wide-pr-validator-required.yml	forbid	gh run rerun <run-id>
 auto_close_threshold	validator workflow	dotgithub/.github/workflows/pr-validator.yml	require	AI_REVIEW_AUTO_CLOSE_AFTER .. .5.
+# Operator direction (2026-10-05): the auto-close bound differs PER CLASS. A `BLOCK` verdict
+# is a code finding, so it keeps the org variable (AI_REVIEW_AUTO_CLOSE_AFTER, default 5);
+# an `INCONCLUSIVE` verdict is NOT a code finding — a further run on the same thread spends
+# a full verdict to say nothing new — so ONE of them closes the PR immediately. The
+# INCONCLUSIVE bound is a CONSTANT of the workflow and is deliberately NOT org-configurable
+# (it is the runaway bound, not a policy dial); AI_REVIEW_AUTO_CLOSE_AFTER=0 still switches
+# BOTH classes off.
+auto_close_threshold	validator workflow	dotgithub/.github/workflows/pr-validator.yml	require	INCONCLUSIVE_THRESHOLD: .1.
+auto_close_threshold	validator workflow	dotgithub/.github/workflows/pr-validator.yml	require	ONE .INCONCLUSIVE. verdict
+# The close notice must carry the remedy, not just the fact: a fresh branch and a fresh
+# thread, with every finding already fixed (the operator's instruction verbatim).
+auto_close_threshold	validator workflow	dotgithub/.github/workflows/pr-validator.yml	require	open a clean (pull request|PR) from scratch
 candy_gate_single_pin	org-wide candy validate reusable	dotgithub/.github/workflows/candy-validate.yml	require	vars.CHARLY_VERSION
 candy_gate_no_hand_pin	org-wide candy validate reusable	dotgithub/.github/workflows/candy-validate.yml	forbid	--branch v20
 auto_close_threshold	umbrella AGENTS.md	AGENTS.md	require	AI_REVIEW_AUTO_CLOSE_AFTER., default 5
