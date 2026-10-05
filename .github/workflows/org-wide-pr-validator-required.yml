@@ -61,6 +61,10 @@ permissions:
   contents: write
   pull-requests: write
   actions: write
+  # `pr-validator.yml`'s gate B reads the head's check runs. A called workflow can only
+  # hold a permission its CALLER also grants, so the reader must be declared on BOTH
+  # surfaces — here as well as in the reusable. Read-only; the gate is not widened.
+  checks: read
 
 jobs:
   validate:
