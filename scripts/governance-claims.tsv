@@ -47,3 +47,21 @@ candy_gate_single_pin	org-wide candy validate reusable	dotgithub/.github/workflo
 candy_gate_no_hand_pin	org-wide candy validate reusable	dotgithub/.github/workflows/candy-validate.yml	forbid	--branch v20
 auto_close_threshold	umbrella AGENTS.md	AGENTS.md	require	AI_REVIEW_AUTO_CLOSE_AFTER., default 5
 auto_close_threshold	git-workflow skill source	layer-charly-internals/charly.yml	require	AI_REVIEW_AUTO_CLOSE_AFTER., (effective )?default 5
+# charly#796: the org's ONE required context is `validate / validate`, so a repo's own `ci`
+# was enforced by NOBODY and a head with a red `go` could merge (measured twice: charly#795,
+# charly#791). The fix moved that enforcement INSIDE the required check — two deterministic
+# gates — so the rulebook must stop claiming branch protection covers it, and the workflow
+# must keep both gates present.
+ci_gate_mechanical	org-wide required workflow	dotgithub/.github/workflows/org-wide-pr-validator-required.yml	require	checks: read
+ci_gate_mechanical	validator workflow	dotgithub/.github/workflows/pr-validator.yml	require	id: go-modules
+ci_gate_mechanical	validator workflow	dotgithub/.github/workflows/pr-validator.yml	require	id: golint
+ci_gate_mechanical	validator workflow	dotgithub/.github/workflows/pr-validator.yml	require	id: head-checks
+ci_gate_mechanical	validator workflow	dotgithub/.github/workflows/pr-validator.yml	require	check-runs\?per_page=100&filter=all
+# `filter=latest` is the DEFECT, not the fix: during a re-run GitHub drops the check name
+# from it entirely (measured), so a gate reading it arms auto-merge on a head whose check is
+# mid-re-run. The URL fragment, not the bare word — the file names `latest` in prose to
+# explain why it is not used.
+ci_gate_mechanical	validator workflow	dotgithub/.github/workflows/pr-validator.yml	forbid	check-runs\?per_page=100&filter=latest
+ci_gate_mechanical	validator rulebook	dotgithub/charly.yml	require	BRANCH PROTECTION DOES NOT ENFORCE IT
+ci_gate_mechanical	validator rulebook	dotgithub/charly.yml	require	enforced by that first gate, NOT by branch
+ci_gate_mechanical	validator rulebook	dotgithub/charly.yml	forbid	enforced by branch protection

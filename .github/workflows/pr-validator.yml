@@ -1,8 +1,18 @@
 # ORG-WIDE PR VALIDATOR (reusable, called via workflow_call)
 #
 # Validates a PR via AI review. On PASS, enables GitHub native auto-merge
-# (squash). GitHub branch protection waits for all required checks
-# (including repo-specific CI gates like verify/go) before merging.
+# (squash), which then waits for the branch's REQUIRED checks before merging — and the
+# org ruleset (23827016) requires exactly ONE context, `validate / validate`, THIS
+# check. A repo's own CI (e.g. `go`) is therefore NOT required and is NOT waited on;
+# this comment said otherwise until opencharly/charly#796, the same false premise the
+# reviewer rulebook item B18 rested on. Two DETERMINISTIC gates therefore run INSIDE
+# this check, before auto-merge is armed, so a PASS now means the head really is green:
+#   * gate B reads EVERY check run on this head off the API and fails on any that did
+#     not pass, WAITING (bounded) for in-flight ones to settle first;
+#   * gate A runs the repo's own DECLARED golangci-lint config over its Go module roots,
+#     and skips repos that declare none.
+# A repo's own CI stays advisory, exactly as designed. Both gates and their measured
+# justification are documented at the steps themselves.
 #
 # Runs the plugin-review charly plugin to review this PR and gate it with a
 # deterministic Verdict: PASS|BLOCK, ONE review comment, $GITHUB_OUTPUT outputs.
@@ -125,6 +135,11 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  # GATE B reads this head's check runs off the GitHub API. `checks` is its OWN scope —
+  # neither `contents` nor `pull-requests` grants it — and a CALLED workflow can only hold
+  # what its caller also grants, so the org-wide caller declares it too. Read-only, and the
+  # only permission this change adds anywhere.
+  checks: read
 
 jobs:
   validate:
@@ -662,6 +677,286 @@ jobs:
           echo "::error::Ambiguous verdict from AI review (mixed PASS+BLOCK, or an unparsable verdict output)"
           exit 2
 
+      # ---------------------------------------------------------------------------
+      # THE TWO DETERMINISTIC GATES THAT MAKE A `PASS` MEAN "the head is green"
+      # (opencharly/charly#796).
+      #
+      # WHY THEY ARE HERE, INSIDE THE ONE REQUIRED CHECK. Checklist item B18 used to tell
+      # the reviewer that "CI status is NOT a review input ... branch protection enforces
+      # the repo's required checks mechanically". MEASURED, that premise was FALSE: the ONE
+      # org ruleset (23827016) requires exactly ONE context — `validate / validate` — so a
+      # repo's own `ci` job was enforced by NOBODY: not by branch protection, and (on B18's
+      # explicit instruction) not by the reviewer either. MEASURED cost, two merged heads:
+      #   charly#795 — `go` FAILED at 02:35:42Z; the review PASSed at 02:44:58Z, 9m16s LATER,
+      #                and the merge landed at 02:45:21Z on that already-red head.
+      #   charly#791 — the merge landed at 21:25:04Z while `go` was STILL RUNNING; `go` then
+      #                failed at its Test step at 21:27:24Z, 2m20s AFTER the merge.
+      # #791 is why gate B below WAITS rather than taking a snapshot: at gate time the doomed
+      # check was `in_progress`, not `failure`, so a snapshot would have missed it entirely.
+      #
+      # GATE B — EVERY CHECK ON THIS HEAD, read from the GitHub API. Generic by construction:
+      # it reproduces whatever gate the repo declares, with no linter, no checkout and no
+      # per-repo coupling. It WAITS, bounded, for in-flight checks to finish — because the
+      # review is FASTER than the repo's own CI in 4 of 5 sampled PRs (`validate` 0m40s–14m15s
+      # vs `go` 3m57s–5m11s), so failing closed the instant a check is pending would block
+      # most PRs. A check that is absent is of course not evidence of anything, so a repo
+      # with no other checks at all is unaffected.
+      #
+      # GATE A — THE REPO'S DECLARED LINT. Gate B cannot see a repo that declares a lint
+      # policy nothing ever runs (MEASURED: `plugin-check` carries `.golangci.yml` and its only
+      # workflow is `tag-on-merge.yml`). Gate A runs golangci-lint over each Go module root
+      # that has a DECLARED config — and SKIPS the rest, because falling back to
+      # golangci-lint's standard set would impose a NEW gate on repos that never linted:
+      # MEASURED, 6 of 8 sampled org repos holding a `go.mod` and NO config FAIL that standard
+      # set (`SA1019` in a generated `schema_splice_test.go` scaffold, `errcheck` on tests,
+      # one `typecheck`). The repo's own CI stays advisory, exactly as designed.
+      #
+      # CONFIG SELECTION IS THE SUBTLE PART — measured, and it decided the design.
+      # golangci-lint resolves its config by walking UP from its CWD, so `cd <module root>` is
+      # NOT what a repo's CI does. charly carries TWO configs: `charly/.golangci.yml` (the
+      # baseline its CI resolves, running `run ./charly/...` from the repo root) and the
+      # stricter curated `charly/charly/.golangci.yml`. Same commit: root config -> `0 issues`;
+      # the module's own -> `2 issues`. A naive `cd` gate would falsely red charly itself. So:
+      #   * a config at the repo root IS the repo-level policy and is applied to every module;
+      #   * with no root config, each module uses the config it declares itself (walk-up);
+      #   * a module with neither is SKIPPED — it has declared no lint policy.
+      # `GOWORK=off` is REQUIRED: charly's 5 `tools/*` modules are not members of
+      # `charly/go.work` (`use ./charly` only), so without it the gate ERRORS on them instead
+      # of linting. With both corrections, all six charly module roots yield `0 issues`.
+      # gofmt is deliberately NOT asserted separately: it is a FORMATTER, enabled by the
+      # repo's OWN config (charly's enables it), and inventing a gofmt gate for repos that
+      # chose differently would be new policy, not enforcement.
+      #
+      # BOTH GATE THE MERGE ONLY, guarded exactly like "Enable auto-merge" below: they run
+      # after the verdict gates, so the review, its comment and the auto-close counter are
+      # untouched — a failure blocks ARMING AUTO-MERGE and turns the check red; it does not
+      # suppress or replace the verdict.
+      #
+      # THE CHECKOUT IS A SUBPATH (`pr-head`), never the workspace root: the review step
+      # runs from `$GITHUB_WORKSPACE/runner-config`, and a self-modifying gate must not
+      # change what its own review input looks like.
+      # ---------------------------------------------------------------------------
+      - uses: actions/checkout@v7
+        if: steps.parse.outputs.verdict == 'PASS'
+        with:
+          ref: ${{ steps.pr.outputs.head_sha }}
+          path: pr-head
+          fetch-depth: 1
+          persist-credentials: false
+
+      # ----- GATE A — the repo's DECLARED lint (see the block comment above) -----------
+
+      - name: "Detect Go modules under a declared golangci-lint config (skip cleanly otherwise)"
+        id: go-modules
+        if: steps.parse.outputs.verdict == 'PASS'
+        run: |
+          # A config at the repo ROOT is the repo-level policy and governs every module
+          # below it. This is the resolution charly's own CI gets (it runs from the repo
+          # root), and it is why the gate does not simply `cd` into each module: the
+          # module's own closer config is a DIFFERENT, stricter policy (see the block
+          # comment above — it is the difference between `0 issues` and `2 issues`).
+          root_cfg=""
+          if [ -f pr-head/.golangci.yml ]; then
+            root_cfg="pr-head/.golangci.yml"
+          elif [ -f pr-head/.golangci.yaml ]; then
+            root_cfg="pr-head/.golangci.yaml"
+          fi
+
+          # GNU find on every GitHub-hosted runner. `-prune` the .git and vendor trees: a
+          # vendored tree carries nested go.mod files that are NOT modules of this repo.
+          # `|| true` is load-bearing — an absent or unreadable tree must yield an EMPTY
+          # list and a clean skip, never abort the step under the job shell's -e.
+          mods="$(find pr-head \( -name .git -o -name vendor \) -prune -o -name go.mod -printf '%h\n' 2>/dev/null | sort || true)"
+
+          # Keep a module ONLY when a config governs it: the repo-root one, or one it
+          # declares itself inside the repo (walk-up, exactly golangci-lint's own rule).
+          # A module with neither is SKIPPED, because falling back to golangci-lint's
+          # standard set would impose a NEW gate on a repo that has never linted.
+          roots=""
+          while IFS= read -r m; do
+            if [ -z "$m" ]; then continue; fi
+            if [ -n "$root_cfg" ]; then
+              roots="${roots}${m}"$'\n'
+              continue
+            fi
+            d="$m"
+            while :; do
+              if [ -f "$d/.golangci.yml" ] || [ -f "$d/.golangci.yaml" ]; then
+                roots="${roots}${m}"$'\n'
+                break
+              fi
+              if [ "$d" = "pr-head" ]; then break; fi
+              d="$(dirname "$d")"
+            done
+          done <<< "$mods"
+
+          if [ -z "$roots" ]; then
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "no Go module under a declared golangci-lint config in ${GITHUB_REPOSITORY} — the declared-lint gate is skipped (a repo's own CI stays advisory, as designed)"
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+            echo "config=$root_cfg" >> "$GITHUB_OUTPUT"
+            {
+              echo "roots<<__MODULE_ROOTS__"
+              printf '%s' "$roots"
+              echo "__MODULE_ROOTS__"
+            } >> "$GITHUB_OUTPUT"
+            # No apostrophe inside ${...:-...}: bash treats a quote character in the word
+            # part of a parameter expansion as a QUOTE, which breaks the whole script.
+            echo "Go module roots to lint (config: ${root_cfg:-per-module}):"
+            printf '%s\n' "$roots"
+          fi
+
+      - uses: actions/setup-go@v5
+        if: steps.parse.outputs.verdict == 'PASS' && steps.go-modules.outputs.present == 'true'
+        with:
+          # 'stable': the module roots are discovered at RUN time, so there is no static
+          # path to hand go-version-file; a module declaring an older toolchain still
+          # resolves through Go's own toolchain directive.
+          go-version: 'stable'
+
+      - name: "golangci-lint (the repo's declared lint, enforced)"
+        id: golint
+        if: steps.parse.outputs.verdict == 'PASS' && steps.go-modules.outputs.present == 'true'
+        # Its OWN wall clock, so a hung linter fails fast instead of consuming the job's
+        # timeout-minutes backstop — which exists for a provider-unanswered REVIEW.
+        timeout-minutes: 12
+        env:
+          GOLANGCI_LINT_VERSION: ${{ vars.GOLANGCI_LINT_VERSION || 'v2.13.2' }}
+          GO_MODULE_ROOTS: ${{ steps.go-modules.outputs.roots }}
+          GO_MODULE_CONFIG: ${{ steps.go-modules.outputs.config }}
+        run: |
+          # The pin defaults to v2.13.2 — the version BOTH org repos that lint today pin
+          # in their own CI (charly, spec). An operator moves it for the WHOLE org with
+          # `gh variable set GOLANGCI_LINT_VERSION --org opencharly`. The release tarball
+          # is public, so the fetch is tokenless (the same reason ensure-charly curls
+          # rather than using gh).
+          VER="${GOLANGCI_LINT_VERSION#v}"
+          D="${{ runner.temp }}/golangci-lint-$VER"
+          mkdir -p "$D"
+          curl -fsSL -o "$D/lint.tar.gz" \
+            "https://github.com/golangci/golangci-lint/releases/download/v$VER/golangci-lint-$VER-linux-amd64.tar.gz"
+          tar -xzf "$D/lint.tar.gz" -C "$D"
+          BIN="$D/golangci-lint-$VER-linux-amd64/golangci-lint"
+          "$BIN" version
+
+          fail=0
+          # A here-string, never a pipe: the loop body must run in THIS shell, or `fail`
+          # would be lost in a subshell and the gate would always exit green.
+          while IFS= read -r root; do
+            if [ -z "$root" ]; then continue; fi
+            echo "== golangci-lint: $root =="
+            if [ -n "$GO_MODULE_CONFIG" ]; then
+              # The repo-level policy, applied explicitly so it cannot be shadowed by a
+              # closer module config (golangci-lint would otherwise resolve that one).
+              ( cd "$root" && GOWORK=off "$BIN" run --config "$GITHUB_WORKSPACE/$GO_MODULE_CONFIG" ./... ) || fail=1
+            else
+              # No repo-level policy: let golangci-lint resolve the module's own config by
+              # walking up, which is exactly the one the detection step matched on.
+              ( cd "$root" && GOWORK=off "$BIN" run ./... ) || fail=1
+            fi
+          done <<< "$GO_MODULE_ROOTS"
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::the declared-lint gate FAILED — fix the findings above and push; auto-merge is NOT armed"
+          fi
+          exit $fail
+
+      # ----- GATE B — every check on this head (see the block comment above) -----------
+
+      - name: "Head check-runs (wait for the head to settle, then fail on any check that did not pass)"
+        id: head-checks
+        if: steps.parse.outputs.verdict == 'PASS'
+        # Its OWN wall clock: the wait below is bounded, this is the backstop should the
+        # API hang rather than answer.
+        timeout-minutes: 14
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+          WAIT_BUDGET_SECONDS: '600'
+        run: |
+          api="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}"
+          auth=(-H "Authorization: Bearer ${GH_TOKEN}" \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2022-11-28")
+
+          # This gate must not count ITSELF: its own check run is `in_progress` for the whole
+          # time it polls, so counting it would make every PR wait the full budget and then
+          # fail. TWO discriminators, belt and braces, because the failure mode of getting
+          # this wrong is every PR in the org:
+          #   (1) `details_url` carries this run's id — MEASURED on a live head: the check run
+          #       `validate / validate` had details_url
+          #       `.../actions/runs/37257260832/job/111596907011`, and 37257260832 IS the
+          #       `charly/pr-validator` run for that head. A job-level `uses:` runs INSIDE the
+          #       caller's run, so GITHUB_RUN_ID is the same number here. Exact, and it needs
+          #       no extra permission (no `actions: read`, no suite lookup).
+          #   (2) the org's required context BY NAME. A check can never be evidence about
+          #       itself, the newest attempt for this name is always the run polling here, and
+          #       this workflow IS the owner of that context — so dropping it loses no signal
+          #       even if (1) ever stopped holding (e.g. a caller that renames its job).
+          self_url="/runs/${GITHUB_RUN_ID}"
+          self_ctx="validate / validate"
+
+          # MEASURED — do NOT use `filter=latest` here. GitHub's `latest` filter returns the
+          # newest check run per (app, name) — which is the semantics this gate wants — but
+          # during a RE-RUN of a workflow it briefly drops that name ENTIRELY: the superseded
+          # attempt is removed before its successor is created. Polled directly against the
+          # live API on a re-run, two consecutive polls returned `latest: []` (the name gone)
+          # while `filter=all` returned the six completed attempts. A gate reading `latest`
+          # therefore sees an EMPTY check set in that window, concludes "nothing is pending,
+          # nothing failed", and arms auto-merge on a head whose check is mid-re-run — the
+          # #791 hole re-opened. `filter=all` + `max_by(.id)` reproduces `latest`'s
+          # newest-per-name semantics WITHOUT the window: check-run ids are monotonically
+          # increasing (verified), so the newest attempt stays visible at every instant.
+          # The 100-run page cap is the only residual limit; a head would need >100 attempts
+          # across ALL of its workflows to truncate, and per-name the list is newest-first.
+          snapshot() {
+            curl -fsS "${auth[@]}" \
+              "${api}/commits/${HEAD_SHA}/check-runs?per_page=100&filter=all" \
+            | jq --arg self "$self_url" --arg selfctx "$self_ctx" -c '
+                [ .check_runs[] | select((.details_url // "") | contains($self) | not)
+                                 | select(.name != $selfctx) ]
+                | group_by(.name + "\u0000" + (.app.slug // ""))
+                | map(max_by(.id))
+                | { pending: [ .[] | select(.status != "completed") | .name ],
+                    bad:     [ .[] | select(.status == "completed"
+                                            and (.conclusion as $c
+                                                 | ["success","neutral","skipped"] | index($c) | not))
+                                     | "\(.name) -> \(.conclusion)" ],
+                    all:     [ .[] | "\(.name) -> \(.status)/\(.conclusion)" ],
+                    total:   length }'
+          }
+
+          deadline=$(( $(date +%s) + WAIT_BUDGET_SECONDS ))
+          while :; do
+            if ! snap="$(snapshot)"; then
+              echo "::error::could not read the check runs for ${HEAD_SHA} — refusing to arm auto-merge on an unread head"
+              exit 1
+            fi
+            npending="$(jq -r '.pending | length' <<<"$snap")"
+            if [ "$npending" -eq 0 ]; then break; fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then break; fi
+            echo "waiting on ${npending} in-flight check(s): $(jq -r '.pending | join(", ")' <<<"$snap")"
+            sleep 15
+          done
+
+          echo "check runs on ${HEAD_SHA} in ${GITHUB_REPOSITORY} (this gate excluded):"
+          jq -r '.all[]' <<<"$snap"
+
+          nbad="$(jq -r '.bad | length' <<<"$snap")"
+          if [ "$nbad" -ne 0 ]; then
+            while IFS= read -r line; do echo "::error::a check on this head did not pass — ${line}"; done < <(jq -r '.bad[]' <<<"$snap")
+            echo "::error::${nbad} check(s) on this head did not pass. Auto-merge is NOT armed — fix them and push."
+            exit 1
+          fi
+
+          if [ "$npending" -ne 0 ]; then
+            echo "::error::could not confirm this head is green: still in flight after ${WAIT_BUDGET_SECONDS}s — $(jq -r '.pending | join(", ")' <<<"$snap")"
+            echo "::error::re-run this check once they finish (a push, or a REST re-run of this workflow run, re-evaluates it)."
+            exit 1
+          fi
+
+          echo "all $(jq -r '.total' <<<"$snap") check run(s) on this head passed — safe to arm auto-merge"
+
       # Enable auto-merge — RESILIENTLY. GitHub rejects the mutation with
       # "Pull request is in unstable status" while any required check is still
       # pending/failing, and repos may legitimately carry more than one check
@@ -690,7 +985,7 @@ jobs:
             fi
             case "$out" in
               *"unstable status"*)
-                echo "attempt $att"
+                echo "attempt $attempt unstable — retrying"
                 sleep 10
                 ;;
               *"is behind"*)

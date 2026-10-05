@@ -557,6 +557,38 @@ FAKE_GH = NL.join([
     "exit 0",
     ""
 ])
+# A fake `curl` for the head-checks gate sub-test. The REAL step body runs against it, so
+# the gate's own jq/loop/fail-closed logic is what is being exercised — only the GitHub API
+# boundary is canned. Each case is one branch of the gate, and every one of them was ALSO
+# proven against the live API before this was written (see the PR body for the transcript);
+# the fake exists so the coverage runs deterministically on every push, not to stand in for
+# that live proof.
+#   pass         every check completed green
+#   bad          a check completed FAILED                      -> the #795 / #791 case
+#   pending      a check never settles inside the wait budget -> fail closed
+#   gap          the #796 REGRESSION: during a re-run GitHub's `filter=latest` DROPS the
+#                check name while `filter=all` still lists it. The gate must read `all`.
+#   self         a check run whose details_url names THIS run id (the gate itself)
+FAKE_CURL_CHECKRUNS = NL.join([
+    "#!/usr/bin/env bash",
+    "ok='{\"name\":\"validate / validate\",\"status\":\"completed\",\"conclusion\":\"success\",\"details_url\":\"https://x/runs/1\",\"id\":2,\"app\":{\"slug\":\"github-actions\"}}'",
+    "gofail='{\"name\":\"go\",\"status\":\"completed\",\"conclusion\":\"failure\",\"details_url\":\"https://x/runs/3\",\"id\":3,\"app\":{\"slug\":\"github-actions\"}}'",
+    "gook='{\"name\":\"go\",\"status\":\"completed\",\"conclusion\":\"success\",\"details_url\":\"https://x/runs/3\",\"id\":3,\"app\":{\"slug\":\"github-actions\"}}'",
+    "gopend='{\"name\":\"go\",\"status\":\"in_progress\",\"conclusion\":null,\"details_url\":\"https://x/runs/3\",\"id\":3,\"app\":{\"slug\":\"github-actions\"}}'",
+    "selfrun='{\"name\":\"validate / validate\",\"status\":\"completed\",\"conclusion\":\"failure\",\"details_url\":\"https://x/runs/424242\",\"id\":99,\"app\":{\"slug\":\"github-actions\"}}'",
+    "case \"${FAKE_CR_CASE:-}\" in",
+    "  pass)    printf '{\"check_runs\":[%s,%s]}' \"$ok\" \"$gook\" ;;",
+    "  bad)     printf '{\"check_runs\":[%s,%s]}' \"$ok\" \"$gofail\" ;;",
+    "  pending) printf '{\"check_runs\":[%s,%s]}' \"$ok\" \"$gopend\" ;;",
+    "  self)    printf '{\"check_runs\":[%s,%s]}' \"$ok\" \"$selfrun\" ;;",
+    "  gap)",
+    "    # the whole point: `latest` loses the check, `all` still has it",
+    "    if [[ \"$*\" == *\"filter=latest\"* ]]; then printf '{\"check_runs\":[%s]}' \"$ok\"",
+    "    else printf '{\"check_runs\":[%s,%s]}' \"$ok\" \"$gofail\"; fi ;;",
+    "  *)       printf '{\"check_runs\":[]}' ;;",
+    "esac",
+    ""
+])
 def write_executable(path, content):
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(content)
@@ -602,6 +634,19 @@ TARGETS = [
     ("name", "Gate (BLOCK)"),
     ("name", "Gate (inconclusive)"),
     ("name", "Gate (ambiguous)"),
+    # The two new gates sit between the verdict gates and auto-merge, in the workflow's
+    # own order. `go-modules` is fully offline (find + bash over the workspace) and is
+    # exercised as the REAL body here — in this fixture workspace there is no `pr-head/`
+    # checkout, so it takes its SKIP path, which is exactly the contract to pin: a repo
+    # with no declared golangci-lint config must skip cleanly and never false-red.
+    # `golint` is guarded on `present == 'true'`, so it is skipped in every scenario and
+    # is listed only so the coverage ledger names the whole chain.
+    # `head-checks` is deliberately NOT in TARGETS: it polls the live GitHub API, and a
+    # step listed here is executed against the workspace with only `charly`/`gh` faked.
+    # It is covered the way ensure-charly is — a dedicated functional sub-test that runs
+    # the REAL body against a controlled PATH (see "HEAD CHECK-RUNS GATE" below).
+    ("id", "go-modules"),
+    ("id", "golint"),
     ("name", "Enable auto-merge"),
     # The evidence step runs on `if: always()`, so it is exercised on every scenario —
     # including the failing ones (which is the whole point: the evidence exists when the
@@ -614,7 +659,7 @@ SCENARIOS = [
         "name": "pass",
         "fake": "pass",
         "expect_exit": 0,
-        "expect_steps": ["review", "parse", "Enable auto-merge", "evidence"],
+        "expect_steps": ["review", "parse", "go-modules", "Enable auto-merge", "evidence"],
         "expect_summary_contains": [
             "## Validator evidence",
             "| review exit code |",
@@ -927,7 +972,7 @@ SCENARIOS = [
         "fake": "pass",
         "unwritable_evidence": True,
         "expect_exit": 0,
-        "expect_steps": ["review", "parse", "Enable auto-merge", "evidence"],
+        "expect_steps": ["review", "parse", "go-modules", "Enable auto-merge", "evidence"],
         "expect_verdict": "PASS",
         "expect_comment": False,
         "expect_auto_merge": True,
@@ -1503,6 +1548,67 @@ def run_harness():
     note("::warning::on-PATH charly" in out and "downloading" in out,
          "functional: ensure-charly LOUDLY warns and downloads the pinned engine when the "
          "on-PATH charly DIFFERS from the pin (the stale-engine defect)")
+
+    # HEAD CHECK-RUNS GATE (charly#796). The org's ONE required context is
+    # `validate / validate`, so a repo's own `ci` was enforced by nobody and a head whose
+    # `go` was red could still merge — MEASURED on charly#795 (go failed 9m16s before
+    # validate passed) and charly#791 (merged at 21:25:04Z while `go` was still RUNNING;
+    # `go` failed at 21:27:24Z). This step closes that: it reads the head's OWN check runs
+    # and fails the required check on any that did not pass, after WAITING (bounded) for
+    # any still in flight. It reads the live GitHub API, so — exactly like ensure-charly —
+    # it is NOT in TARGETS; the REAL body is run below against a controlled PATH carrying a
+    # fake `curl`. Every branch asserted here was ALSO proven against the live API (the
+    # PR body carries that transcript); the fake is what makes the coverage deterministic
+    # on every push, not a substitute for the live proof.
+    head_run = find_step(steps, "id", "head-checks")["run"]
+    cr_tmp = make_tmpdir("validator-head-checks.")
+    write_executable(os.path.join(cr_tmp, "curl"), FAKE_CURL_CHECKRUNS)
+
+    def run_head_checks(script_text, case):
+        script = os.path.join(cr_tmp, case + ".sh")
+        with open(script, "w", encoding="utf-8") as fh:
+            fh.write(script_text)
+        env = dict(os.environ)
+        env["PATH"] = cr_tmp + os.pathsep + os.environ.get("PATH", "/usr/bin:/bin")
+        env.update({
+            "GITHUB_API_URL": "https://api.github.com",
+            "GITHUB_REPOSITORY": "opencharly/harness-fixture",
+            "GITHUB_RUN_ID": "424242",
+            "GH_TOKEN": "fake-token",
+            "HEAD_SHA": "0" * 40,
+            # The harness never sleeps: a zero budget means the first poll that finds
+            # something in flight has already reached the deadline, so the FAIL-CLOSED
+            # branch is asserted without waiting 10 minutes for it.
+            "WAIT_BUDGET_SECONDS": "0",
+            "FAKE_CR_CASE": case,
+        })
+        proc = subprocess.run([bash_path, "--noprofile", "--norc", "-eo", "pipefail", script],
+                              cwd=cr_tmp, env=env, stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, universal_newlines=True)
+        return proc.returncode, proc.stdout
+
+    for case, want_rc, marker in [
+        ("pass", 0, "safe to arm auto-merge"),
+        ("bad", 1, "did not pass"),
+        ("pending", 1, "could not confirm this head is green"),
+        ("gap", 1, "did not pass"),
+        ("self", 0, "safe to arm auto-merge"),
+    ]:
+        rc, out = run_head_checks(head_run, case)
+        note(rc == want_rc and marker in out,
+             "functional: head-checks `" + case + "` exits " + str(want_rc) + " with `" +
+             marker + "` — got rc=" + str(rc) + " out=" + repr(out[-200:]))
+
+    # R7 — the `gap` case must FAIL without the change, or it pins nothing. The pre-fix
+    # body read `filter=latest`, which GitHub drops the check name from mid-re-run; the
+    # same payload then looks like a clean head and the gate arms auto-merge. Reconstruct
+    # that one-line difference and assert it PASSES, i.e. the shipped `filter=all` is what
+    # makes `gap` red.
+    rc_legacy, _ = run_head_checks(head_run.replace("filter=all", "filter=latest"), "gap-legacy")
+    note(rc_legacy == 0,
+         "functional: the PRE-FIX body (filter=latest) PASSES the `gap` payload, so the "
+         "`gap` case genuinely reproduces the charly#796 defect (fails without the change) "
+         "— got rc=" + str(rc_legacy))
 
     tmpdir = make_tmpdir("validator-gate-harness.")
     fakedir = os.path.join(tmpdir, "fakebin")
