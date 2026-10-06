@@ -42,19 +42,22 @@ rerun_manual	org-wide required workflow	dotgithub/.github/workflows/org-wide-pr-
 rerun_manual	dotgithub README	dotgithub/README.md	require	actions/runs/.*/rerun
 rerun_manual	dotgithub README	dotgithub/README.md	forbid	gh run rerun <run-id>
 rerun_manual	org-wide required workflow	dotgithub/.github/workflows/org-wide-pr-validator-required.yml	forbid	gh run rerun <run-id>
+# Operator direction (2026-10-06, opencharly/.github#170): the auto-close bound is ONE
+# count-based number again — AI_REVIEW_AUTO_CLOSE_AFTER (org default 5) — over the
+# validator's `BLOCK` verdicts PLUS its engine/EVAL `INCONCLUSIVE` verdicts. A verdict-less
+# run that is a CLEAR INFRASTRUCTURE failure (the provider endpoint or the GitHub runner —
+# not the engine) is EXCLUDED from the count: it must never close a PR on its own. The
+# INFRA/EVAL split is the `Verdict class: infra` line the INCONCLUSIVE notice emits, which
+# the counter matches by the EXACT literal. AI_REVIEW_AUTO_CLOSE_AFTER=0 switches the bound
+# off entirely. This REVERTS the #169 per-class split (ONE INCONCLUSIVE closed immediately).
 auto_close_threshold	validator workflow	dotgithub/.github/workflows/pr-validator.yml	require	AI_REVIEW_AUTO_CLOSE_AFTER .. .5.
-# Operator direction (2026-10-05): the auto-close bound differs PER CLASS. A `BLOCK` verdict
-# is a code finding, so it keeps the org variable (AI_REVIEW_AUTO_CLOSE_AFTER, default 5);
-# an `INCONCLUSIVE` verdict is NOT a code finding — a further run on the same thread spends
-# a full verdict to say nothing new — so ONE of them closes the PR immediately. The
-# INCONCLUSIVE bound is a CONSTANT of the workflow and is deliberately NOT org-configurable
-# (it is the runaway bound, not a policy dial); AI_REVIEW_AUTO_CLOSE_AFTER=0 still switches
-# BOTH classes off.
-auto_close_threshold	validator workflow	dotgithub/.github/workflows/pr-validator.yml	require	INCONCLUSIVE_THRESHOLD: .1.
-auto_close_threshold	validator workflow	dotgithub/.github/workflows/pr-validator.yml	require	ONE .INCONCLUSIVE. verdict
+auto_close_infra_excluded	validator workflow	dotgithub/.github/workflows/pr-validator.yml	require	Verdict class: infra
+auto_close_no_one_shot	validator workflow	dotgithub/.github/workflows/pr-validator.yml	forbid	INCONCLUSIVE_THRESHOLD
 # The close notice must carry the remedy, not just the fact: a fresh branch and a fresh
-# thread, with every finding already fixed (the operator's instruction verbatim).
+# thread, with every finding already fixed (the operator's instruction verbatim), AND state
+# that clear infra failures did not count toward the bound.
 auto_close_threshold	validator workflow	dotgithub/.github/workflows/pr-validator.yml	require	open a clean (pull request|PR) from scratch
+auto_close_infra_excluded	validator workflow	dotgithub/.github/workflows/pr-validator.yml	require	excluded as clear .*infrastructure
 candy_gate_single_pin	org-wide candy validate reusable	dotgithub/.github/workflows/candy-validate.yml	require	vars.CHARLY_VERSION
 candy_gate_no_hand_pin	org-wide candy validate reusable	dotgithub/.github/workflows/candy-validate.yml	forbid	--branch v20
 auto_close_threshold	umbrella AGENTS.md	AGENTS.md	require	AI_REVIEW_AUTO_CLOSE_AFTER., default 5
