@@ -61,9 +61,10 @@ SCENARIOS ASSERTED END TO END (exit code + classification output + PR comment)
                         quotes it, instead of falling through to a signature
   AUTO-CLOSE (the policy bound on an unreviewable PR)
     auto-close-at-threshold / -multi-page / -over-threshold-count /
-    -below-threshold / -inconclusive-prior / -inconclusive-immediate
-    (the BLOCK bound is AI_REVIEW_AUTO_CLOSE_AFTER; ONE INCONCLUSIVE is
-    its own bound, so the FIRST inconclusive run closes immediately)
+    -below-threshold / -eval-counts / -infra-excluded / -infra-only-never-closes
+    (ONE count-based bound is AI_REVIEW_AUTO_CLOSE_AFTER over `BLOCK` +
+    engine/EVAL INCONCLUSIVE; a CLEAR INFRA INCONCLUSIVE carries
+    `Verdict class: infra` and is EXCLUDED from the count — opencharly/.github#170)
   EVIDENCE
     pass-with-unwritable-evidence
 
@@ -550,10 +551,11 @@ FAKE_GH = NL.join([
     # threshold scenarios; FAKE_OTHER_COUNT + FAKE_PAGE_SIZE keep the multi-page
     # thread reproducible.
     "if [ \"$1\" = \"api\" ]; then",
-    "  python3 - \"${FAKE_BLOCK_COUNT:-0}\" \"${FAKE_INCONCLUSIVE_COUNT:-0}\" \"${FAKE_OTHER_COUNT:-0}\" \"${FAKE_PAGE_SIZE:-30}\" \"${FAKE_COMMENT_LOG:-}\" <<'PYEOF'",
+    "  python3 - \"${FAKE_BLOCK_COUNT:-0}\" \"${FAKE_INCONCLUSIVE_COUNT:-0}\" \"${FAKE_OTHER_COUNT:-0}\" \"${FAKE_PAGE_SIZE:-30}\" \"${FAKE_COMMENT_LOG:-}\" \"${FAKE_INFRA_COUNT:-0}\" <<'PYEOF'",
     "import json, sys",
     "blocks, inconcl, other, size = int(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])",
     "comment_log = sys.argv[5]",
+    "infra = int(sys.argv[6]) if len(sys.argv) > 6 else 0",
     "# Replay the REAL bot notices captured from `gh pr comment` so the counter is",
     "# exercised against the gate's EMITTED artifact, not a re-typed literal. Only",
     "# the machine notices the counter is meant to match are replayed as the bot.",
@@ -570,7 +572,10 @@ FAKE_GH = NL.join([
     "            replayed.append({\"user\": {\"login\": \"github-actions[bot]\"}, \"body\": body})",
     "items = list(replayed)",
     "items += [{\"user\": {\"login\": \"github-actions[bot]\"}, \"body\": \"## Review — BLOCK\\n\\nblocked\"}] * blocks",
-    "items += [{\"user\": {\"login\": \"github-actions[bot]\"}, \"body\": \"## validator INCONCLUSIVE — no review verdict\\n\\nno answer\"}] * inconcl",
+    "# A synthetic EVAL INCONCLUSIVE has NO `Verdict class: infra` line, so it COUNTS.",
+    "items += [{\"user\": {\"login\": \"github-actions[bot]\"}, \"body\": \"## validator INCONCLUSIVE — no review verdict\\n\\nno answer\\n- Verdict class: eval (counts toward AI_REVIEW_AUTO_CLOSE_AFTER)\"}] * inconcl",
+    "# A synthetic INFRA INCONCLUSIVE carries the exact line the counter excludes.",
+    "items += [{\"user\": {\"login\": \"github-actions[bot]\"}, \"body\": \"## validator INCONCLUSIVE — no review verdict\\n\\nno answer\\n- Verdict class: infra (does NOT count toward AI_REVIEW_AUTO_CLOSE_AFTER)\"}] * infra",
     "items += [{\"user\": {\"login\": \"someone\"}, \"body\": \"a normal comment\"}] * other",
     "for i in range(0, max(len(items), 1), size):",
     "    print(json.dumps(items[i:i+size]))",
@@ -655,7 +660,7 @@ TARGETS = [
     # Auto-close runs BEFORE the Gate (BLOCK) in the workflow, so the close +
     # notice land before the gate fails the check. The harness executes in this
     # order, so it must mirror the workflow's.
-    ("name", "Auto-close (BLOCK threshold or ONE INCONCLUSIVE)"),
+    ("name", "Auto-close (max attempts; eval verdicts only)"),
     ("name", "Gate (BLOCK)"),
     ("name", "Gate (inconclusive)"),
     ("name", "Gate (ambiguous)"),
@@ -700,7 +705,7 @@ SCENARIOS = [
         "name": "block",
         "fake": "block",
         "expect_exit": 1,
-        "expect_steps": ["review", "parse", "Auto-close (BLOCK threshold or ONE INCONCLUSIVE)", "Gate (BLOCK)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close (max attempts; eval verdicts only)", "Gate (BLOCK)", "evidence"],
         "expect_verdict": "BLOCK",
         "expect_comment": False,
         "expect_auto_merge": False,
@@ -715,11 +720,11 @@ SCENARIOS = [
         "fake": "block",
         "block_count": 5,
         "expect_exit": 1,
-        "expect_steps": ["review", "parse", "Auto-close (BLOCK threshold or ONE INCONCLUSIVE)", "Gate (BLOCK)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close (max attempts; eval verdicts only)", "Gate (BLOCK)", "evidence"],
         "expect_verdict": "BLOCK",
         "expect_comment": True,
-        "expect_comment_contains": ["Auto-closed", "open a clean pull request from scratch",
-                                    "**Closed after** 5 `BLOCK` verdicts (AI_REVIEW_AUTO_CLOSE_AFTER=5)"],
+        "expect_comment_contains": ["Auto-closed", "open a clean PR from scratch",
+                                    "**Closed after** 5 counting verdict(s) reached AI_REVIEW_AUTO_CLOSE_AFTER=5"],
         "expect_auto_merge": False,
         "expect_closed": True,
         "expect_review_outputs": {"provider_unanswered": "false", "review_rc": "0"},
@@ -737,11 +742,11 @@ SCENARIOS = [
         "other_count": 60,
         "page_size": 30,
         "expect_exit": 1,
-        "expect_steps": ["review", "parse", "Auto-close (BLOCK threshold or ONE INCONCLUSIVE)", "Gate (BLOCK)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close (max attempts; eval verdicts only)", "Gate (BLOCK)", "evidence"],
         "expect_verdict": "BLOCK",
         "expect_comment": True,
-        "expect_comment_contains": ["Auto-closed", "open a clean pull request from scratch",
-                                    "**Closed after** 5 `BLOCK` verdicts (AI_REVIEW_AUTO_CLOSE_AFTER=5)"],
+        "expect_comment_contains": ["Auto-closed", "open a clean PR from scratch",
+                                    "**Closed after** 5 counting verdict(s) reached AI_REVIEW_AUTO_CLOSE_AFTER=5"],
         "expect_auto_merge": False,
         "expect_closed": True,
         "expect_review_outputs": {"provider_unanswered": "false", "review_rc": "0"},
@@ -756,27 +761,25 @@ SCENARIOS = [
         "fake": "block",
         "block_count": 8,
         "expect_exit": 1,
-        "expect_steps": ["review", "parse", "Auto-close (BLOCK threshold or ONE INCONCLUSIVE)", "Gate (BLOCK)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close (max attempts; eval verdicts only)", "Gate (BLOCK)", "evidence"],
         "expect_verdict": "BLOCK",
         "expect_comment": True,
-        "expect_comment_contains": ["Auto-closed: 8 non-PASS verdicts on this thread",
+        "expect_comment_contains": ["Auto-closed: 8 counting verdict(s) on this thread",
                                     "**8** `BLOCK`",
-                                    "**Closed after** 8 `BLOCK` verdicts (AI_REVIEW_AUTO_CLOSE_AFTER=5)"],
-        "expect_comment_excludes": ["Auto-closed: 5 non-PASS"],
+                                    "**Closed after** 8 counting verdict(s) reached AI_REVIEW_AUTO_CLOSE_AFTER=5"],
+        "expect_comment_excludes": ["Auto-closed: 5 counting"],
         "expect_auto_merge": False,
         "expect_closed": True,
         "expect_review_outputs": {"provider_unanswered": "false", "review_rc": "0"},
     },
     {
-        # AUTO-CLOSE (below threshold, BLOCK only): 4 BLOCKs against the default BLOCK
-        # threshold 5 must NOT close — and the run carries NO INCONCLUSIVE anywhere, so
-        # the ONE-INCONCLUSIVE bound is not in play. This is the scenario that fails if
-        # the class-split ever collapses back into one shared counter.
+        # AUTO-CLOSE (below threshold): 4 BLOCKs against the default threshold 5 must
+        # NOT close. This is the base of the restored count-based bound.
         "name": "auto-close-below-threshold",
         "fake": "block",
         "block_count": 4,
         "expect_exit": 1,
-        "expect_steps": ["review", "parse", "Auto-close (BLOCK threshold or ONE INCONCLUSIVE)", "Gate (BLOCK)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close (max attempts; eval verdicts only)", "Gate (BLOCK)", "evidence"],
         "expect_verdict": "BLOCK",
         "expect_comment": False,
         "expect_auto_merge": False,
@@ -784,41 +787,59 @@ SCENARIOS = [
         "expect_review_outputs": {"provider_unanswered": "false", "review_rc": "0"},
     },
     {
-        # AUTO-CLOSE (ONE INCONCLUSIVE, prior run): the bound this policy exists for. ONE
-        # INCONCLUSIVE already in the thread closes the PR on the NEXT run — even though
-        # that next run is a BLOCK well below the BLOCK threshold (0 blocks here). Under
-        # the retired shared counter this thread would have needed 5 non-PASS verdicts.
-        "name": "auto-close-inconclusive-prior",
+        # AUTO-CLOSE (restored count bound, MIXED classes): 4 BLOCKs + 1 EVAL
+        # INCONCLUSIVE on the thread = 5 counting verdicts, so the PR closes. This is
+        # the exact case #169 got WRONG in the other direction: an eval-class
+        # INCONCLUSIVE is a review attempt and DOES count, together with BLOCKs.
+        "name": "auto-close-eval-counts",
         "fake": "block",
-        "block_count": 0,
+        "block_count": 4,
         "inconclusive_count": 1,
         "expect_exit": 1,
-        "expect_steps": ["review", "parse", "Auto-close (BLOCK threshold or ONE INCONCLUSIVE)", "Gate (BLOCK)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close (max attempts; eval verdicts only)", "Gate (BLOCK)", "evidence"],
         "expect_verdict": "BLOCK",
         "expect_comment": True,
-        "expect_comment_contains": ["Auto-closed", "**Closed after** ONE `INCONCLUSIVE` verdict (INCONCLUSIVE_THRESHOLD=1)",
-                                    "**1** `INCONCLUSIVE`"],
+        "expect_comment_contains": ["Auto-closed: 5 counting verdict(s) on this thread",
+                                    "**4** `BLOCK`",
+                                    "**1** counted `INCONCLUSIVE`"],
         "expect_auto_merge": False,
         "expect_closed": True,
         "expect_review_outputs": {"provider_unanswered": "false", "review_rc": "0"},
     },
     {
-        # AUTO-CLOSE (THIS run's INCONCLUSIVE): the provider produced no answer, so the
-        # verdict comment is posted by the gate AFTER the auto-close step — the thread
-        # count is 0 at close time. The step must still close: this run's own
-        # INCONCLUSIVE is counted by construction (VERDICT == INCONCLUSIVE), which is
-        # what makes the FIRST inconclusive run close immediately instead of waiting for
-        # a second one. The notice is the policy bound, not a code finding.
-        "name": "auto-close-inconclusive-immediate",
+        # AUTO-CLOSE (INFRA EXCLUDED — the #170 fix): 4 BLOCKs + 1 prior INFRA
+        # INCONCLUSIVE, with THIS run ALSO an infra failure (provider-unanswered).
+        # Under #169 this closed on the single infra verdict; under the restored bound
+        # the counting class is 4 BLOCKs (< 5) and the infra verdicts are EXCLUDED, so
+        # the PR MUST NOT close. This is the regression the operator reported.
+        "name": "auto-close-infra-excluded",
         "fake": "provider-unanswered",
+        "block_count": 4,
+        "infra_count": 1,
         "expect_exit": 3,
-        "expect_steps": ["review", "parse", "Auto-close (BLOCK threshold or ONE INCONCLUSIVE)", "Gate (inconclusive)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close (max attempts; eval verdicts only)", "Gate (inconclusive)", "evidence"],
         "expect_verdict": "INCONCLUSIVE",
         "expect_comment": True,
-        "expect_comment_contains": ["Auto-closed", "**Closed after** ONE `INCONCLUSIVE` verdict (INCONCLUSIVE_THRESHOLD=1)",
-                                    "open a clean pull request from scratch"],
         "expect_auto_merge": False,
-        "expect_closed": True,
+        "expect_closed": False,
+        "expect_comment_contains": ["Verdict class: infra (does NOT count toward AI_REVIEW_AUTO_CLOSE_AFTER)"],
+        "expect_review_outputs": {"provider_unanswered": "true", "review_rc": "1",
+                                  "discarded_verdict": "false"},
+    },
+    {
+        # AUTO-CLOSE (INFRA-ONLY thread NEVER closes): zero BLOCKs and four infra
+        # INCONCLUSIVEs — a PR that only ever hit provider/GitHub hiccups must NEVER
+        # be closed by the bound. Proves infra failures do not accumulate toward the max.
+        "name": "auto-close-infra-only-never-closes",
+        "fake": "provider-unanswered",
+        "block_count": 0,
+        "infra_count": 4,
+        "expect_exit": 3,
+        "expect_steps": ["review", "parse", "Auto-close (max attempts; eval verdicts only)", "Gate (inconclusive)", "evidence"],
+        "expect_verdict": "INCONCLUSIVE",
+        "expect_comment": True,
+        "expect_auto_merge": False,
+        "expect_closed": False,
         "expect_review_outputs": {"provider_unanswered": "true", "review_rc": "1",
                                   "discarded_verdict": "false"},
     },
@@ -826,7 +847,7 @@ SCENARIOS = [
         "name": "provider-unanswered",
         "fake": "provider-unanswered",
         "expect_exit": 3,
-        "expect_steps": ["review", "parse", "Auto-close (BLOCK threshold or ONE INCONCLUSIVE)", "Gate (inconclusive)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close (max attempts; eval verdicts only)", "Gate (inconclusive)", "evidence"],
         "expect_verdict": "INCONCLUSIVE",
         "expect_comment": True,
         "expect_auto_merge": False,
@@ -840,11 +861,11 @@ SCENARIOS = [
             "provider unanswered",
             "in-job retries: none",
             "AI_REVIEW_STREAM_IDLE_TIMEOUT",
-            # ONE INCONCLUSIVE is the bound, so THIS run (whose previous count is 0) is
-            # closed with the clean-PR instruction — asserted from the emitted log.
-            "open a clean pull request from scratch",
+            # A provider stall is a CLEAR INFRA failure: it is excluded from the
+            # auto-close count and labelled as such in the emitted notice.
+            "Verdict class: infra (does NOT count toward AI_REVIEW_AUTO_CLOSE_AFTER)",
         ],
-        "expect_closed": True,
+        "expect_closed": False,
         "expect_review_outputs": {"provider_unanswered": "true", "review_rc": "1",
                                   "discarded_verdict": "false"},
     },
@@ -860,7 +881,7 @@ SCENARIOS = [
         "name": "attempt-cap",
         "fake": "attempt-cap",
         "expect_exit": 3,
-        "expect_steps": ["review", "parse", "Auto-close (BLOCK threshold or ONE INCONCLUSIVE)", "Gate (inconclusive)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close (max attempts; eval verdicts only)", "Gate (inconclusive)", "evidence"],
         "expect_verdict": "INCONCLUSIVE",
         "expect_comment": True,
         "expect_comment_contains": [
@@ -877,10 +898,10 @@ SCENARIOS = [
         # provider story may appear for a cap-cut run.
         "expect_comment_excludes": ["provider unanswered", "empty completion"],
         "expect_auto_merge": False,
-        "expect_closed": True,
+        "expect_closed": False,
         "expect_review_outputs": {"inconclusive_class": "attempt-cap",
                                   "provider_unanswered": "false", "review_rc": "1",
-                                  "discarded_verdict": "false"},
+                                  "discarded_verdict": "false", "inconclusive_infra": "true"},
     },
     {
         # THE EMPTY-COMPLETION class (#133): a DIFFERENT terminal line, a DIFFERENT
@@ -889,7 +910,7 @@ SCENARIOS = [
         "name": "empty-completion",
         "fake": "empty-completion",
         "expect_exit": 3,
-        "expect_steps": ["review", "parse", "Auto-close (BLOCK threshold or ONE INCONCLUSIVE)", "Gate (inconclusive)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close (max attempts; eval verdicts only)", "Gate (inconclusive)", "evidence"],
         "expect_verdict": "INCONCLUSIVE",
         "expect_comment": True,
         "expect_comment_contains": [
@@ -899,13 +920,14 @@ SCENARIOS = [
             "**Measured in this run**",
             "produced no answer",
             "AI_REVIEW_MAX_TOKENS",
+            "Verdict class: infra (does NOT count toward AI_REVIEW_AUTO_CLOSE_AFTER)",
         ],
         "expect_comment_excludes": ["provider unanswered", "whole-request cap"],
         "expect_auto_merge": False,
-        "expect_closed": True,
+        "expect_closed": False,
         "expect_review_outputs": {"inconclusive_class": "empty-completion",
                                   "provider_unanswered": "false", "review_rc": "1",
-                                  "discarded_verdict": "false"},
+                                  "discarded_verdict": "false", "inconclusive_infra": "true"},
     },
     {
         # AN ENGINE CLASS THE WORKFLOW HAS NO NARRATIVE FOR (#133). The engine's fail-closed
@@ -919,7 +941,7 @@ SCENARIOS = [
         "name": "engine-terminal-other",
         "fake": "engine-terminal-other",
         "expect_exit": 3,
-        "expect_steps": ["review", "parse", "Auto-close (BLOCK threshold or ONE INCONCLUSIVE)", "Gate (inconclusive)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close (max attempts; eval verdicts only)", "Gate (inconclusive)", "evidence"],
         "expect_verdict": "INCONCLUSIVE",
         "expect_comment": True,
         "expect_comment_contains": [
@@ -934,10 +956,10 @@ SCENARIOS = [
         ],
         "expect_comment_excludes": ["provider unanswered", "whole-request cap", "empty completion"],
         "expect_auto_merge": False,
-        "expect_closed": True,
+        "expect_closed": False,
         "expect_review_outputs": {"inconclusive_class": "engine-terminal-other",
                                   "provider_unanswered": "false", "review_rc": "1",
-                                  "discarded_verdict": "false"},
+                                  "discarded_verdict": "false", "inconclusive_infra": "false"},
     },
     {
         # The engine-defective class must be SELECTED from the run's own signature, not merely
@@ -945,10 +967,12 @@ SCENARIOS = [
         # plus a provider marker, so the true branch of the classification fires and the
         # INCONCLUSIVE notice must name the class. Pre-fix (no engine_defective branch) the
         # notice cannot contain it, so these assertions FAIL on the pre-fix workflow.
+        # engine-defective is an EVAL failure (the engine RAN and failed a later turn), so it
+        # counts toward the bound — but a single one is below the default 5 and must NOT close.
         "name": "engine-defective",
         "fake": "engine-defective",
         "expect_exit": 3,
-        "expect_steps": ["review", "parse", "Auto-close (BLOCK threshold or ONE INCONCLUSIVE)", "Gate (inconclusive)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close (max attempts; eval verdicts only)", "Gate (inconclusive)", "evidence"],
         "expect_verdict": "INCONCLUSIVE",
         "expect_comment": True,
         "expect_auto_merge": False,
@@ -956,10 +980,12 @@ SCENARIOS = [
             "validator INCONCLUSIVE",
             "engine-defective (the review engine",
             "T13 engine-change exception",
+            "Verdict class: eval (counts toward AI_REVIEW_AUTO_CLOSE_AFTER)",
         ],
-        "expect_closed": True,
+        "expect_closed": False,
         "expect_review_outputs": {"provider_unanswered": "true", "engine_defective": "true",
-                                  "review_rc": "1", "discarded_verdict": "false"},
+                                  "review_rc": "1", "discarded_verdict": "false",
+                                  "inconclusive_infra": "false"},
     },
     {
         # A provider HTTP rejection is its OWN class with its OWN narrative. Before this
@@ -970,7 +996,7 @@ SCENARIOS = [
         "name": "provider-error",
         "fake": "provider-error",
         "expect_exit": 3,
-        "expect_steps": ["review", "parse", "Auto-close (BLOCK threshold or ONE INCONCLUSIVE)", "Gate (inconclusive)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close (max attempts; eval verdicts only)", "Gate (inconclusive)", "evidence"],
         "expect_verdict": "INCONCLUSIVE",
         "expect_comment": True,
         "expect_auto_merge": False,
@@ -980,15 +1006,16 @@ SCENARIOS = [
             "an explicit REJECTION",
             "read the provider message in the diagnostics",
             "do NOT retry blindly",
+            "Verdict class: infra (does NOT count toward AI_REVIEW_AUTO_CLOSE_AFTER)",
         ],
         "expect_comment_excludes": [
             "whole-generation deadline is the wrong bound",
             "verdict-less review output",
         ],
-        "expect_closed": True,
+        "expect_closed": False,
         "expect_review_outputs": {"provider_error": "400", "provider_unanswered": "false",
                                   "engine_defective": "false", "review_rc": "1",
-                                  "discarded_verdict": "false"},
+                                  "discarded_verdict": "false", "inconclusive_infra": "true"},
         # The ALWAYS-present surface: a reader opening the failed run finds the class and the
         # effective configuration on the Summary page — no PR-comment round trip, no log hunt.
         "expect_summary_contains": [
@@ -1006,7 +1033,7 @@ SCENARIOS = [
         "name": "unanswered-plus-error",
         "fake": "unanswered-plus-error",
         "expect_exit": 3,
-        "expect_steps": ["review", "parse", "Auto-close (BLOCK threshold or ONE INCONCLUSIVE)", "Gate (inconclusive)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close (max attempts; eval verdicts only)", "Gate (inconclusive)", "evidence"],
         "expect_verdict": "INCONCLUSIVE",
         "expect_comment": True,
         "expect_auto_merge": False,
@@ -1019,10 +1046,10 @@ SCENARIOS = [
             "neither of those classes describes",
             "the engine never got to run a turn",
         ],
-        "expect_closed": True,
+        "expect_closed": False,
         "expect_review_outputs": {"provider_error": "400", "provider_unanswered": "true",
                                   "engine_defective": "false", "review_rc": "1",
-                                  "discarded_verdict": "false"},
+                                  "discarded_verdict": "false", "inconclusive_infra": "true"},
     },
     {
         # continue-on-error on the reporting steps: the evidence step FAILS (its RUNNER_TEMP is
@@ -1047,7 +1074,7 @@ SCENARIOS = [
         "name": "mixed-signals",
         "fake": "mixed-signals",
         "expect_exit": 3,
-        "expect_steps": ["review", "parse", "Auto-close (BLOCK threshold or ONE INCONCLUSIVE)", "Gate (inconclusive)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close (max attempts; eval verdicts only)", "Gate (inconclusive)", "evidence"],
         "expect_verdict": "INCONCLUSIVE",
         "expect_comment": True,
         "expect_auto_merge": False,
@@ -1060,10 +1087,10 @@ SCENARIOS = [
             "the engine never got to run a turn",
             "neither of those classes describes",
         ],
-        "expect_closed": True,
+        "expect_closed": False,
         "expect_review_outputs": {"provider_error": "400", "provider_unanswered": "true",
                                   "engine_defective": "true", "review_rc": "1",
-                                  "discarded_verdict": "false"},
+                                  "discarded_verdict": "false", "inconclusive_infra": "false"},
     },
     {
         # The BOUNDARY the extractor must respect. Before the pattern was narrowed to [45]xx,
@@ -1073,7 +1100,7 @@ SCENARIOS = [
         "name": "non-error-status",
         "fake": "non-error-status",
         "expect_exit": 3,
-        "expect_steps": ["review", "parse", "Auto-close (BLOCK threshold or ONE INCONCLUSIVE)", "Gate (inconclusive)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close (max attempts; eval verdicts only)", "Gate (inconclusive)", "evidence"],
         "expect_verdict": "INCONCLUSIVE",
         "expect_comment": True,
         "expect_auto_merge": False,
@@ -1085,16 +1112,16 @@ SCENARIOS = [
             "provider rejected the request",
             "an explicit REJECTION",
         ],
-        "expect_closed": True,
+        "expect_closed": False,
         "expect_review_outputs": {"provider_error": "", "provider_unanswered": "false",
                                   "engine_defective": "false", "review_rc": "1",
-                                  "discarded_verdict": "false"},
+                                  "discarded_verdict": "false", "inconclusive_infra": "false"},
     },
     {
         "name": "verdict-less",
         "fake": "verdict-less",
         "expect_exit": 3,
-        "expect_steps": ["review", "parse", "Auto-close (BLOCK threshold or ONE INCONCLUSIVE)", "Gate (inconclusive)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close (max attempts; eval verdicts only)", "Gate (inconclusive)", "evidence"],
         "expect_verdict": "INCONCLUSIVE",
         "expect_comment": True,
         "expect_auto_merge": False,
@@ -1108,9 +1135,9 @@ SCENARIOS = [
         "expect_comment_excludes": [
             "whole-generation deadline is the wrong bound",
         ],
-        "expect_closed": True,
+        "expect_closed": False,
         "expect_review_outputs": {"provider_unanswered": "false", "review_rc": "2",
-                                  "discarded_verdict": "false"},
+                                  "discarded_verdict": "false", "inconclusive_infra": "false"},
     },
     {
         "name": "mixed",
@@ -1130,7 +1157,7 @@ SCENARIOS = [
         "name": "pass-with-error",
         "fake": "pass-with-error",
         "expect_exit": 3,
-        "expect_steps": ["review", "parse", "Auto-close (BLOCK threshold or ONE INCONCLUSIVE)", "Gate (inconclusive)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close (max attempts; eval verdicts only)", "Gate (inconclusive)", "evidence"],
         "expect_verdict": "INCONCLUSIVE",
         "expect_comment": True,
         "expect_auto_merge": False,
@@ -1139,11 +1166,12 @@ SCENARIOS = [
             "FAIL-CLOSED",
             "may only carry a real BLOCK finding",
             "untrustworthy by construction",
+            "Verdict class: infra (does NOT count toward AI_REVIEW_AUTO_CLOSE_AFTER)",
         ],
-        "expect_closed": True,
+        "expect_closed": False,
         "expect_review_outputs": {"provider_unanswered": "false", "review_rc": "1",
                                   "success": "false", "inconclusive": "true",
-                                  "discarded_verdict": "true"},
+                                  "discarded_verdict": "true", "inconclusive_infra": "true"},
     },
     {
         # A finding is a finding: BLOCK is the ONLY class a non-zero review exit
@@ -1152,7 +1180,7 @@ SCENARIOS = [
         "name": "block-with-error",
         "fake": "block-with-error",
         "expect_exit": 1,
-        "expect_steps": ["review", "parse", "Auto-close (BLOCK threshold or ONE INCONCLUSIVE)", "Gate (BLOCK)", "evidence"],
+        "expect_steps": ["review", "parse", "Auto-close (max attempts; eval verdicts only)", "Gate (BLOCK)", "evidence"],
         "expect_verdict": "BLOCK",
         "expect_comment": False,
         "expect_auto_merge": False,
@@ -1215,6 +1243,7 @@ def run_scenario(spec, ordered, tmpdir, fakedir, workspace):
         # scenario supplies the count so the threshold branch is exercised.
         env["FAKE_BLOCK_COUNT"] = str(spec.get("block_count", 0))
         env["FAKE_INCONCLUSIVE_COUNT"] = str(spec.get("inconclusive_count", 0))
+        env["FAKE_INFRA_COUNT"] = str(spec.get("infra_count", 0))
         env["FAKE_OTHER_COUNT"] = str(spec.get("other_count", 0))
         env["FAKE_PAGE_SIZE"] = str(spec.get("page_size", 30))
         stem = label + "." + re.sub("[^A-Za-z0-9]+", "_", name)
@@ -1460,7 +1489,7 @@ def run_harness():
     # so a rename of the notice header would make the production count 0 while this guard
     # still passed. Derive the literal from the COUNTER, then require it in the GATE's
     # emitted notice, so the two surfaces are tied rather than counted.
-    auto_close_run = find_step(steps, "name", "Auto-close (BLOCK threshold or ONE INCONCLUSIVE)")["run"]
+    auto_close_run = find_step(steps, "name", "Auto-close (max attempts; eval verdicts only)")["run"]
     concl_run = find_step(steps, "name", "Gate (inconclusive)")["run"]
     inconclusive_literal = "## validator INCONCLUSIVE"
     if inconclusive_literal in auto_close_run:
@@ -1478,25 +1507,32 @@ def run_harness():
              "together with the counter)")
     note("## Review — BLOCK" in auto_close_run,
          "structural: the auto-close counter still matches the BLOCK verdict's exact header")
-    # The class-split BOUNDS are a structural contract too, not only a functional one: the
-    # BLOCK bound stays the org variable, and the INCONCLUSIVE bound stays the CONSTANT 1
-    # (a per-repo tunable would let a repo re-open the loop this policy closes).
+    # The COUNT-BASED bound is the structural contract: ONE org variable
+    # (AI_REVIEW_AUTO_CLOSE_AFTER) over `BLOCK` + engine/EVAL INCONCLUSIVE, with a CLEAR
+    # INFRA INCONCLUSIVE excluded (opencharly/.github#170 — reverts the #169 one-shot).
     auto_close_env = find_step(
-        steps, "name", "Auto-close (BLOCK threshold or ONE INCONCLUSIVE)")["env"]
-    note(auto_close_env.get("INCONCLUSIVE_THRESHOLD") == "1",
-         "structural: the auto-close step's INCONCLUSIVE bound is the CONSTANT 1 (got " +
-         repr(auto_close_env.get("INCONCLUSIVE_THRESHOLD")) + ") — ONE INCONCLUSIVE closes the "
-         "thread, and the bound is deliberately not org-configurable")
+        steps, "name", "Auto-close (max attempts; eval verdicts only)")["env"]
+    note("INCONCLUSIVE_THRESHOLD" not in auto_close_env,
+         "structural: the ONE-INCONCLUSIVE constant is GONE — there is ONE count-based bound "
+         "(the #169 per-class split is reverted)")
     note("AI_REVIEW_AUTO_CLOSE_AFTER" in auto_close_env.get("THRESHOLD", ""),
-         "structural: the BLOCK bound is still the org variable AI_REVIEW_AUTO_CLOSE_AFTER "
+         "structural: the bound is the org variable AI_REVIEW_AUTO_CLOSE_AFTER "
          "(got " + repr(auto_close_env.get("THRESHOLD")) + ")")
     note("steps.parse.outputs.verdict" in auto_close_env.get("VERDICT", ""),
-         "structural: the auto-close step reads THIS run's verdict, so an INCONCLUSIVE whose "
-         "notice the gate posts LATER still counts as one")
-    note("open a clean PR from scratch" in auto_close_run
-         and "ONE `INCONCLUSIVE`" in auto_close_run,
-         "structural: the close notice names the policy — a clean PR from scratch after the "
-         "BLOCK bound or ONE INCONCLUSIVE — instead of a bare threshold")
+         "structural: the auto-close step reads THIS run's verdict, so an eval INCONCLUSIVE "
+         "whose notice the gate posts LATER still counts as one")
+    note("steps.parse.outputs.inconclusive_infra" in auto_close_env.get("THIS_INFRA", ""),
+         "structural: the auto-close step reads THIS run's infra/eval class, so a clear infra "
+         "failure is EXCLUDED from the count")
+    note("Verdict class: infra" in auto_close_run,
+         "structural: the counter matches the EXACT literal the INCONCLUSIVE gate emits for an "
+         "infra run (`Verdict class: infra`) and excludes it from the max")
+    note("open a clean PR from scratch" in auto_close_run,
+         "structural: the close notice names the policy — a clean PR from scratch once the "
+         "counting verdicts reach the bound — instead of a bare threshold")
+    note("excluded as clear" in auto_close_run and "infrastructure" in auto_close_run,
+         "structural: the close notice states that clear infra failures were EXCLUDED and did "
+         "NOT count toward the bound (the operator-visible half of the fix)")
     note("AI_REVIEW_MAX_ATTEMPTS" not in review_env
          and "AI_REVIEW_TOOL_RESULT_MAX_BYTES" not in review_env,
          "structural: the retired retry/context knobs stay OUT of the review step's env "
@@ -1767,7 +1803,7 @@ def run_harness():
     # The tie is now made against the ARTIFACT: take the EXACT comment body the real
     # `Gate (inconclusive)` step posted (captured in $FAKE_COMMENT_LOG), replay it through the
     # REAL Auto-close step, and require it to CLOSE. A rename of either surface fails here.
-    auto_close_step = find_step(steps, "name", "Auto-close (BLOCK threshold or ONE INCONCLUSIVE)")
+    auto_close_step = find_step(steps, "name", "Auto-close (max attempts; eval verdicts only)")
     replay_ns = build_ns({}, workspace, tmpdir)
     replay_bin = os.path.join(tmpdir, "replay-bin")
     os.makedirs(replay_bin)
@@ -1804,7 +1840,7 @@ def run_harness():
         with open(calls, "r", encoding="utf-8") as fh:
             return proc.returncode, proc.stdout, fh.read()
 
-    pu_result = dict((s["name"], r) for s, r in scenario_results).get("provider-unanswered")
+    pu_result = dict((s["name"], r) for s, r in scenario_results).get("verdict-less")
     emitted_log = pu_result["comment_log"] if pu_result else ""
     # The gate's notice is selected BY HEADER, not by position: on an INCONCLUSIVE run the
     # auto-close notice is posted FIRST (the auto-close step runs before the gate), so the
@@ -1817,24 +1853,39 @@ def run_harness():
          "functional: the EXACT literal the auto-close counter matches "
          "('## validator INCONCLUSIVE') opens the gate's EMITTED notice — the emitted "
          "artifact and the counter's filter are TIED, not counted (renaming the notice fails HERE)")
+    # The `verdict-less` fake is an ENGINE/EVAL class (no `Verdict class: infra` line), so it
+    # COUNTS. Replay its emitted notice with ZERO synthetic injections.
     rc, out, calls = run_auto_close(emitted_log)
-    note("BLOCK/INCONCLUSIVE verdicts on this PR: 1" in out,
-         "functional: replaying the gate's REAL emitted notice through the REAL auto-close step "
-         "yields count == 1 with ZERO synthetic injections (the counter read the emitted artifact)")
+    note("counting verdicts on this PR: 1" in out,
+         "functional: replaying the gate's REAL emitted EVAL notice through the REAL auto-close "
+         "step yields count == 1 with ZERO synthetic injections (the counter read the emitted artifact)")
     note("pr close" in calls,
          "functional: the replayed emitted notice CLOSES the PR at threshold=1 — the "
-         "INCONCLUSIVE auto-close is exercised end-to-end against the gate's own header")
-    # NEGATIVE CONTROL — the exact break the tautology hid: rename the emitted header and
-    # prove the REAL counter drops to 0 and does NOT close. Without this the positive replay
-    # could pass on any text the counter happened to match.
+         "count-based auto-close is exercised end-to-end against the gate's own header")
+    # NEGATIVE CONTROL A — rename the emitted header and prove the REAL counter drops to 0
+    # and does NOT close. Without this the positive replay could pass on any text the counter
+    # happened to match.
     renamed_log = emitted_log.replace("## validator INCONCLUSIVE", "## validator VERDICT-MISSING", 1)
     rc2, out2, calls2 = run_auto_close(renamed_log)
-    note("pr close" not in calls2 and "BLOCK/INCONCLUSIVE verdicts on this PR: 0" in out2,
+    note("pr close" not in calls2 and "counting verdicts on this PR: 0" in out2,
          "functional: NEGATIVE CONTROL — renaming the gate's header to "
          "'## validator VERDICT-MISSING' drops the REAL counter to 0 and does NOT close "
          "(the counter is genuinely bound to the emitted header, so a rename cannot silently "
-         "disable the INCONCLUSIVE auto-close) — got: " +
+         "disable the auto-close) — got: " +
          " | ".join(line for line in out2.splitlines() if "verdicts on this PR" in line))
+    # NEGATIVE CONTROL B — THE OPERATOR'S FIX (opencharly/.github#170). Replay the
+    # `provider-unanswered` notice (a CLEAR infra class, carrying `Verdict class: infra`) and
+    # prove the REAL counter EXCLUDES it: count 0, NO close. This is the exact regression that
+    # closed charly#802 — an infra verdict must never reach the max.
+    infra_result = dict((s["name"], r) for s, r in scenario_results).get("provider-unanswered")
+    infra_log = infra_result["comment_log"] if infra_result else ""
+    rc3, out3, calls3 = run_auto_close(infra_log)
+    note("pr close" not in calls3 and "counting verdicts on this PR: 0" in out3,
+         "functional: NEGATIVE CONTROL — replaying the gate's REAL infra INCONCLUSIVE notice "
+         "(provider-unanswered) leaves the REAL counter at 0 and does NOT close: a clear infra "
+         "failure is EXCLUDED from AI_REVIEW_AUTO_CLOSE_AFTER — got: " +
+         " | ".join(line for line in out3.splitlines()
+                    if "verdicts on this PR" in line or "bound" in line))
 
     # ==== org-wide candy-validate reusable: the skip + fail-loud branches (R10) ====
     # The reusable `.github/workflows/candy-validate.yml` ships BEHAVIOUR — a repo with
