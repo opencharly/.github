@@ -142,6 +142,11 @@ HARNESS_WORKFLOW_PATH = os.path.join(REPO_ROOT, ".github", "workflows",
 # static text check — see run_harness()'s candy-validate section.
 CANDY_WORKFLOW_PATH = os.path.join(REPO_ROOT, ".github", "workflows",
                                    "candy-validate.yml")
+# The org-wide REQUIRED caller of the reusable gate. A called workflow can only hold a
+# permission its CALLER also grants, so the `issues` scope must be asserted on BOTH —
+# asserting only the reusable would pass while the caller silently nullified it (`.github#173`).
+CALLER_WORKFLOW_PATH = os.path.join(REPO_ROOT, ".github", "workflows",
+                                    "org-wide-pr-validator-required.yml")
 
 STEP_PREFIX = "      - "   # a step marker in this workflow
 KEY_INDENT = 8             # name: / id: / if: / run: / env:
@@ -258,6 +263,31 @@ def unquote(value):
     if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
         return value[1:-1]
     return value
+
+
+def workflow_permissions(path):
+    """Return a workflow's top-level `permissions:` mapping (scope -> value).
+
+    A line-based read of the 2-space-indented block after a column-0 `permissions:`,
+    matching this harness's no-PyYAML technique. Comments and blank lines are skipped;
+    the first column-0 line after the block ends it.
+    """
+    if not os.path.exists(path):
+        raise HarnessError("workflow not found: " + path)
+    with open(path, "r", encoding="utf-8") as fh:
+        lines = fh.read().splitlines()
+    result = {}
+    in_block = False
+    for line in lines:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if line[0] != " ":  # a top-level (column-0) line
+            in_block = line.strip() == "permissions:"
+            continue
+        if in_block:
+            key, _, value = line.strip().partition(":")
+            result[key.strip()] = value.strip()
+    return result
 
 
 def indent(text, pad):
@@ -1398,6 +1428,22 @@ def run_harness():
     note("timeout-minutes: 20" in text,
          "structural: the validate job carries a fail-hard wall clock "
          "(timeout-minutes: 20 caps a provider-unanswered burn)")
+    # The `issues` scope (`.github#173`): the review reads the PR body via the issues API
+    # and posts its verdict/INCONCLUSIVE notice as a PR comment. Without the scope a PUBLIC
+    # repo's body still reads (unauthenticated), so the gap is invisible — but the org's
+    # first PRIVATE repo (`opencharly/charly-images`) 403s and the gate is verdict-less on
+    # EVERY run, so no private-repo PR can merge. Asserted on BOTH surfaces: the reusable
+    # AND the org-wide caller, because a called workflow can only hold a permission its
+    # caller also grants (asserting only the reusable would pass while the caller nullified
+    # it). These FAIL if either scope is dropped — the exact regression `.github#25` made.
+    note(workflow_permissions(WORKFLOW_PATH).get("issues") is not None,
+         "functional: pr-validator.yml grants the `issues` scope (the review reads the PR "
+         "body via the issues API + posts its verdict as a PR comment; without it a PRIVATE "
+         "repo's body read 403s — .github#173)")
+    note(workflow_permissions(CALLER_WORKFLOW_PATH).get("issues") is not None,
+         "functional: the org-wide caller org-wide-pr-validator-required.yml ALSO grants "
+         "`issues` (a called workflow holds only what its caller grants; asserting only the "
+         "reusable would pass while the caller nullified it — .github#173)")
     # FUNCTIONAL coverage (the review's R10 finding: the env entry and the engine-defective
     # classification shipped with NO assertion that fails without them).
     review_env = find_step(steps, "id", "review")["env"]

@@ -138,10 +138,19 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  # The review reads the PR BODY via the issues API (`GET /repos/{owner}/{repo}/issues/{n}`)
+  # and posts its verdict/INCONCLUSIVE notice as a PR comment — both are the `issues` scope.
+  # A PUBLIC repo's body is readable unauthenticated, so the gap was invisible until the org's
+  # first PRIVATE repo (`opencharly/charly-images`): there the read 403s
+  # ("Resource not accessible by integration") and the gate yields a verdict-less
+  # INCONCLUSIVE on every run, so no private-repo PR can merge. `issues: write` was present
+  # from the workflow's introduction and removed in `.github#25` (harmless while every repo
+  # was public); this restores it. `issues` is a PR-comment/read scope — the gate is not
+  # widened.
+  issues: write
   # GATE B reads this head's check runs off the GitHub API. `checks` is its OWN scope —
   # neither `contents` nor `pull-requests` grants it — and a CALLED workflow can only hold
-  # what its caller also grants, so the org-wide caller declares it too. Read-only, and the
-  # only permission this change adds anywhere.
+  # what its caller also grants, so the org-wide caller declares it too. Read-only.
   checks: read
 
 jobs:
