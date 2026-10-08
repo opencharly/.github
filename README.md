@@ -195,6 +195,37 @@ $ scripts/org-ruleset.sh apply                      # then enable the org rulese
 $ scripts/org-ruleset.sh verify                     # assert the whole end state
 ```
 
+### The gate runs on SAME-REPO PRs, whatever the repo is
+
+The required workflow's `validate` job gates on
+**`github.event.pull_request.head.repo.full_name == github.repository`** — the head
+repo is a *different* repository than the base. It runs for **every same-repo PR**,
+including PRs in a first-party **fork** repo (the org vendors several upstreams as
+forks: `dsh-github`, `crabbox`, the `pi-*` family), and skips only a genuine
+**external contribution** (a head repo that is a *different* repo — whose fork
+secrets are unavailable and whose code is untrusted). A null head repo (a deleted
+fork) resolves to the empty string, which is `!= github.repository`, so the job
+skips — the safe default.
+
+**This predicate is load-bearing.** The retired `head.repo.fork == false` test asked
+"is the head repo itself a fork?", which is true for **every** PR in a fork repo, so
+it skipped the org's own PRs. Combined with the ruleset's REQUIRED
+`validate / validate` check, that made such a PR un-mergeable — the required check was
+never produced (`measured 2026-10-07, opencharly/dsh-github#2`: `dsh-github` main
+carries the ruleset while every pre-existing fork does not, and `gh pr merge` reports
+`Required status check "validate / validate" is expected`). The predicate and its
+truth table are asserted by `.github/tests/validator-gate-harness.py` (which runs on
+every PR to this repo) and by a `same_repo_gate` row in `scripts/governance-claims.tsv`.
+
+**Consequence for a new fork repo.** Forks are **excluded from the ruleset by
+design** (`discover_excludes` filters on `isFork == true`), so they carry no required
+check and their same-repo PRs merge without an org verdict. The hazard is a fork
+created *after* the last `scripts/org-ruleset.sh apply`: it is absent from the stale
+exclude list, so the ruleset's `~ALL`-minus-exclude scope still lists it and its
+same-repo PRs get the REQUIRED check. With the retired predicate that check was never
+produced (deadlock); with this predicate it runs and the PR merges on PASS. The next
+`apply` re-derives the exclude set and drops the fork back out of the ruleset target.
+
 ## New repos: bootstrap the initial `main`
 
 The org ruleset carries the `creation` rule on `refs/heads/main`, so a **brand-new
