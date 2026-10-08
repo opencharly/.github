@@ -80,3 +80,16 @@ ci_gate_mechanical	validator workflow	dotgithub/.github/workflows/pr-validator.y
 ci_gate_mechanical	validator rulebook	dotgithub/charly.yml	require	BRANCH PROTECTION DOES NOT ENFORCE IT
 ci_gate_mechanical	validator rulebook	dotgithub/charly.yml	require	enforced by that first gate, NOT by branch
 ci_gate_mechanical	validator rulebook	dotgithub/charly.yml	forbid	enforced by branch protection
+# SAME-REPO vs EXTERNAL-FORK (opencharly/.github dsh-github#2, 2026-10-07). The org-required
+# caller must gate the validate job on `head.repo.full_name == github.repository` — the
+# head repo is a DIFFERENT repository than the base — NOT on `head.repo.fork == false`,
+# which is TRUE for every PR in a first-party FORK repo (opencharly vendors several upstreams
+# as forks: dsh-github, crabbox, the pi-* family). The retired predicate skipped the org's OWN
+# same-repo PRs, so the ruleset's REQUIRED `validate / validate` was never produced and the PR
+# could never merge. The new form skips ONLY a genuine external contribution.
+same_repo_gate	org-wide required workflow	dotgithub/.github/workflows/org-wide-pr-validator-required.yml	require	head.repo.full_name == github.repository
+# The forbid pattern targets the ACTIVE form — an `if:` line using the retired predicate —
+# not the prose that explains why it is retired (the same technique as the
+# `check-runs...filter=latest` row above: the file names the retired form in a comment, so a
+# bare-substring forbid would fail on its own explanation).
+same_repo_gate	org-wide required workflow	dotgithub/.github/workflows/org-wide-pr-validator-required.yml	forbid	if: .*head\.repo\.fork == false

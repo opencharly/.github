@@ -74,7 +74,21 @@ permissions:
 jobs:
   validate:
     name: validate
-    if: github.event.pull_request.head.repo.fork == false
+    # SAME-REPO vs EXTERNAL-FORK — measured 2026-10-07 (opencharly/dsh-github#2). The gate
+    # tests whether the head repo is a DIFFERENT repository than the base
+    # (`head.repo.full_name == github.repository`), NOT whether the head repo is itself a
+    # fork (`head.repo.fork == false`). The old fork-repo test is TRUE for every PR in a
+    # first-party FORK repo — opencharly vendors several upstreams as forks (dsh-github,
+    # crabbox, the pi-* family) — so it SKIPPED the org's OWN same-repo PRs: the ruleset's
+    # REQUIRED `validate / validate` was then never produced and the PR could never merge
+    # (measured: `dsh-github` main carries the ruleset while every pre-existing fork does
+    # not; `gh pr merge` reports `Required status check "validate / validate" is expected`).
+    # The new form skips ONLY a genuine external contribution — a PR whose head repo is a
+    # DIFFERENT repo than the base, whose fork secrets are unavailable and whose code is
+    # untrusted — while running for every SAME-REPO PR regardless of whether the repo is a
+    # fork of an upstream. A null head repo (a deleted fork) yields an absent `full_name`
+    # and skips, the safe default.
+    if: github.event.pull_request.head.repo.full_name == github.repository
     uses: opencharly/.github/.github/workflows/pr-validator.yml@main
     with:
       pr-number: ${{ github.event.pull_request.number }}

@@ -290,6 +290,32 @@ def workflow_permissions(path):
     return result
 
 
+def job_if(path, job_name):
+    """Return a job's top-level `if:` expression (unquoted), or None when absent.
+
+    A line-based read of the 2-space-indented `<job_name>:` block under `jobs:`, then
+    the first 4-space-indented `if:` inside it — the harness's no-PyYAML technique.
+    """
+    if not os.path.exists(path):
+        raise HarnessError("workflow not found: " + path)
+    with open(path, "r", encoding="utf-8") as fh:
+        lines = fh.read().splitlines()
+    in_job = False
+    for line in lines:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        stripped = line.strip()
+        if indent == 2 and stripped == job_name + ":":
+            in_job = True
+            continue
+        if in_job and indent == 2 and stripped.endswith(":"):
+            break  # the next job begins
+        if in_job and indent >= 4 and stripped.startswith("if:"):
+            return unquote(stripped.partition(":")[2].strip())
+    return None
+
+
 def indent(text, pad):
     return NL.join(pad + line for line in text.splitlines())
 
@@ -1444,6 +1470,44 @@ def run_harness():
          "functional: the org-wide caller org-wide-pr-validator-required.yml ALSO grants "
          "`issues` (a called workflow holds only what its caller grants; asserting only the "
          "reusable would pass while the caller nullified it — .github#173)")
+    # SAME-REPO vs EXTERNAL-FORK (the dsh-github#2 block, 2026-10-07). The validate job must
+    # gate on `head.repo.full_name == github.repository` — same-repo PRs RUN even when the
+    # repo is a first-party FORK of an upstream, and only a genuine external contribution
+    # (a DIFFERENT head repo) skips. The retired `head.repo.fork == false` test is TRUE for
+    # every PR in a fork repo, so it SKIPPED the org's own PRs and the ruleset's REQUIRED
+    # `validate / validate` was never produced (measured: `dsh-github` main carries the
+    # ruleset; `gh pr merge` reports `Required status check "validate / validate" is
+    # expected`). Assert BOTH the predicate's presence and its evaluated truth table, so a
+    # silent revert to the fork-repo form — or the deletion of the `if:` — FAILS here.
+    caller_if = job_if(CALLER_WORKFLOW_PATH, "validate")
+    note(caller_if is not None,
+         "structural: the org-wide caller's validate job carries an `if:` (a job with no "
+         "`if:` would also run, but the predicate is the point — assert it is present)")
+    if caller_if is not None:
+        def caller_gate(head_fork, same_repo):
+            # A null head repo (a deleted fork) evaluates every `full_name` lookup to the
+            # empty string, which is != github.repository, so the job SKIPS — the safe
+            # default. Model `head_fork` explicitly so a revert to the fork-repo test is
+            # caught even where same_repo is true.
+            head_full = "o/r" if same_repo else "someoneelse/r"
+            ns = Ctx({
+                "github": Ctx({"repository": "o/r",
+                               "event": Ctx({"pull_request": Ctx({"head": Ctx({"repo": Ctx({
+                                   "full_name": head_full, "fork": head_fork})})})})}),
+            })
+            return eval_gh(caller_if, ns)
+        note(caller_gate(head_fork=True, same_repo=True) is True,
+             "functional: a SAME-REPO PR in a first-party FORK repo (head.fork=true, "
+             "head.full_name==github.repository) RUNS the validator (the exact dsh-github#2 "
+             "shape the fork-repo test wrongly skipped)")
+        note(caller_gate(head_fork=False, same_repo=True) is True,
+             "functional: a SAME-REPO PR in a non-fork repo RUNS the validator")
+        note(caller_gate(head_fork=True, same_repo=False) is False,
+             "functional: an EXTERNAL-FORK PR (head.full_name!=github.repository) SKIPS "
+             "(untrusted contribution + no fork secrets — the security intent preserved)")
+        note("head.repo.fork == false" not in caller_if,
+             "forbid: the retired fork-repo predicate `head.repo.fork == false` is GONE "
+             "(it is true for every PR in a fork repo, so it dead-locked first-party forks)")
     # FUNCTIONAL coverage (the review's R10 finding: the env entry and the engine-defective
     # classification shipped with NO assertion that fails without them).
     review_env = find_step(steps, "id", "review")["env"]
