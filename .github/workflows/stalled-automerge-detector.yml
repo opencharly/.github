@@ -1,0 +1,62 @@
+# DETECT PRs THAT CAN NEVER LAND (opencharly/.github#175).
+#
+# Native auto-merge armed + the org ruleset's required_status_checks.strict = true + a head that
+# is BEHIND a moved base is a SILENT stall. GitHub's auto-merge does not update the head branch
+# when the base moves, a BEHIND head cannot merge, and NOTHING goes red: the collapsed check
+# rollup shows the old run's conclusion, the `validate / validate` run on the newer base never
+# appears because nothing re-dispatched it, and the PR reads as "queued" rather than "stuck".
+#
+# Measured (opencharly/.github#175): 2026-10-07T22:43 → 2026-10-08T09:09 on this host, ~10 h with
+# ZERO landings while at least seven PRs sat green or armed (sdk#356, plugin-check#89,
+# plugin-clean#12, plugin-deploy-pod#30, plugin-fleet#32, …). The blast radius is every PR whose
+# base moves after its head is pushed — i.e. every PR in a busy org, and especially the
+# producer→consumer pin sequence this org lands all day.
+#
+# WHY IT IS A WORKFLOW: the two fields that decide the stall are one org-wide GraphQL read away,
+# and nothing in this repo read them. A scheduled run is the alarm — a red run is visible in the
+# Actions tab — whereas a per-repo hook would have to be installed in ~400 repos to say the same
+# thing once. `scripts/check-stalled-automerge.sh` carries the rule, its self-test, and its scope
+# limit (a CANCELLED required check is a DIFFERENT shape and is not covered).
+#
+# REQUIRED APP PERMISSION: `pull_requests: read` (org-wide). The `charly-auto-merge` App already
+# carries the pull-request authority the landing chain needs, so no new grant is introduced.
+#
+# THE ALARM IS A RED RUN, deliberately: exit 1 when anything is stalled, exit 0 when nothing is,
+# and exit 2 when the query itself failed — a detector that reports "nothing stalled" from a
+# failed read is worse than no detector, so the script refuses to.
+
+name: stalled auto-merge detector
+
+on:
+  schedule:
+    # Every 30 minutes. The measured stall ran ~10 h unnoticed; half an hour bounds that to one
+    # landing cycle without polling anything hard enough to be rate-limited.
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create bot token (charly-auto-merge App)
+        id: app
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547
+        with:
+          app-id: ${{ secrets.CHARLY_AUTO_MERGE_APP_ID }}
+          private-key: ${{ secrets.CHARLY_AUTO_MERGE_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - uses: actions/checkout@v7
+
+      # The filter must be able to FAIL before it is trusted to pass: a detector whose selection
+      # rule returns nothing is a green no-op that proves nothing.
+      - name: Self-test the selection rule
+        run: bash scripts/check-stalled-automerge.sh --self-test
+
+      - name: Detect armed-but-BEHIND PRs org-wide
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: bash scripts/check-stalled-automerge.sh
