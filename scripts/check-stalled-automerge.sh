@@ -44,6 +44,17 @@ select_stalled() {
     | "\(.repository.nameWithOwner)#\(.number)\t\(.mergeStateStatus)"'
 }
 
+# report_stalled prints each stalled PR WITH the remedy, one line per PR. Extracted from main so the
+# stalled branch — the detector's actual output — is driven by the self-test rather than only by a
+# live run that happened to take the exit-0 branch.
+report_stalled() {
+	echo "check-stalled-automerge: ARMED but BEHIND — these CANNOT merge and nothing else will say so:"
+	while IFS=$'\t' read -r pr status; do
+		[[ -z "${pr}" ]] && continue
+		echo "  ${pr}  (${status})  →  gh pr update-branch ${pr##*#} --repo ${pr%#*}"
+	done <<<"$1"
+}
+
 run_self_test() {
 	local failed=0
 
@@ -64,10 +75,18 @@ run_self_test() {
 		echo "self-test: an unarmed or non-BEHIND PR WAS selected: $(printf '%s' "$not_stalled" | select_stalled)" >&2
 		failed=1
 	fi
-	# The filter must be able to pass: guard against a filter that selects nothing ever, which would
-	# make the whole detector a green no-op.
-	if [[ -z "$(printf '%s' "$stalled" | select_stalled)" ]]; then
-		echo "self-test: the filter selected nothing at all — it cannot fail, so it proves nothing" >&2
+	# The STALLED BRANCH is the detector's actual product: the exit code says something is wrong,
+	# and this is the line that says what to do. A live scan that took the exit-0 branch proves
+	# nothing about it, so it is driven here. Assertion 1 above already fails if the filter selects
+	# nothing, so a separate "cannot select" guard would be redundant — removed.
+	local line
+	line="$(report_stalled "$(printf '%s' "$stalled" | select_stalled)")"
+	if [[ "$line" != *"gh pr update-branch 356 --repo opencharly/sdk"* ]]; then
+		echo "self-test: the stalled branch did not emit its remedy; got: ${line}" >&2
+		failed=1
+	fi
+	if [[ "$line" != *"nothing else will say so"* ]]; then
+		echo "self-test: the stalled branch did not emit its alarm header; got: ${line}" >&2
 		failed=1
 	fi
 
@@ -92,10 +111,9 @@ main() {
 		return 0
 	fi
 
-	echo "check-stalled-automerge: ARMED but BEHIND — these CANNOT merge and nothing else will say so:"
-	while IFS=$'\t' read -r pr status; do
-		echo "  ${pr}  (${status})  →  gh pr update-branch ${pr##*#} --repo ${pr%#*}"
-	done <<<"$stalled"
+	# The reporting loop is a function so its output can be asserted. It is the change's whole
+	# product: the exit code alone says something is wrong, and this is what says WHAT to do.
+	report_stalled "$stalled"
 	echo
 	echo "A merge, never a force-push: the branch update is the sanctioned remedy (opencharly/.github#175)."
 	return 1
