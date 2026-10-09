@@ -93,7 +93,7 @@ SCENARIOS ASSERTED END TO END (exit code + classification output + PR comment)
   happy path (clone + build the pinned charly) needs network and is not run offline.
 
   Plus structural guards: the review step contains NO in-job retry (no sleep, no
-  for-attempt loop) - the R4 regression guard for the dropped retry band-aid; the
+  for-attempt loop) - the R3 regression guard for the dropped retry band-aid; the
   header names no pinned release VERSION and no org-var VALUE (either would drift)
   and instead points at `gh variable get` and the run's own `request -` line; the
   header states the generation bounds are the cause-class (a cap DETECTS a long

@@ -6,7 +6,7 @@ set -euo pipefail
 # WHY THIS EXISTS. A normative OpenCharly rule is routinely stated in two or more
 # independently-edited surfaces (the umbrella AGENTS.md, charly/AGENTS.md, the skill
 # sources in their standalone candy repos, the GENERATED marketplace corpus, the
-# validator rulebook in opencharly/.github's charly.yml and the AI_REVIEW_PROMPT org
+# validator rulebook in opencharly/action-review's charly.yml and the AI_REVIEW_PROMPT org
 # variable, and the .github workflows/scripts). With no single source of truth and no
 # reconciliation gate, a rule edited in one surface silently collides with or drifts
 # from the same rule in another — MEASURED (issue opencharly/opencharly#282): the

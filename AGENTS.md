@@ -24,8 +24,6 @@ Canonical files:
 - `scripts/org-ruleset.sh` — the SINGLE owner of the org ruleset (required check
   + branch rules) and the per-repo auto-merge settings; `scripts/*_test.sh` are
   its offline mock-`gh` tests.
-- `charly.yml` — the org-wide AI-review contract (`review-contract:` candy: the
-  `AI_REVIEW_*` defaults and the validator rulebook).
 - `README.md` — user overview only; never agent guidance.
 
 ## Load these skills first (R0)
@@ -51,8 +49,9 @@ Canonical files:
   `org-wide-pr-validator-required.yml` here, never a per-repo copy (there are
   none — `.github/workflows/retire-per-repo-dispatchers.yml` deletes any that
   survive).
-- The validator rulebook lives in `charly.yml`'s `AI_REVIEW_PROMPT` (overridable
-  by org `AI_REVIEW_*` variables); a governance change is reconciled across the
+- The validator rulebook in force is the org variable `AI_REVIEW_PROMPT`; its ONE
+  committed copy (with the `AI_REVIEW_*` defaults) is `opencharly/action-review`'s
+  `charly.yml`, which the runners check out. A governance change is reconciled across the
   validator rulebook, the umbrella `AGENTS.md`, `charly/AGENTS.md`, and the
   skill source + its projection in the same change.
 - The gate, the ruleset, and the template are self-modifying-security surfaces:

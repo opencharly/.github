@@ -5,7 +5,7 @@
 # org ruleset (23827016) requires exactly ONE context, `validate / validate`, THIS
 # check. A repo's own CI (e.g. `go`) is therefore NOT required and is NOT waited on;
 # this comment said otherwise until opencharly/charly#796, the same false premise the
-# reviewer rulebook item B18 rested on. Two DETERMINISTIC gates therefore run INSIDE
+# reviewer rulebook check QUAL (then numbered B18) rested on. Two DETERMINISTIC gates therefore run INSIDE
 # this check, before auto-merge is armed, so a PASS now means the head really is green:
 #   * gate B reads EVERY check run on this head off the API and fails on any that did
 #     not pass, WAITING (bounded) for in-flight ones to settle first;
@@ -66,7 +66,7 @@
 #     (unset: the engine default, 15m) — and AI_REVIEW_STREAM_IDLE_TIMEOUT, the
 #     silence bound between streamed chunks (unset: 3m).
 # A cap only DETECTS a generation that is too long; the effort and the token
-# budget BOUND it. Raising a cap never fixes an unbounded generation (R4).
+# budget BOUND it. Raising a cap never fixes an unbounded generation (R3).
 #
 # THE ACTIVE ENGINE is whatever the org pin vars.CHARLY_VERSION welds — read it
 # with `gh variable get CHARLY_VERSION --org opencharly`; this comment names no version,
@@ -75,7 +75,7 @@
 # (TAG="$CHARLY_VERSION"; it FAILS LOUD, exit 3, when the pin is unset or invisible) and
 # replaces any on-PATH charly whose version differs from the pin.
 #
-# This workflow retries NOTHING in-job (R4): a run that produced no verdict is a
+# This workflow retries NOTHING in-job (R3): a run that produced no verdict is a
 # class to REPORT, not a flake to paper over. The runner image stays
 # operator-selectable via vars.REVIEW_RUNNER_LABEL (runs-on: below).
 #
@@ -168,7 +168,7 @@ jobs:
     # the job at the cap; the required check
     # goes RED fast instead of hanging pending, and the gate is re-run
     # explicitly (gh workflow run pr-validator.yml -f pr-number=<N>), never
-    # retried in-job (R4).
+    # retried in-job (R3).
     timeout-minutes: 20
     steps:
       - id: pr
@@ -333,7 +333,7 @@ jobs:
 
           # bash -e must NOT abort here: a verdict-less run is a CLASS to report,
           # not a crash. Capture the exit code instead. NO RETRY: a retry re-runs
-          # the same doomed generation (R4).
+          # the same doomed generation (R3).
           rc=0
           charly review --out /tmp/review.txt > /tmp/review.log 2>&1 || rc=$?
           echo "review rc=$rc"
@@ -672,12 +672,12 @@ jobs:
             class="whole-request cap (the ONE review call ran past AI_REVIEW_ATTEMPT_TIMEOUT and was cut; not retried)"
             rootcause="**Root cause (measured in this run).** The engine's own terminal line names the class: the generation ran longer than the whole-request cap. A generation that long is a reasoning length problem — compare \`reasoning_effort\` and \`max_tokens\` in the request line below with the org vars (an empty \`reasoning_effort\` means none was sent; opencharly/plugin-review#36)."
             remedy1="1. bound the generation: \`AI_REVIEW_REASONING_EFFORT\` and \`AI_REVIEW_MAX_TOKENS\` (org vars);"
-            remedy2="2. raise \`AI_REVIEW_ATTEMPT_TIMEOUT\` only for a legitimately long turn — a cap detects a long generation, it does not bound it (R4)."
+            remedy2="2. raise \`AI_REVIEW_ATTEMPT_TIMEOUT\` only for a legitimately long turn — a cap detects a long generation, it does not bound it (R3)."
           elif [ "$INCONCLUSIVE_CLASS" = "empty-completion" ]; then
             class="empty completion (the token budget was spent on reasoning before any answer; not retryable)"
             rootcause="**Root cause (measured in this run).** The engine's own terminal line names the class: the model used the shared \`max_tokens\` budget on reasoning and produced no answer (opencharly/plugin-review#12). A re-run with the same bounds reproduces it."
             remedy1="1. raise \`AI_REVIEW_MAX_TOKENS\` so reasoning leaves room for the answer, or lower \`AI_REVIEW_REASONING_EFFORT\`;"
-            remedy2="2. do not re-run with unchanged bounds — the class is deterministic (R4)."
+            remedy2="2. do not re-run with unchanged bounds — the class is deterministic (R3)."
           elif [ "$INCONCLUSIVE_CLASS" = "engine-terminal-other" ]; then
             class="the engine's own terminal line names the class (this workflow keeps no"
             class="$class narrative for this marker, so it DEFERS to the line): $(printf '%s' "$ENGINE_TERMINAL" | cut -c1-180)"
@@ -688,17 +688,17 @@ jobs:
             class="provider rejected a LATER request (HTTP ${PROVIDER_ERROR}) after turn 1 completed — the enlarged-context class (opencharly/.github#97, see the T13 engine-change exception)"
             rootcause="**Root cause.** The engine COMPLETED turn 1 (the endpoint answered) and the provider then REFUSED a later request with **HTTP ${PROVIDER_ERROR}**: each turn appends its tool results to the context, and past a size or rate limit the endpoint rejects the request outright. Both facts are in the diagnostics below. This is therefore NOT reported as a plain protocol fault — the rejection is a SYMPTOM of the unbounded context growth, and the durable fix is the engine's bound on tool-result payloads (owner: plugin-review)."
             remedy1="1. read the provider message in the diagnostics — it names the limit it enforced;"
-            remedy2="2. treat it as the context-growth class: raising a cap or retrying does not shrink the request (R4)."
+            remedy2="2. treat it as the context-growth class: raising a cap or retrying does not shrink the request (R3)."
           elif [ -n "$PROVIDER_ERROR" ] && [ "$PROVIDER_UNANSWERED" = "true" ]; then
             class="provider rejected the request (HTTP ${PROVIDER_ERROR}) and another attempt stalled without headers — the unbounded-context class (opencharly/.github#97)"
             rootcause="**Root cause.** This log carries BOTH signatures: the endpoint REFUSED a request with **HTTP ${PROVIDER_ERROR}**, and another attempt stalled without response headers. Neither is asserted alone, because both are the unbounded-context class — each turn appends its tool results, and past a size or rate limit the request is either refused outright or is too large to answer. This is neither a credentials fault nor a blind-retry case."
             remedy1="1. read the provider message in the diagnostics — it names the limit it enforced;"
-            remedy2="2. treat it as the context-growth class: raising a cap or retrying does not shrink the request (R4)."
+            remedy2="2. treat it as the context-growth class: raising a cap or retrying does not shrink the request (R3)."
           elif [ -n "$PROVIDER_ERROR" ]; then
             class="provider rejected the request (HTTP ${PROVIDER_ERROR}) — a provider/protocol/config matter, not an engine verdict"
             rootcause="**Root cause.** The model endpoint answered **HTTP ${PROVIDER_ERROR}** — an explicit REJECTION: the provider parsed the request and refused it, and its own message is in the diagnostics below. This log carries NO stall marker (which is what the no-headers class requires) and no completed-turn-1-then-stall pair (which is the engine-defective signature), so neither of those classes describes this run: the rejection itself is the cause."
             remedy1="1. read the provider message in the diagnostics below — it names the missing or wrong element;"
-            remedy2="2. fix it at the review client or in the org AI_REVIEW_* variables, then open a CLEAN PR from scratch. An HTTP rejection is deterministic — do NOT retry blindly (R4)."
+            remedy2="2. fix it at the review client or in the org AI_REVIEW_* variables, then open a CLEAN PR from scratch. An HTTP rejection is deterministic — do NOT retry blindly (R3)."
           elif [ "$ENGINE_DEFECTIVE" = "true" ]; then
             class="engine-defective (the review engine completed turn 1 and failed a later turn — the context-dependent timeout/empty-content class; opencharly/.github#97, see the T13 engine-change exception)"
             rootcause="**Root cause.** The engine COMPLETED turn 1 (the endpoint answered) and a LATER turn failed — the context-dependent class a provider story cannot explain (opencharly/.github#97)."
@@ -708,7 +708,7 @@ jobs:
             class="provider unanswered (the provider stopped answering within the stream-idle bound)"
             rootcause="**Root cause.** The model endpoint stopped answering — no response headers, or a stream that went silent past \`AI_REVIEW_STREAM_IDLE_TIMEOUT\`. That is a provider/endpoint matter, not a code finding."
             remedy1="1. escalate to the operator: the provider and its \`AI_REVIEW_*\` configuration are theirs;"
-            remedy2="2. a fresh attempt must be a CLEAN PR from scratch (a fresh branch): this thread is auto-closed by policy on ONE \`INCONCLUSIVE\`, so never re-run or re-open it (R4)."
+            remedy2="2. a fresh attempt must be a CLEAN PR from scratch (a fresh branch): this thread is auto-closed by policy on ONE \`INCONCLUSIVE\`, so never re-run or re-open it (R3)."
           elif [ "$DISCARDED_VERDICT" = "true" ]; then
             class="charly review exited rc=${REVIEW_RC} with a non-BLOCK"
             class="$class verdict — FAIL-CLOSED: a non-zero review exit may"
@@ -736,7 +736,7 @@ jobs:
             echo "- class: $class"
             echo "- Verdict class: $verdict_class_label"
             echo "- review exit code: ${REVIEW_RC:-n/a}"
-            echo "- in-job retries: none — the gate REPORTS the class instead of papering over it (R4)"
+            echo "- in-job retries: none — the gate REPORTS the class instead of papering over it (R3)"
             echo
             echo "$rootcause"
             echo
@@ -781,11 +781,11 @@ jobs:
       # THE TWO DETERMINISTIC GATES THAT MAKE A `PASS` MEAN "the head is green"
       # (opencharly/charly#796).
       #
-      # WHY THEY ARE HERE, INSIDE THE ONE REQUIRED CHECK. Checklist item B18 used to tell
+      # WHY THEY ARE HERE, INSIDE THE ONE REQUIRED CHECK. Checklist item QUAL (then B18) used to tell
       # the reviewer that "CI status is NOT a review input ... branch protection enforces
       # the repo's required checks mechanically". MEASURED, that premise was FALSE: the ONE
       # org ruleset (23827016) requires exactly ONE context — `validate / validate` — so a
-      # repo's own `ci` job was enforced by NOBODY: not by branch protection, and (on B18's
+      # repo's own `ci` job was enforced by NOBODY: not by branch protection, and (on that check's
       # explicit instruction) not by the reviewer either. MEASURED cost, two merged heads:
       #   charly#795 — `go` FAILED at 02:35:42Z; the review PASSed at 02:44:58Z, 9m16s LATER,
       #                and the merge landed at 02:45:21Z on that already-red head.
