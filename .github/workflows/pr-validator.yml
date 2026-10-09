@@ -910,10 +910,21 @@ jobs:
       - uses: actions/setup-go@v5
         if: steps.parse.outputs.verdict == 'PASS' && steps.go-modules.outputs.present == 'true'
         with:
-          # 'stable': the module roots are discovered at RUN time, so there is no static
-          # path to hand go-version-file; a module declaring an older toolchain still
-          # resolves through Go's own toolchain directive.
-          go-version: 'stable'
+          # PINNED, not 'stable' (RCA 2026-10-09, opencharly/pod-github-runner#9).
+          # 'stable' resolves to the NEWEST released Go at run time; that became 1.27.2,
+          # whose export-data version (5) is NEWER than the pinned golangci-lint v2.13.2
+          # (a prebuilt release built with go1.27.0) can read, so the linter fails with
+          #   "could not load export data: ... export data version 5 is greater than
+          #    maximum supported version 4 (typecheck)"
+          # on EVERY module root - which fails the step for EVERY repo the org lints on
+          # the self-hosted runner, and skips steps 15-16 (Head check-runs, Enable
+          # auto-merge), so even a PASS verdict cannot arm.
+          # Eviction was tried FIRST and did not fix it: the cached 1.27.2 was removed from
+          # the affected instances and the next job re-downloaded it, failing again.
+          # 1.27.1 is the newest toolchain measured to work with the pinned linter.
+          # The module roots are still discovered at RUN time (no go-version-file); a module
+          # declaring an older toolchain still resolves through Go's toolchain directive.
+          go-version: '1.27.1'
 
       - name: "golangci-lint (the repo's declared lint, enforced)"
         id: golint
