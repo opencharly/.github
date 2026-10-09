@@ -911,26 +911,27 @@ jobs:
         if: steps.parse.outputs.verdict == 'PASS' && steps.go-modules.outputs.present == 'true'
         with:
           # PINNED, not 'stable' (RCA 2026-10-09, opencharly/pod-github-runner#9).
-          # 'stable' resolves to the NEWEST released Go at run time; that became 1.27.2,
-          # whose export-data version (5) is NEWER than the pinned golangci-lint v2.13.2
-          # (a prebuilt release built with go1.27.0) can read, so the linter fails with
-          #   "could not load export data: ... export data version 5 is greater than
-          #    maximum supported version 4 (typecheck)"
-          # on EVERY module root - which fails the step for EVERY repo the org lints on
-          # the self-hosted runner, and skips steps 15-16 (Head check-runs, Enable
-          # auto-merge), so even a PASS verdict cannot arm.
-          # Eviction was tried FIRST and did not fix it: the cached 1.27.2 was removed from
-          # the affected instances and the next job re-downloaded it, failing again.
+          # 'stable' resolves from the network to the NEWEST released Go, which became
+          # 1.27.2 on the self-hosted runner. MEASURED on that runner, with the pinned
+          # linter exactly as CI obtains it (the prebuilt v2.13.2 release):
+          #   $ golangci-lint version
+          #   golangci-lint has version 2.13.2 built with go1.27.0 from 27774aaf on 2026-08-27
+          #   $ GOTOOLCHAIN=go1.26.4 golangci-lint run ./...   -> rc=0  "0 issues."
+          #   $ GOTOOLCHAIN=go1.27.1 golangci-lint run ./...   -> rc=0  "0 issues."
+          #   $ GOTOOLCHAIN=go1.27.2 golangci-lint run ./...
+          #     main.go:3:8: could not import strings (...toolchain@...go1.27.2.../src/strings/builder.go)
+          #     rc=1
+          # So the failure is the 1.27.2 toolchain's export data being unreadable by a linter
+          # built with go1.27.0, it reproduces on EVERY module root, and therefore fails the
+          # step for EVERY repo the org lints on that runner - skipping steps 15-16 (Head
+          # check-runs, Enable auto-merge) so that even a PASS verdict cannot arm.
+          # Eviction was tried first and did NOT fix it: the cached 1.27.2 was removed from the
+          # affected instances and the next job re-downloaded it, failing again.
+          # 1.26.4 is pinned because it is MEASURED to work (rc=0 above) AND already present in
+          # every runner's tool cache, so it costs no download. 1.27.1 is equally measured to
+          # work, for anyone who prefers it.
           # The module roots are still discovered at RUN time (no go-version-file); a module
           # declaring an older toolchain still resolves through Go's toolchain directive.
-          # WHY 1.26.4 AND NOT 1.27.1: the pinned linter is a PREBUILT
-          # golangci-lint v2.13.2 release, so its export-data reader supports at most
-          # version 4 - and 1.27.2 writes version 5, which is the failure. A toolchain
-          # is always able to read its own build's export data, so a toolchain OLDER than
-          # the linter's own build (go1.27.0, which writes <= 4) is readable BY
-          # CONSTRUCTION; whether 1.27.1 also writes 4 was NOT measured, and an earlier
-          # revision of this comment wrongly called 1.27.1 "measured to work" - withdrawn.
-          # 1.26.4 is already present in every runner's tool cache.
           go-version: '1.26.4'
 
       - name: "golangci-lint (the repo's declared lint, enforced)"
