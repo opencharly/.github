@@ -77,9 +77,9 @@ ci_gate_mechanical	validator workflow	dotgithub/.github/workflows/pr-validator.y
 # mid-re-run. The URL fragment, not the bare word — the file names `latest` in prose to
 # explain why it is not used.
 ci_gate_mechanical	validator workflow	dotgithub/.github/workflows/pr-validator.yml	forbid	check-runs\?per_page=100&filter=latest
-ci_gate_mechanical	validator rulebook	dotgithub/charly.yml	require	BRANCH PROTECTION DOES NOT ENFORCE IT
-ci_gate_mechanical	validator rulebook	dotgithub/charly.yml	require	enforced by that first gate, NOT by branch
-ci_gate_mechanical	validator rulebook	dotgithub/charly.yml	forbid	enforced by branch protection
+ci_gate_mechanical	validator rulebook	action-review/charly.yml	require	BRANCH PROTECTION DOES NOT ENFORCE IT
+ci_gate_mechanical	validator rulebook	action-review/charly.yml	require	enforced by that first gate, NOT by branch
+ci_gate_mechanical	validator rulebook	action-review/charly.yml	forbid	enforced by branch protection
 # SAME-REPO vs EXTERNAL-FORK (opencharly/.github dsh-github#2, 2026-10-07). The org-required
 # caller must gate the validate job on `head.repo.full_name == github.repository` — the
 # head repo is a DIFFERENT repository than the base — NOT on `head.repo.fork == false`,
@@ -93,3 +93,34 @@ same_repo_gate	org-wide required workflow	dotgithub/.github/workflows/org-wide-p
 # `check-runs...filter=latest` row above: the file names the retired form in a comment, so a
 # bare-substring forbid would fail on its own explanation).
 same_repo_gate	org-wide required workflow	dotgithub/.github/workflows/org-wide-pr-validator-required.yml	forbid	if: .*head\.repo\.fork == false
+# opencharly/opencharly#446 — R1 "fix it or file it" replaces the thematic-batch deferral: a
+# blocking finding is fixed in the change, a non-blocking one is FILED and listed under the PR
+# body's `## Filed issues`. Stated in the rulebook, the strict-policy source, the validator
+# rulebook, and the PR template; the retired batch-as-deferral wording may survive in none.
+fix_or_file	umbrella AGENTS.md	AGENTS.md	require	R1 — RCA every anomaly, then fix it or file it
+fix_or_file	strict-policy skill source	layer-charly-internals-extra/charly.yml	require	Fix it or file it
+fix_or_file	validator rulebook	action-review/charly.yml	require	Fix it or file it
+fix_or_file	cutover-policy skill source	layer-charly-internals/charly.yml	forbid	NEXT THEMATIC BATCH CUTOVER
+fix_or_file	strict-policy skill source	layer-charly-internals-extra/charly.yml	forbid	NEXT THEMATIC BATCH CUTOVER
+fix_or_file	validator rulebook	action-review/charly.yml	forbid	routed to its NAMED thematic batch
+filed_issues_section	umbrella AGENTS.md	AGENTS.md	require	## Filed issues
+filed_issues_section	PR template	dotgithub/.github/PULL_REQUEST_TEMPLATE.md	require	## Filed issues
+filed_issues_section	PR template	dotgithub/.github/PULL_REQUEST_TEMPLATE.md	require	## Rulebook compliance
+# The read-in-full gate before every update push, and the R1 RCA every validation failure owes.
+read_in_full	umbrella AGENTS.md	AGENTS.md	require	Read every new comment in full
+read_in_full	git-workflow skill source	layer-charly-internals/charly.yml	require	Read EVERY new comment IN FULL
+validation_failure_rca	umbrella AGENTS.md	AGENTS.md	require	Every validation failure is an R1 anomaly
+validation_failure_rca	git-workflow skill source	layer-charly-internals/charly.yml	require	RCA every validation failure
+validation_failure_rca	validator rulebook	action-review/charly.yml	require	names the MISSED CONTROL
+# Keeping other sessions informed (umbrella AGENTS.md Part II #11).
+inform_sessions	umbrella AGENTS.md	AGENTS.md	require	Post .STATUS. at every milestone
+inform_sessions	git-workflow skill source	layer-charly-internals/charly.yml	require	Post .STATUS. at every milestone
+inform_sessions	git-workflow skill source	layer-charly-internals/charly.yml	require	BLOCKS. on BOTH threads
+# The validator enforces only what the rulebook states (its check ids are AGENTS.md's table;
+# scripts/check-validator-rule-map.mjs in the umbrella asserts the id sets match).
+validator_enforces	umbrella AGENTS.md	AGENTS.md	require	enforces this rulebook; it never instructs
+validator_enforces	validator rulebook	action-review/charly.yml	require	YOU ENFORCE; YOU NEVER INSTRUCT
+validator_enforces	validator rulebook	action-review/charly.yml	forbid	B(1[0-8]|[4-9]) — R[0-9]
+# The retired half-numbered rules (R4a / R7a became R4 / R8) appear in no rule surface.
+rule_numbering	umbrella AGENTS.md	AGENTS.md	forbid	\*\*R(4a|7a) —
+rule_numbering	PR template	dotgithub/.github/PULL_REQUEST_TEMPLATE.md	forbid	R4a|R7a
