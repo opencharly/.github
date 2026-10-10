@@ -93,3 +93,32 @@ jobs:
       - name: The candy manifest validates at the pinned charly
         if: steps.detect.outputs.present == 'true'
         run: /tmp/charly/bin/charly box validate
+
+      # A candy manifest that VALIDATES is not a candy whose GENERATED files are current.
+      # Every plugin candy (candy/<name>/schema/*.cue) ships a generated
+      # params/cue_types_gen.go, and nothing checked that the committed file still matches
+      # what its schema produces — so a schema edit could leave the projection stale on main
+      # with every gate green. Measured: 19 plugin repos were stale on their own main
+      # (opencharly/opencharly#463), and one of them could not even be regenerated because a
+      # named type its consumers use had been removed (opencharly/plugin-bpf#7).
+      #
+      # ONE org-level check, not one per repo: it covers every plugin repo by construction,
+      # and `charly candy params <name> --check` is the generator's own drift gate — the same
+      # verb a reader is told to run, so the remedy in the message is the remedy that works.
+      - name: Every plugin candy's committed params projection matches its schema
+        if: steps.detect.outputs.present == 'true'
+        run: |
+          fail=0
+          for schema in candy/*/schema; do
+            [ -d "$schema" ] || continue
+            name="$(basename "$(dirname "$schema")")"
+            [ -f "candy/$name/params/cue_types_gen.go" ] || continue
+            if ! /tmp/charly/bin/charly candy params "$name" --check; then
+              echo "::error::candy/$name/params/cue_types_gen.go is stale — run 'charly candy params $name' and commit the result"
+              fail=1
+            fi
+          done
+          if [ "$fail" -eq 0 ]; then
+            echo "every plugin candy's params projection is current"
+          fi
+          exit "$fail"
