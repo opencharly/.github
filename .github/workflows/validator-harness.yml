@@ -22,10 +22,22 @@ jobs:
   harness:
     name: validator-harness
     runs-on: ubuntu-latest
+    env:
+      GIT_CONFIG_COUNT: "1"
+      GIT_CONFIG_KEY_0: init.defaultBranch
+      GIT_CONFIG_VALUE_0: main
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7, node24
       - name: Run the validator-gate harness (offline, python3 stdlib)
-        run: python3 .github/tests/validator-gate-harness.py
+        run: |
+          token="validator-harness-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "::stop-commands::$token"
+          set +e
+          python3 .github/tests/validator-gate-harness.py
+          rc=$?
+          set -e
+          echo "::$token::"
+          exit "$rc"
       - name: Run the org-ruleset owner-script test (offline, mock gh)
         run: bash scripts/org-ruleset_test.sh
       - name: Run the dispatcher-retirement script test (offline, mock gh)
