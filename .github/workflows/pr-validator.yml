@@ -420,7 +420,7 @@ jobs:
           fi
 
           # Provider HTTP rejection (the class a 4xx/5xx actually belongs to): the review
-          # client logs `LLM <status>: <body>` when the ENDPOINT parsed the request and
+          # client logs `LLM <status>` or `LLM: POST "<url>": <status>` when the ENDPOINT parsed the request and
           # REFUSED it — e.g. opencode Go answering 400 MissingSessionID. That is a
           # provider/protocol/configuration matter, NOT the engine streaming class, and the
           # notice below must not assert the streaming story for it (observed 2026-09-12:
@@ -430,9 +430,9 @@ jobs:
           # [45][0-9][0-9] — 4xx/5xx ONLY. A broader pattern (1xx-5xx) reports a non-refusal
           # status line as a confident provider REJECTION and, because this branch is checked
           # FIRST, preempts the engine-defective class — the same misattribution this notice
-          # exists to remove, inverted. The `non-error-status` scenario pins that boundary.
-          if pe=$(grep -m1 -oE 'LLM [45][0-9][0-9]' /tmp/review.log); then
-            provider_error="${pe#LLM }"
+          # exists to remove, inverted.
+          if pe=$(grep -m1 -oE 'LLM [45][0-9][0-9]|LLM: POST "[^"]+": [45][0-9][0-9]' /tmp/review.log); then
+            provider_error="${pe##* }"
           fi
 
           # INFRA vs EVAL (the auto-close split; opencharly/.github#170). An INCONCLUSIVE is
@@ -602,7 +602,7 @@ jobs:
               '',
               `**Closed after** ${counted} counting verdict(s) reached AI_REVIEW_AUTO_CLOSE_AFTER=${threshold}.`,
               '',
-              `Verdicts: **${blocks}** BLOCK, **${evalCount}** engine/eval INCONCLUSIVE. **${infraCount}** infrastructure INCONCLUSIVE verdict(s) were excluded.`,
+              `Verdicts: **${blocks}** BLOCK, **${evalCount}** engine/eval INCONCLUSIVE. **${infraCount}** INCONCLUSIVE verdict(s) excluded as clear provider/GitHub infrastructure failures.`,
               '',
               '**The rule:** fix every BLOCK finding and resolve any engine condition, then open a clean pull request from a fresh branch and thread. Never push, re-run, or reopen this closed thread.',
               '',
