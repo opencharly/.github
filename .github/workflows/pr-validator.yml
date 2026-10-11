@@ -256,6 +256,9 @@ jobs:
           AI_REVIEW_PROVIDER: ${{ inputs.ai_review_provider || vars.AI_REVIEW_PROVIDER }}
           AI_REVIEW_MODEL:     ${{ inputs.ai_review_model || vars.AI_REVIEW_MODEL }}
           AI_REVIEW_BASE_URL:  ${{ inputs.ai_review_base_url || vars.AI_REVIEW_BASE_URL }}
+          # Use only the explicitly supplied release bundle; do not probe installed plugins
+          # from the runner's worktree-built charly binary.
+          CHARLY_PLUGIN_ONLY: '1'
           # The engine STREAMS. The meaningful bound is SILENCE between chunks
           # (the idle bound), which this workflow now passes through; the
           # whole-request deadline is left UNSET so the engine's own generous
