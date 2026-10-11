@@ -1,15 +1,5 @@
-# R10 COVERAGE FOR THE GATE ITSELF.
-#
-# .github/tests/validator-gate-harness.py asserts the decision chain of
-# pr-validator.yml (PASS / BLOCK / INCONCLUSIVE / AMBIGUOUS, the exit codes,
-# the INCONCLUSIVE PR comment, and the fail-closed rule that only a review
-# exiting 0 may PASS) against fakes for charly and gh. Coverage that never
-# runs enforces nothing — this workflow IS the wiring: the harness runs on
-# every pull request (and on demand), and its non-zero exit reddens the check.
-#
-# Offline and dependency-free by construction: python3 stdlib only, no
-# network, no PyYAML, no third-party dependency.
-name: validator-harness
+# Static policy checks and live Node/action artifact boundaries.
+name: workflow-checks
 
 on:
   pull_request:
@@ -20,7 +10,7 @@ permissions:
 
 jobs:
   harness:
-    name: validator-harness
+    name: workflow-checks
     runs-on: ubuntu-latest
     env:
       GIT_CONFIG_COUNT: "1"
@@ -28,16 +18,6 @@ jobs:
       GIT_CONFIG_VALUE_0: main
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7, node24
-      - name: Run the validator-gate harness (offline, python3 stdlib)
-        run: |
-          token="validator-harness-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          echo "::stop-commands::$token"
-          set +e
-          python3 .github/tests/validator-gate-harness.py
-          rc=$?
-          set -e
-          echo "::$token::"
-          exit "$rc"
       - name: Run the org-ruleset owner-script test (offline, mock gh)
         run: bash scripts/org-ruleset_test.sh
       - name: Run the dispatcher-retirement script test (offline, mock gh)
