@@ -51,6 +51,10 @@ set -euo pipefail
 #
 # usage: GH_TOKEN=<app with contents:write> [OPENCHARLY_ORG=opencharly] $0 [<repo> ...]
 #   With no repo arguments it bootstraps EVERY org repo that has no `main` ref.
+#   For each repo it creates `main` for, it ALSO installs the per-repo tag-on-merge caller on
+#   that branch (asserted by reading the file back) and prints the three repository SETTINGS
+#   the App token cannot set — until those are applied the repo sits outside the org gate
+#   (#180). The final line reports them as `needs_operator_settings=<n>`.
 
 readonly MAX_FAILURES="${BOOTSTRAP_MAX_FAILURES:-20}"
 
@@ -59,6 +63,16 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib-org.sh"
 
 command -v gh >/dev/null
 [[ -n "${GH_TOKEN:-}" ]] || { echo "GH_TOKEN is required (the bypass-actor App token)" >&2; exit 1; }
+
+# The CANONICAL per-repo dispatcher this script installs on a freshly bootstrapped `main`.
+# It is THIS repo's own template — the same file the org's `check-action-runtimes.py` audits,
+# so a new repo starts on the pinned immutable Node 24 action rather than on a stale copy
+# (measured 2026-10-12: the ~438 per-repo copies in the org still carry the mutable
+# `actions/github-script@v7`; that drift is filed separately and is NOT repaired here).
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CALLER_TEMPLATE="$HERE/../.github/workflows/tag-on-merge-dispatcher.yml"
+[[ -f "$CALLER_TEMPLATE" ]] || { echo "missing caller template: $CALLER_TEMPLATE" >&2; exit 1; }
+CALLER_PATH=".github/workflows/tag-on-merge.yml"
 
 # all_repos — every non-archived, non-fork org repo (INDEPENDENT of whether it has
 # a main ref — discover_repos filters on defaultBranchRef==main and would exclude
@@ -94,6 +108,61 @@ first_other_ref() {
   return 1
 }
 
+# install_tag_caller <repo> — put the org's CURRENT per-repo tag-on-merge dispatcher on the
+# repo's `main` via the contents API, which the App CAN do (its installation carries
+# `contents: write`, and commits to protected `main` are what its ruleset bypass exists for —
+# the same capability the `tag-on-merge` reusable already uses to write `CHANGELOG/<CalVer>.md`).
+#
+# WHY IT MATTERS (opencharly/.github#180): `tag-on-merge.yml` arrives with the repo's first
+# PR in the manual flow, and neither of its triggers can fire for that FIRST merge — the
+# `workflow_run` of `charly/pr-validator` completed before the file existed on `main`, and
+# GitHub creates ZERO runs for an auto-merge squash — so a new repo's first landing silently
+# gets no tag and no CHANGELOG. Installing the caller at bootstrap time, before any PR
+# exists, is what makes the first merge tag.
+#
+# Idempotent: an existing file is left untouched. The post-condition is ASSERTED by reading
+# the file back, so a silent failure to install can never read as success.
+install_tag_caller() {
+  local repo="$1" b64 out sha
+  b64="$(base64 -w0 "$CALLER_TEMPLATE")"
+  if gh api "repos/$ORG/$repo/contents/$CALLER_PATH?ref=main" --jq .sha >/dev/null 2>&1; then
+    echo "$repo: $CALLER_PATH already present — untouched"
+    return 0
+  fi
+  if ! out="$(gh api --method PUT "repos/$ORG/$repo/contents/$CALLER_PATH" \
+      -f message="ci: install the org tag-on-merge dispatcher (opencharly/.github#180)" \
+      -f content="$b64" -f branch=main --jq .commit.sha 2>&1)"; then
+    echo "ERROR: $repo could not install $CALLER_PATH: $out" >&2
+    return 1
+  fi
+  if ! sha="$(gh api "repos/$ORG/$repo/contents/$CALLER_PATH?ref=main" --jq .sha 2>/dev/null)" || [[ -z "$sha" ]]; then
+    echo "ERROR: $repo reported commit $out for $CALLER_PATH but the read-back found nothing on main" >&2
+    return 1
+  fi
+  echo "$repo: installed $CALLER_PATH (blob $sha)"
+  return 0
+}
+
+# operator_remedy <repo>… — the three repository SETTINGS the App cannot make, with the exact
+# commands. The App's installation carries no `administration` permission (measured live:
+# permissions are actions/contents/deployments/issues/merge_queues/metadata/packages/pages/
+# pull_requests/repository_custom_properties/workflows — never administration), so
+# `PATCH /repos/...` is 403 "Resource not accessible by integration". Until these are set the
+# repo is OUTSIDE the org gate: no required `validate / validate`, no CalVer tag, no CHANGELOG.
+# `org-ruleset.sh verify` now FAILS on that state rather than reporting a clean org.
+operator_remedy() {
+  local repo
+  [[ $# -gt 0 ]] || return 0
+  echo
+  echo "OPERATOR ACTION REQUIRED — the App token cannot set repository settings:" >&2
+  for repo in "$@"; do
+    echo "  gh api --method PATCH repos/$ORG/$repo -f default_branch=main" >&2
+    echo "  gh api --method PATCH repos/$ORG/$repo -f allow_auto_merge=true" >&2
+    echo "  gh api --method PATCH repos/$ORG/$repo -f delete_branch_on_merge=true" >&2
+  done
+  echo "  (verify refuses a clean membership until default_branch is main — opencharly/.github#180)" >&2
+}
+
 if [[ $# -gt 0 ]]; then
   repos=("$@")
 else
@@ -103,6 +172,7 @@ else
 fi
 
 created=0 skipped=0 failed=0
+needs_settings=()
 for repo in "${repos[@]}"; do
   # Already has main? Never move a protected branch.
   if gh api "repos/$ORG/$repo/git/ref/heads/main" --jq .object.sha >/dev/null 2>&1; then
@@ -123,6 +193,14 @@ for repo in "${repos[@]}"; do
       -f ref=refs/heads/main -f sha="$seed" --jq '.ref' 2>&1)"; then
     echo "$repo: created refs/heads/main -> $seed"
     created=$((created+1))
+    # The ref is not enough: install the tag-on-merge dispatcher on it (so the FIRST
+    # merge can be tagged) and record the settings the App cannot set for the operator.
+    if install_tag_caller "$repo"; then
+      needs_settings+=("$repo")
+    else
+      failed=$((failed+1))
+      [[ "$failed" -gt "$MAX_FAILURES" ]] && { echo "too many failures — aborting" >&2; exit 1; }
+    fi
   else
     echo "ERROR: $repo create refs/heads/main failed: $resp" >&2
     failed=$((failed+1))
@@ -130,5 +208,6 @@ for repo in "${repos[@]}"; do
   fi
 done
 
-echo "bootstrap-repo-main: created=$created absent_or_seeded=$skipped failed=$failed"
+operator_remedy "${needs_settings[@]+"${needs_settings[@]}"}"
+echo "bootstrap-repo-main: created=$created absent_or_seeded=$skipped failed=$failed needs_operator_settings=${#needs_settings[@]}"
 [[ "$failed" -eq 0 ]]

@@ -37,6 +37,29 @@ discover_excludes() {
     | sed '/^$/d' | sort
 }
 
+# declared_non_main_defaults — the active, non-fork repos whose default branch is
+# DELIBERATELY not `main`, as TAB-separated `<repo>\t<default>\t<reason>`.
+#
+# WHY THIS MUST BE ENUMERATED AT ALL. The target set is derived from
+# `defaultBranchRef == "main"` and the exclude set is its complement, so a repo that
+# keeps a non-`main` default drops out of the org gate silently: no required
+# `validate / validate` check, no CalVer tag, no CHANGELOG — and the verify loop, which
+# iterates the TARGET set, can never notice (opencharly/.github#180, measured live:
+# `opencharly/plugin-task-old-16365` reports 0 rules on `main` where `charly` reports 5).
+#
+# A repo is outside the target set for exactly three reasons: it is a fork, it is
+# archived, or its default branch is not `main`. The first two are by design and are
+# computed, never declared here. The third is a DEFECT unless it is listed below with a
+# reason — so an entry here is a decision the org has made on purpose, and `verify`
+# asserts that the population of undeclared non-`main` defaults is EMPTY.
+declared_non_main_defaults() {
+  cat <<'LIST'
+# <repo>	<default>	<reason>
+omarchy-eval-artifacts	runs	the omarchy eval lane's runs-branch artifact sink: no PRs, no landing, no gate expected
+pixelflux	av1	a vendored upstream kept on its own default branch; the org compiles it from source but never lands PRs against it
+LIST
+}
+
 # dispatcher_path_for <repo> — the SOURCE repo uses the `-dispatcher.yml` stub.
 dispatcher_path_for() {
   [[ "$1" == "$SOURCE_REPO" ]] && echo "$SOURCE_DISPATCHER_PATH" || echo "$DISPATCHER_PATH"
