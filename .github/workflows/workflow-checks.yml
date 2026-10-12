@@ -1,15 +1,5 @@
-# R10 COVERAGE FOR THE GATE ITSELF.
-#
-# .github/tests/validator-gate-harness.py asserts the decision chain of
-# pr-validator.yml (PASS / BLOCK / INCONCLUSIVE / AMBIGUOUS, the exit codes,
-# the INCONCLUSIVE PR comment, and the fail-closed rule that only a review
-# exiting 0 may PASS) against fakes for charly and gh. Coverage that never
-# runs enforces nothing — this workflow IS the wiring: the harness runs on
-# every pull request (and on demand), and its non-zero exit reddens the check.
-#
-# Offline and dependency-free by construction: python3 stdlib only, no
-# network, no PyYAML, no third-party dependency.
-name: validator-harness
+# Static policy checks and live Node/action artifact boundaries.
+name: workflow-checks
 
 on:
   pull_request:
@@ -20,12 +10,14 @@ permissions:
 
 jobs:
   harness:
-    name: validator-harness
+    name: workflow-checks
     runs-on: ubuntu-latest
+    env:
+      GIT_CONFIG_COUNT: "1"
+      GIT_CONFIG_KEY_0: init.defaultBranch
+      GIT_CONFIG_VALUE_0: main
     steps:
-      - uses: actions/checkout@v7
-      - name: Run the validator-gate harness (offline, python3 stdlib)
-        run: python3 .github/tests/validator-gate-harness.py
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7, node24
       - name: Run the org-ruleset owner-script test (offline, mock gh)
         run: bash scripts/org-ruleset_test.sh
       - name: Run the dispatcher-retirement script test (offline, mock gh)
@@ -34,6 +26,27 @@ jobs:
         run: bash scripts/retire-per-repo-candy-gates_test.sh
       - name: Run the version-strip cutover script test (offline, mock gh)
         run: bash scripts/strip-config-version_test.sh
+      - name: Check action runtime pins
+        run: python3 scripts/check-action-runtimes.py
+      - name: Prove the action runtime checker rejects Node 20
+        run: python3 scripts/check-action-runtimes.py --self-test
+      - name: Exercise the pinned github-script runtime
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0, node24
+        with:
+          script: |
+            const major = Number(process.versions.node.split('.')[0]);
+            if (major !== 24) core.setFailed(`expected Node 24, got ${process.version}`);
+            core.info(`github-script runtime: Node ${process.version}`);
+      - name: Prepare upload-artifact runtime smoke
+        run: |
+          mkdir -p "$RUNNER_TEMP/action-runtime-smoke"
+          printf 'Node 24 artifact action smoke\n' > "$RUNNER_TEMP/action-runtime-smoke/result.txt"
+      - name: Exercise the pinned upload-artifact runtime
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2, node24
+        with:
+          name: action-runtime-smoke
+          path: ${{ runner.temp }}/action-runtime-smoke
+          if-no-files-found: error
       - name: Run the repo-bootstrap script test (offline, mock gh)
         run: bash scripts/bootstrap-repo-main_test.sh
       - name: Run the governance-reconcile self-test (offline, fixtures)

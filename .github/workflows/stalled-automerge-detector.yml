@@ -43,13 +43,13 @@ jobs:
     steps:
       - name: Create bot token (charly-auto-merge App)
         id: app
-        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0, node24
         with:
           app-id: ${{ secrets.CHARLY_AUTO_MERGE_APP_ID }}
           private-key: ${{ secrets.CHARLY_AUTO_MERGE_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7, node24
 
       # The filter must be able to FAIL before it is trusted to pass: a detector whose selection
       # rule returns nothing is a green no-op that proves nothing.
