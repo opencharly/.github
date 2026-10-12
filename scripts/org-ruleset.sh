@@ -292,6 +292,54 @@ case "$mode" in
       dbom="$(gh api "repos/$ORG/$repo" --jq '.delete_branch_on_merge')"
       [[ "$dbom" == "true" ]] || { echo "$repo: delete_branch_on_merge must be true" >&2; fail=1; }
     done
+
+    # MEMBERSHIP INTEGRITY (opencharly/.github#180). The loop above asserts the contract
+    # over the TARGET set — and the target set is DEFINED by `defaultBranchRef == "main"`,
+    # so a repo that keeps a non-`main` default is silently outside it: no required
+    # `validate / validate` check, no CalVer tag, no CHANGELOG — and this verify, iterating
+    # the target set, could never say so. Measured on the live org while this arm was
+    # written: `plugin-task-old-16365` and `plugin-task-zzbootstrap` default to
+    # `feat/plugin-task` and carry ZERO rules on `main`, where `charly` carries five.
+    #
+    # A fork or an archived repo is excluded BY DESIGN (computed, never declared); a
+    # non-`main` default is a defect UNLESS it is declared with a reason in
+    # lib-org.sh's declared_non_main_defaults(). The read is STATUS-CHECKED before the
+    # loop: under `set -e` a failed `gh repo list` behind a process substitution feeds the
+    # loop nothing and would read as a clean membership — the silent pass this arm exists
+    # to prevent.
+    if ! membership="$(gh repo list "$ORG" --limit 1000 \
+        --json name,isFork,isArchived,defaultBranchRef \
+        --jq '.[] | select(.isFork == false and .isArchived == false) | "\(.name)\t\(.defaultBranchRef.name)"' 2>/dev/null)"; then
+      echo "org membership: repo listing FAILED — refusing to report a clean membership from a failed read" >&2
+      fail=1
+    else
+      declared="$(declared_non_main_defaults | awk -F'\t' '!/^#/ && NF {print $1}')"
+      while IFS=$'\t' read -r mrepo mdefault; do
+        [[ -z "$mrepo" ]] && continue
+        [[ "$mdefault" == "main" ]] && continue
+        # An EMPTY repo has no refs at all: the GraphQL `defaultBranchRef` is `{"name":""}`
+        # (measured on `zz-probe3-7319`), so the value arrives EMPTY, not "null". It cannot
+        # merge anything, so the gate's absence has no consequence until it has a branch —
+        # and the moment it does, this arm fails. Named, never silently skipped.
+        if [[ -z "$mdefault" ]]; then
+          echo "$mrepo: no default branch yet (empty repo) — outside the gate until it has one"
+          continue
+        fi
+        if grep -qx -- "$mrepo" <<<"$declared"; then
+          echo "$mrepo: default branch '$mdefault' — declared by design"
+          continue
+        fi
+        # The remedy depends on whether there is a `main` to default TO: a repo that was
+        # never bootstrapped has no such ref, so the PATCH alone would fail.
+        if gh api "repos/$ORG/$mrepo/git/ref/heads/main" --jq .object.sha >/dev/null 2>&1; then
+          echo "$mrepo: default branch is '$mdefault' but a 'main' ref exists — it is in discover_excludes: NO required validate/validate check and NO CalVer tag. Fix: gh api --method PATCH repos/$ORG/$mrepo -f default_branch=main" >&2
+        else
+          echo "$mrepo: default branch is '$mdefault' and there is NO 'main' ref — the repo was never bootstrapped (no required validate/validate check, no CalVer tag). Fix: run scripts/bootstrap-repo-main.sh (the App creates the ref), then PATCH default_branch=main; archive it instead if it is not a landing target" >&2
+        fi
+        fail=1
+      done <<<"$membership"
+    fi
+
     [[ "$fail" == 0 ]] && echo "org-wide required workflow + main protection verified"
     exit "$fail"
     ;;
