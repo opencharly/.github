@@ -51,7 +51,7 @@ jobs:
     name: validate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7, node24
+      - uses: actions/checkout@v7
 
       - name: Detect charly.yml (skip cleanly when absent)
         id: detect
@@ -78,7 +78,7 @@ jobs:
         run: |
           git clone --depth 1 --branch "${{ vars.CHARLY_VERSION }}" https://github.com/opencharly/charly.git /tmp/charly
 
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0, node24
+      - uses: actions/setup-go@v5
         if: steps.detect.outputs.present == 'true'
         with:
           go-version-file: /tmp/charly/charly/go.mod
@@ -93,3 +93,49 @@ jobs:
       - name: The candy manifest validates at the pinned charly
         if: steps.detect.outputs.present == 'true'
         run: /tmp/charly/bin/charly box validate
+
+      # A candy manifest that VALIDATES is not a candy whose GENERATED files are current.
+      #
+      # THE INSTRUMENT MUST BE THE ONE THE REPO IS GRADED ON. An earlier revision of this step
+      # called the charly candy params verb, and that was WRONG: the gengotypes wrapper of charly
+      # is pinned to the cue of charly, while the canonical check of a plugin repo, where it has
+      # one, runs cue exp gengotypes at ITS pinned cue. For plugin-pipeline the two disagree on
+      # the SAME file -- charly candy params --check at a newer charly says STALE, and the repo
+      # own ci.yml at cue@v0.16.1 passes. A gate that reports a drift the repo does not have is
+      # worse than no gate: 112 of 115 schema-bearing plugin repos have no check at all, and eight
+      # PRs derived from a census taken with the wrong instrument had to be withdrawn.
+      #
+      # So this replicates the mechanism of the repo, at the pin of the repo. cue@v0.16.1 is the
+      # version installed by the ci.yml of plugin-pipeline and plugin-lobster, and it is the only
+      # cue any plugin projection is known to be generated with.
+      - name: Install the pinned cue (the generator that owns these files)
+        if: steps.detect.outputs.present == 'true'
+        run: go install cuelang.org/go/cmd/cue@v0.16.1
+
+      - name: Every plugin candy commits a params projection matching its schema
+        if: steps.detect.outputs.present == 'true'
+        run: |
+          fail=0
+          for schema in candy/*/schema; do
+            [ -d "$schema" ] || continue
+            name="$(basename "$(dirname "$schema")")"
+            committed="candy/$name/params/cue_types_gen.go"
+            [ -f "$committed" ] || continue
+            work="$(mktemp -d)"
+            printf 'package params\n' > "$work/pkg.cue"
+            cat "$schema"/*.cue >> "$work/pkg.cue"
+            if ! ( cd "$work" && cue exp gengotypes . > /dev/null 2>&1 ); then
+              echo "::error::candy/$name did not gengotypes at cue@v0.16.1 -- the toolchain and the schema disagree, which is a defect in one of them"
+              fail=1; rm -rf "$work"; continue
+            fi
+            if ! diff <(sed 1,1d "$work/cue_types_params_gen.go") <(sed 1,1d "$committed") > "$work/d" 2>&1; then
+              echo "::error::$committed is stale against candy/$name/schema at cue@v0.16.1 -- diff:"
+              sed -n 1,20p "$work/d"
+              fail=1
+            fi
+            rm -rf "$work"
+          done
+          if [ "$fail" -eq 0 ]; then
+            echo "every plugin candy projection is current against its schema at cue@v0.16.1"
+          fi
+          exit "$fail"
