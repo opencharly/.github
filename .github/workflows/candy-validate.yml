@@ -51,7 +51,7 @@ jobs:
     name: validate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7, node24
 
       - name: Detect charly.yml (skip cleanly when absent)
         id: detect
@@ -78,7 +78,7 @@ jobs:
         run: |
           git clone --depth 1 --branch "${{ vars.CHARLY_VERSION }}" https://github.com/opencharly/charly.git /tmp/charly
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0, node24
         if: steps.detect.outputs.present == 'true'
         with:
           go-version-file: /tmp/charly/charly/go.mod

@@ -103,20 +103,11 @@ copy inherits the files here — so a change lands **once**, not in every repo.
   test is
   `scripts/strip-config-version_test.sh` (which locks the real layer-charly-hermes
   charly.yml as a committed fixture in `scripts/fixtures/`).
-- **`.github/workflows/validator-harness.yml`** +
-  **`.github/tests/validator-gate-harness.py`** — the gate's own R10 coverage.
-  The harness (python3 stdlib only, offline, fakes for charly and gh) drives the
-  REAL `run:` bodies of the decision chain above and asserts each exit code, the
-  classification, the INCONCLUSIVE comment and whether auto-merge was armed; the
-  workflow runs it on every `pull_request` and on `workflow_dispatch`, so a
-  non-zero harness exit reddens the check. The workflow also runs
-  `scripts/org-ruleset_test.sh`, `scripts/retire-per-repo-dispatchers_test.sh`,
-  `scripts/retire-per-repo-candy-gates_test.sh`, `scripts/bootstrap-repo-main_test.sh`
-  (the owner scripts' offline mock-`gh` tests), `scripts/strip-config-version_test.sh`
-  (the version-strip cutover's test, including the committed layer-charly-hermes
-  fixture that pins the block-scalar-preservation rule), and the governance-reconcile gate, so
-  every cutover script is exercised on every `.github` PR. Coverage that never runs
-  enforces nothing.
+- **`.github/workflows/workflow-checks.yml`** checks the action runtime pins and
+  executes the pinned Node runtime and artifact upload against GitHub. It also
+  runs the existing owner-script policy tests and governance reconciliation.
+  Validate changes to the review/landing path by running `pr-validator.yml` on
+  the actual PR branch and checking the live GitHub state and complete job log.
 - **Body-only fix after a push — MANUAL (the REST re-run).** A REQUIRED workflow acts ONLY on
   the default push-driven `pull_request` types and IGNORES `on.types` — MEASURED *and* confirmed
   by the GitHub docs ("Troubleshooting rules": ruleset workflows ignore `branches`/`paths`/
@@ -213,9 +204,8 @@ it skipped the org's own PRs. Combined with the ruleset's REQUIRED
 `validate / validate` check, that made such a PR un-mergeable — the required check was
 never produced (`measured 2026-10-07, opencharly/dsh-github#2`: `dsh-github` main
 carries the ruleset while every pre-existing fork does not, and `gh pr merge` reports
-`Required status check "validate / validate" is expected`). The predicate and its
-truth table are asserted by `.github/tests/validator-gate-harness.py` (which runs on
-every PR to this repo) and by a `same_repo_gate` row in `scripts/governance-claims.tsv`.
+`Required status check "validate / validate" is expected`). The predicate is checked by the `same_repo_gate` row in
+`scripts/governance-claims.tsv`.
 
 **Consequence for a new fork repo.** Forks are **excluded from the ruleset by
 design** (`discover_excludes` filters on `isFork == true`), so they carry no required

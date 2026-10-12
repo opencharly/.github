@@ -172,7 +172,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - id: pr
-        uses: actions/github-script@v7
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0, node24
         with:
           script: |
             const { data: pr } = await github.rest.pulls.get({
@@ -183,7 +183,7 @@ jobs:
             core.setOutput('base_ref', pr.base.ref);
             core.setOutput('node_id', pr.node_id);
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7, node24
         with:
           repository: opencharly/action-review
           ref: main
@@ -256,6 +256,9 @@ jobs:
           AI_REVIEW_PROVIDER: ${{ inputs.ai_review_provider || vars.AI_REVIEW_PROVIDER }}
           AI_REVIEW_MODEL:     ${{ inputs.ai_review_model || vars.AI_REVIEW_MODEL }}
           AI_REVIEW_BASE_URL:  ${{ inputs.ai_review_base_url || vars.AI_REVIEW_BASE_URL }}
+          # Use only the explicitly supplied release bundle; do not probe installed plugins
+          # from the runner's worktree-built charly binary.
+          CHARLY_PLUGIN_ONLY: '1'
           # The engine STREAMS. The meaningful bound is SILENCE between chunks
           # (the idle bound), which this workflow now passes through; the
           # whole-request deadline is left UNSET so the engine's own generous
@@ -337,7 +340,10 @@ jobs:
           rc=0
           charly review --out /tmp/review.txt > /tmp/review.log 2>&1 || rc=$?
           echo "review rc=$rc"
+          token="$(cat /proc/sys/kernel/random/uuid)"
+          echo "::stop-commands::$token"
           cat /tmp/review.log
+          echo "::$token::"
 
           # The engine names its terminal class in ONE line (`inconclusive: …`, from
           # plugin-review's classify() / verdictExit() / budgetError()). The class is derived
@@ -414,7 +420,7 @@ jobs:
           fi
 
           # Provider HTTP rejection (the class a 4xx/5xx actually belongs to): the review
-          # client logs `LLM <status>: <body>` when the ENDPOINT parsed the request and
+          # client logs `LLM <status>` or `LLM: POST "<url>": <status>` when the ENDPOINT parsed the request and
           # REFUSED it — e.g. opencode Go answering 400 MissingSessionID. That is a
           # provider/protocol/configuration matter, NOT the engine streaming class, and the
           # notice below must not assert the streaming story for it (observed 2026-09-12:
@@ -424,9 +430,9 @@ jobs:
           # [45][0-9][0-9] — 4xx/5xx ONLY. A broader pattern (1xx-5xx) reports a non-refusal
           # status line as a confident provider REJECTION and, because this branch is checked
           # FIRST, preempts the engine-defective class — the same misattribution this notice
-          # exists to remove, inverted. The `non-error-status` scenario pins that boundary.
-          if pe=$(grep -m1 -oE 'LLM [45][0-9][0-9]' /tmp/review.log); then
-            provider_error="${pe#LLM }"
+          # exists to remove, inverted.
+          if pe=$(grep -m1 -oE 'LLM [45][0-9][0-9]|LLM: POST "[^"]+": [45][0-9][0-9]' /tmp/review.log); then
+            provider_error="${pe##* }"
           fi
 
           # INFRA vs EVAL (the auto-close split; opencharly/.github#170). An INCONCLUSIVE is
@@ -567,60 +573,46 @@ jobs:
           VERDICT: ${{ steps.parse.outputs.verdict }}
           THIS_INFRA: ${{ steps.parse.outputs.inconclusive_infra }}
           THRESHOLD: ${{ vars.AI_REVIEW_AUTO_CLOSE_AFTER || '5' }}
-        run: |
-          case "$THRESHOLD" in
-            ''|*[!0-9]*) echo "::warning::AI_REVIEW_AUTO_CLOSE_AFTER=$THRESHOLD is not a number — disabling auto-close"; exit 0;;
-          esac
-          if [ "$THRESHOLD" -le 0 ]; then
-            echo "auto-close disabled (threshold=$THRESHOLD)"
-            exit 0
-          fi
-          # Count the validator's OWN verdict comments PER CLASS. The count MUST be
-          # page-correct: `gh api --paginate ... --jq` applies the filter PER PAGE (so a
-          # >30-comment thread yields several numbers), which the guard below would reject
-          # and silently disable auto-close on exactly the long threads this feature exists
-          # to bound. `--paginate | jq -s` collects the pages into ONE array first.
-          #
-          # An EVAL INCONCLUSIVE is one that is NOT marked infra: its notice carries the
-          # `Verdict class: infra` line (the gate emits it for an infra run). Every
-          # INCONCLUSIVE posted BEFORE this change lacks the line, so it counts as EVAL —
-          # which is correct: those runs' own class was engine/provider, and history is
-          # not rewritten.
-          counts=$(gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments?per_page=100" 2>/dev/null \
-            | jq -s -r '[.[][] | select(.user.login=="github-actions[bot]") | .body] as $b
-              | "\(($b | map(select(contains("## Review — BLOCK"))) | length)) \(($b | map(select(contains("## validator INCONCLUSIVE") and (contains("Verdict class: infra") | not))) | length)) \(($b | map(select(contains("## validator INCONCLUSIVE") and contains("Verdict class: infra"))) | length))"' 2>/dev/null || true)
-          blocks="${counts%% *}"
-          rest="${counts#* }"
-          eval_inconclusives="${rest%% *}"
-          infra_inconclusives="${rest##* }"
-          case "$blocks" in
-            ''|*[!0-9]*) echo "::warning::could not count the verdict comments (got '$counts') — not auto-closing"; exit 0;;
-          esac
-          case "$eval_inconclusives" in
-            ''|*[!0-9]*) echo "::warning::could not count the verdict comments (got '$counts') — not auto-closing"; exit 0;;
-          esac
-          case "$infra_inconclusives" in
-            ''|*[!0-9]*) echo "::warning::could not count the verdict comments (got '$counts') — not auto-closing"; exit 0;;
-          esac
-          # THIS run's verdict is not in the thread yet (the gate posts its notice AFTER
-          # this step), so it is counted here by construction — and an INFRA verdict is
-          # deliberately NOT added to the count.
-          this_run_eval=0
-          if [ "$VERDICT" = "INCONCLUSIVE" ] && [ "${THIS_INFRA:-false}" != "true" ]; then this_run_eval=1; fi
-          this_run_infra=0
-          if [ "$VERDICT" = "INCONCLUSIVE" ] && [ "${THIS_INFRA:-false}" = "true" ]; then this_run_infra=1; fi
-          counted=$((blocks + eval_inconclusives + this_run_eval))
-          infra_total=$((infra_inconclusives + this_run_infra))
-          echo "counting verdicts on this PR: $counted ($blocks BLOCK, $((eval_inconclusives + this_run_eval)) eval INCONCLUSIVE) — infra INCONCLUSIVE (NOT counted): $infra_total"
-          echo "bound — AI_REVIEW_AUTO_CLOSE_AFTER=$THRESHOLD over the counting class"
-          if [ "$counted" -lt "$THRESHOLD" ]; then
-            echo "below the bound — not closing"
-            exit 0
-          fi
-          close_why="${counted} counting verdict(s) reached AI_REVIEW_AUTO_CLOSE_AFTER=$THRESHOLD"
-          msg=$(printf '## Auto-closed: %s counting verdict(s) on this thread — open a clean PR from scratch\n\n**Closed after** %s.\n\nVerdicts on this thread: **%s** `BLOCK` and **%s** counted `INCONCLUSIVE` (engine/eval failures). **%s** `INCONCLUSIVE` verdict(s) were excluded as clear **infrastructure** failures (provider/GitHub) and did NOT count toward the bound `AI_REVIEW_AUTO_CLOSE_AFTER=%s`.\n\n**The rule:** open a clean pull request from scratch — a **fresh branch and a fresh thread** — once the counting verdicts reach **%s**. Never another push, re-run, or re-open on this thread.\n\n**Why:** every further run on this thread spends a full verdict to say nothing new, and grows this PR'\''s comment thread — which is what drives the reviewer into a runaway. The loop is bounded here instead.\n\n**What to do:**\n1. Fix **every** finding in the `BLOCK` verdict(s) below, **then** open the clean pull request from scratch with those fixes already in.\n2. The `INCONCLUSIVE` verdicts carry **no code finding** (the engine produced no answer). A clear infra failure was excluded from the count; if this close was driven by an eval-class one, resolve the engine condition before the fresh attempt.\n\nThis is a policy action, not a code finding — the validator verdict on this run stands.' "$counted" "$close_why" "$blocks" "$((eval_inconclusives + this_run_eval))" "$infra_total" "$THRESHOLD" "$THRESHOLD")
-          gh pr comment "$PR_NUMBER" --repo "$REPO" --body "$msg" || echo "::warning::could not post the auto-close notice (non-fatal)"
-          gh pr close "$PR_NUMBER" --repo "$REPO" || echo "::warning::could not close the PR (non-fatal)"
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0, node24
+        with:
+          script: |
+            const threshold = process.env.THRESHOLD;
+            if (!/^\d+$/.test(threshold)) throw new Error(`invalid AI_REVIEW_AUTO_CLOSE_AFTER=${threshold}`);
+            if (Number(threshold) === 0) {
+              core.info('auto-close disabled (threshold=0)');
+              return;
+            }
+            const issue_number = Number(process.env.PR_NUMBER);
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              ...context.repo, issue_number, per_page: 100,
+            });
+            const bodies = comments.filter(c => c.user.login === 'github-actions[bot]').map(c => c.body ?? '');
+            const blocks = bodies.filter(b => b.includes('## Review — BLOCK')).length;
+            const inconclusives = bodies.filter(b => b.includes('## validator INCONCLUSIVE'));
+            const infra = inconclusives.filter(b => b.includes('Verdict class: infra')).length;
+            const thisInconclusive = process.env.VERDICT === 'INCONCLUSIVE';
+            const thisInfra = thisInconclusive && process.env.THIS_INFRA === 'true';
+            const evalCount = inconclusives.length - infra + Number(thisInconclusive && !thisInfra);
+            const infraCount = infra + Number(thisInfra);
+            const counted = blocks + evalCount;
+            core.info(`counting verdicts: ${counted} (${blocks} BLOCK, ${evalCount} eval INCONCLUSIVE); excluded infra: ${infraCount}; bound: ${threshold}`);
+            if (counted < Number(threshold)) return;
+            const body = [
+              `## Auto-closed: ${counted} counting verdict(s) on this thread — open a clean PR from scratch`,
+              '',
+              `**Closed after** ${counted} counting verdict(s) reached AI_REVIEW_AUTO_CLOSE_AFTER=${threshold}.`,
+              '',
+              `Verdicts: **${blocks}** BLOCK, **${evalCount}** engine/eval INCONCLUSIVE. **${infraCount}** INCONCLUSIVE verdict(s) excluded as clear provider/GitHub infrastructure failures.`,
+              '',
+              '**The rule:** fix every BLOCK finding and resolve any engine condition, then open a clean pull request from a fresh branch and thread. Never push, re-run, or reopen this closed thread.',
+              '',
+              'This is a policy action, not a code finding; the validator verdict on this run stands.',
+            ].join('\n');
+            await github.rest.issues.createComment({ ...context.repo, issue_number, body });
+            const { data: closed } = await github.rest.pulls.update({
+              ...context.repo, pull_number: issue_number, state: 'closed',
+            });
+            if (closed.state !== 'closed') throw new Error('auto-close postcondition failed');
 
       - name: Gate (BLOCK)
         if: steps.parse.outputs.verdict == 'BLOCK'
@@ -767,9 +759,22 @@ jobs:
             # fix for the loop; see opencharly/charly#712.
             echo "_Full diagnostics: this run's **evidence artifact** + job log (not embedded here — embedding a runaway log would feed it into the next review and deepen the collapse)._"
           } > /tmp/inconclusive-comment.md
-          gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file /tmp/inconclusive-comment.md || echo "::warning::could not post the INCONCLUSIVE comment (non-fatal)"
           echo "::error::validator INCONCLUSIVE — no review verdict was produced (not a BLOCK; no code finding) — see the PR comment"
           exit 3
+
+      - name: Post INCONCLUSIVE evidence
+        if: always() && steps.parse.outputs.verdict == 'INCONCLUSIVE'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0, node24
+        env:
+          PR_NUMBER: ${{ inputs.pr-number }}
+        with:
+          script: |
+            const fs = require('fs');
+            await github.rest.issues.createComment({
+              ...context.repo,
+              issue_number: Number(process.env.PR_NUMBER),
+              body: fs.readFileSync('/tmp/inconclusive-comment.md', 'utf8'),
+            });
 
       - name: Gate (ambiguous)
         if: steps.parse.outputs.verdict != 'PASS' && steps.parse.outputs.verdict != 'BLOCK' && steps.parse.outputs.verdict != 'INCONCLUSIVE'
@@ -836,7 +841,7 @@ jobs:
       # runs from `$GITHUB_WORKSPACE/runner-config`, and a self-modifying gate must not
       # change what its own review input looks like.
       # ---------------------------------------------------------------------------
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7, node24
         if: steps.parse.outputs.verdict == 'PASS'
         with:
           ref: ${{ steps.pr.outputs.head_sha }}
@@ -907,7 +912,7 @@ jobs:
             printf '%s\n' "$roots"
           fi
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0, node24
         if: steps.parse.outputs.verdict == 'PASS' && steps.go-modules.outputs.present == 'true'
         with:
           # PINNED, not 'stable' (RCA 2026-10-09, opencharly/pod-github-runner#9).
@@ -1076,52 +1081,42 @@ jobs:
 
           echo "all $(jq -r '.total' <<<"$snap") check run(s) on this head passed — safe to arm auto-merge"
 
-      # Enable auto-merge — RESILIENTLY. GitHub rejects the mutation with
-      # "Pull request is in unstable status" while any required check is still
-      # pending/failing, and repos may legitimately carry more than one check
-      # besides this one (e.g. a candy CI gate). The REVIEW verdict is already
-      # PASS at this point, so arming logistics must never turn the required
-      # check red: retry through transient settling states, attempt the
-      # update-branch merge when the branch is behind, and soft-skip (warning)
-      # when the repository setting does not allow auto-merge.
+      # A PASS must arm native auto-merge and verify the live postcondition.
+      # Arming errors fail this required check; no retries, branch mutation, or manual-merge fallback.
       - name: Enable auto-merge
         if: steps.parse.outputs.verdict == 'PASS'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0, node24
         env:
-          GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ inputs.pr-number }}
-          REPO: ${{ github.repository }}
-        run: |
-          for attempt in 1 2 3 4 5 6; do
-            # The job shell runs with -e: a bare failing $( ) assignment would
-            # kill the script before the retry loop runs. Capture in a
-            # condition context (errexit-immune) instead.
-            rc=0
-            out=$(gh pr merge --auto --squash "$PR_NUMBER" --repo "$REPO" 2>&1) || rc=$?
-            echo "attempt $attempt rc=$rc: $out"
-            if [ $rc -eq 0 ]; then
-              echo "Auto-merge armed"
-              exit 0
-            fi
-            case "$out" in
-              *"unstable status"*)
-                echo "attempt $attempt unstable — retrying"
-                sleep 10
-                ;;
-              *"is behind"*)
-                echo "branch behind — syncing"
-                gh pr update-branch "$PR_NUMBER" --repo "$REPO" 2>/dev/null || true
-                sleep 15
-                ;;
-              *"auto-merge is not allowed"*)
-                echo "::warning::auto-merge not allowed for this repository — verdict is PASS, merge manually"
-                exit 0
-                ;;
-              *)
-                sleep 10
-                ;;
-            esac
-          done
-          echo "::warning::auto-merge arming did not settle — verdict is PASS, merge manually"
+          REVIEWED_HEAD: ${{ steps.pr.outputs.head_sha }}
+        with:
+          script: |
+            const query = `query($owner: String!, $repo: String!, $number: Int!) {
+              repository(owner: $owner, name: $repo) {
+                pullRequest(number: $number) { id headRefOid state autoMergeRequest { mergeMethod } }
+              }
+            }`;
+            const variables = {
+              owner: context.repo.owner, repo: context.repo.repo,
+              number: Number(process.env.PR_NUMBER),
+            };
+            const read = async () => (await github.graphql(query, variables)).repository.pullRequest;
+            const pr = await read();
+            if (pr.headRefOid !== process.env.REVIEWED_HEAD) throw new Error('PR head changed after review');
+            if (pr.state !== 'OPEN') throw new Error(`reviewed PR is ${pr.state}`);
+            if (pr.autoMergeRequest?.mergeMethod !== 'SQUASH') {
+              await github.graphql(`mutation($id: ID!) {
+                enablePullRequestAutoMerge(input: {pullRequestId: $id, mergeMethod: SQUASH}) {
+                  pullRequest { id }
+                }
+              }`, { id: pr.id });
+            }
+            const after = await read();
+            if (after.headRefOid !== process.env.REVIEWED_HEAD) throw new Error('PR head changed while arming');
+            if (after.state !== 'MERGED' && after.autoMergeRequest?.mergeMethod !== 'SQUASH') {
+              throw new Error('native squash auto-merge was not armed');
+            }
+            core.info(`Native squash auto-merge verified: PR #${variables.number}, head ${after.headRefOid}, state ${after.state}`);
 
       # ---------------------------------------------------------------------------
       # FAILURE EVIDENCE (always). The INCONCLUSIVE notice carries only the last 25
@@ -1218,11 +1213,11 @@ jobs:
         if: always()
         # Same reason as the bundle above: an artifact-service hiccup must not fail a PASS run.
         continue-on-error: true
-        # Pinned to the v4 tag's commit, the tightest form this org already uses elsewhere
+        # Pinned to the v7 tag's commit, the tightest form this org already uses elsewhere
         # (actions/create-github-app-token in tag-on-merge.yml is SHA-pinned). No new secret,
         # no new permission: the artifact service uses the job's own runtime token, and
         # if-no-files-found: ignore keeps a missing bundle from failing the step.
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2, node24
         with:
           name: validator-evidence
           path: ${{ runner.temp }}/validator-evidence

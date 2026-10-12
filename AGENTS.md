@@ -35,10 +35,10 @@ Canonical files:
 
 ## Build / validate / test
 
-- `.github/workflows/validator-harness.yml` runs `.github/tests/validator-gate-harness.py`
-  (offline, python3 stdlib, fakes for `charly` + `gh`) against the REAL `run:`
-  bodies of the decision chain, and `scripts/org-ruleset_test.sh` — on every PR
-  to this repo.
+- `.github/workflows/workflow-checks.yml` checks immutable action runtime pins,
+  executes the pinned Node runtime and artifact upload against GitHub, and runs
+  the owner-script policy tests. The validator itself is tested live through
+  `pr-validator.yml` on the PR branch; no simulated review or service replaces it.
 - The merge gate is the **org-wide** `charly/pr-validator` (required check
   `validate / validate`); this repo is its own first consumer.
 - `scripts/org-ruleset.sh verify` asserts the whole org end state.
