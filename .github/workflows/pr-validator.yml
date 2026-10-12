@@ -117,6 +117,13 @@ on:
       pr-number:
         required: true
         type: string
+      # ENGINE PIN OVERRIDE (opencharly/charly#723). The gate uses the org variable
+      # `vars.CHARLY_VERSION` verbatim; this input exists so a specific pin — including one
+      # whose release does not exist, which is the unresolvable-pin class — can be exercised
+      # on demand, WITHOUT touching the operator's variable. Empty = the variable.
+      charly-version:
+        type: string
+        required: false
       ai_review_provider:
         type: string
         required: false
@@ -130,6 +137,10 @@ on:
     inputs:
       pr-number:
         required: true
+        type: string
+      charly-version:
+        description: "Engine pin override (default: vars.CHARLY_VERSION)"
+        required: false
         type: string
 
 # NO concurrency here: cancel-in-progress requires the caller to hold actions:
@@ -193,7 +204,11 @@ jobs:
       - name: "Ensure charly (action-review config repo; self-hosted image: no-op)"
         id: ensure-charly
         env:
-          CHARLY_VERSION: ${{ vars.CHARLY_VERSION || '' }}
+          CHARLY_VERSION: ${{ inputs.charly-version || vars.CHARLY_VERSION || '' }}
+          PIN_FROM: ${{ inputs.charly-version && 'inputs.charly-version' || 'vars.CHARLY_VERSION' }}
+          # Only the failure-path CLASSIFICATION reads the API; the asset download stays
+          # tokenless (see its comment below).
+          GH_TOKEN: ${{ github.token }}
         run: |
           # ENGINE PIN ENFORCEMENT (the stale-engine gate defect). The gate must run
           # the ORG-PINNED engine (vars.CHARLY_VERSION), because the engine's behaviour
@@ -235,8 +250,56 @@ jobs:
           D="${{ runner.temp }}/charly-$TAG"; mkdir -p "$D/bin" "$D/plugins"
           # release assets are public — tokenless curl (gh/GITHUB_TOKEN injection
           # is unreliable in workflow_call step envs: live smoke exit-4 evidence).
-          curl -fsSL -o "$D/charly-linux-amd64" "https://github.com/opencharly/charly/releases/download/$TAG/charly-linux-amd64"
-          curl -fsSL -o "$D/charly-plugins-linux-amd64.tar.gz" "https://github.com/opencharly/charly/releases/download/$TAG/charly-plugins-linux-amd64.tar.gz"
+          #
+          # AN UNRESOLVABLE PIN MUST NAME ITSELF, NOT KILL THE RUN (opencharly/charly#723).
+          # A charly TAG can exist with NO published release (measured live 2026-10-13:
+          # 717 tags, 272 releases), and the pin names the TAG. The curl then 404s, the
+          # step died here, every later step was `skipped`, and the run ended with NO
+          # verdict and NO comment (measured on opencharly/sdk#317) — the author could see
+          # nothing to act on. The gate must NOT review with a different engine (that is
+          # what the pin exists for), so the failure is handed to the parse/comment steps as
+          # an INFRASTRUCTURE INCONCLUSIVE: the same class the provider failures use, which
+          # the auto-close counter EXCLUDES (opencharly/.github#170).
+          fetch_ok=1
+          curl -fsSL -o "$D/charly-linux-amd64" "https://github.com/opencharly/charly/releases/download/$TAG/charly-linux-amd64" || fetch_ok=0
+          if [ "$fetch_ok" = "1" ]; then
+            curl -fsSL -o "$D/charly-plugins-linux-amd64.tar.gz" "https://github.com/opencharly/charly/releases/download/$TAG/charly-plugins-linux-amd64.tar.gz" || fetch_ok=0
+          fi
+          if [ "$fetch_ok" != "1" ]; then
+            # Name the SUB-CASE with the API, because the remedy differs — and the release
+            # PAGE cannot tell them apart: MEASURED live 2026-10-13, the page answers 200 for
+            # an existing tag whose release is absent (it falls back to the tag view) and 404
+            # only for a tag that does not exist at all. The API discriminates exactly
+            # (200 published / 404 absent / 404 nonsense). This job holds `contents: write`,
+            # so a DRAFT release is visible here as `draft: true`; a read-only token would
+            # simply 404 it and the message must not claim more than the probe shows.
+            # The ASSET download above stays tokenless (its own comment explains why); only
+            # this failure-path classification uses the token.
+            api="https://api.github.com/repos/opencharly/charly"
+            rel_code="$(curl -s -o "$D/release.json" -w '%{http_code}' -H "Authorization: Bearer ${GH_TOKEN}" "$api/releases/tags/$TAG" || echo 000)"
+            if [ "$rel_code" = "200" ]; then
+              if grep -q '"draft"[[:space:]]*:[[:space:]]*true' "$D/release.json"; then
+                pin_class="the release exists but is a DRAFT, so its assets are not publicly downloadable"
+              else
+                pin_class="the release is published but its assets could not be downloaded (a partial upload)"
+              fi
+            else
+              tag_code="$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${GH_TOKEN}" "$api/git/ref/tags/$TAG" || echo 000)"
+              if [ "$tag_code" = "200" ]; then
+                pin_class="no PUBLISHED release exists for this tag (the tag itself exists)"
+              else
+                pin_class="the tag does not exist in opencharly/charly (HTTP ${tag_code} on its ref) — a pin typo?"
+              fi
+            fi
+            {
+              echo "engine_unresolved=true"
+              echo "pin_tag=$TAG"
+              echo "pin_from=$PIN_FROM"
+              echo "pin_class=$pin_class"
+            } >> "$GITHUB_OUTPUT"
+            echo "::error::the pinned engine $TAG cannot be obtained — $pin_class. Refusing to review with ANY other engine (the pin's purpose), and reporting it as an INFRASTRUCTURE INCONCLUSIVE with a PR comment (opencharly/charly#723)."
+            exit 0
+          fi
           mv "$D/charly-linux-amd64" "$D/bin/charly" && chmod +x "$D/bin/charly"
           tar -xzf "$D/charly-plugins-linux-amd64.tar.gz" -C "$D/plugins"
           echo "$D/bin" >> "$GITHUB_PATH"
@@ -251,6 +314,11 @@ jobs:
 
       - name: Run the review engine (assemble context, verdict)
         id: review
+        # No engine, no review: the pinned binary could not be obtained (opencharly/charly#723)
+        # and running WITHOUT it would either crash or — far worse — review with a stale
+        # on-PATH engine, which is the class the pin exists to prevent. The parse step
+        # classifies the resulting run as an infrastructure INCONCLUSIVE.
+        if: steps.ensure-charly.outputs.engine_unresolved != 'true'
         env:
           PR_NUMBER: ${{ inputs.pr-number }}
           AI_REVIEW_PROVIDER: ${{ inputs.ai_review_provider || vars.AI_REVIEW_PROVIDER }}
@@ -498,7 +566,20 @@ jobs:
         env:
           REVIEW_RC: ${{ steps.review.outputs.review_rc }}
           INCONCLUSIVE_INFRA: ${{ steps.review.outputs.inconclusive_infra }}
+          ENGINE_UNRESOLVED: ${{ steps.ensure-charly.outputs.engine_unresolved }}
         run: |
+          # UNRESOLVABLE PIN FIRST (opencharly/charly#723). This is a MEASURED class from the
+          # ensure step, not a signature over a review log, and no review ran at all — so it
+          # outranks every heuristic below and is settled before any log is read. It is an
+          # ENVIRONMENT class (the operator's pin vs the org's releases), so it is carried as
+          # INFRA: excluded from the auto-close count (opencharly/.github#170), never counted
+          # as an engine/eval failure of the diff.
+          if [ "${ENGINE_UNRESOLVED:-}" = "true" ]; then
+            echo "verdict=INCONCLUSIVE" >> "$GITHUB_OUTPUT"
+            echo "inconclusive_infra=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::the pinned engine could not be obtained — INCONCLUSIVE (infra; no review ran) — opencharly/charly#723"
+            exit 0
+          fi
           found=""
           if [ -f /tmp/review.txt ]; then
             found=$(grep -E '^Verdict: (BLOCK|PASS)[[:space:]]*$' /tmp/review.txt || true)
@@ -638,6 +719,10 @@ jobs:
           REVIEW_RC: ${{ steps.review.outputs.review_rc }}
           INCONCLUSIVE_CLASS: ${{ steps.review.outputs.inconclusive_class }}
           INCONCLUSIVE_INFRA: ${{ steps.parse.outputs.inconclusive_infra }}
+          ENGINE_UNRESOLVED: ${{ steps.ensure-charly.outputs.engine_unresolved }}
+          PIN_TAG: ${{ steps.ensure-charly.outputs.pin_tag }}
+          PIN_FROM: ${{ steps.ensure-charly.outputs.pin_from }}
+          PIN_CLASS: ${{ steps.ensure-charly.outputs.pin_class }}
           ENGINE_TERMINAL: ${{ steps.review.outputs.engine_terminal }}
           ENGINE_REQUEST: ${{ steps.review.outputs.engine_request }}
         run: |
@@ -648,19 +733,26 @@ jobs:
           rootcause="**Root cause.** The review plan produced no Verdict line, and this log carries NONE of the recognised signatures: no completed turn 1, no stall marker, and no HTTP rejection. The gate therefore REPORTS the class instead of inventing a cause."
           remedy1="1. open this run's evidence artifact — it holds the full review log and names the failing step;"
           remedy2="2. classify from THAT evidence (a provider status, a stall, a timeout, a crashed plan) rather than from this template."
-          # The THREE ENGINE-TERMINAL classes come FIRST, ahead of every workflow-side
-          # signature below: the engine's own `inconclusive:` line is the run's direct
-          # statement of why it ended, while every branch under it is a heuristic over
-          # log signatures. A direct statement outranks a heuristic, so when the engine
-          # named the class, that class is the cause and no signature is re-litigated —
-          # including the LAST of the three, which defers to a marker this workflow has
-          # no narrative for rather than falling through to a signature story.
-          # BOTH signals first. A log that shows a COMPLETED turn 1 AND an HTTP rejection is not a
-          # plain protocol fault: the refusal lands on a LATER request whose context each turn
-          # enlarged — the engine-defective class (opencharly/.github#97) with a specific status,
-          # not a denial that the engine ever ran. Ordering this ahead is what makes the
-          # single-signal branch's claim below true rather than merely convenient.
-          if [ "$INCONCLUSIVE_CLASS" = "attempt-cap" ]; then
+          # The ENGINE-TERMINAL classes come FIRST among the LOG-SIGNATURE heuristics below:
+          # the engine's own `inconclusive:` line is the run's direct statement of why it
+          # ended, while every branch under it is a heuristic over log signatures. A direct
+          # statement outranks a heuristic, so when the engine named the class, that class is
+          # the cause and no signature is re-litigated — including the LAST of the three,
+          # which defers to a marker this workflow has no narrative for rather than falling
+          # through to a signature story. (Above them all sits the unresolvable pin, which is
+          # not a signature at all: it is measured before the review step is even reached.)
+          #
+          # THE UNRESOLVABLE PIN COMES FIRST (opencharly/charly#723): it is a MEASURED class
+          # from the ensure step — no review ran — so it outranks every log-signature
+          # heuristic below, exactly as the engine's own terminal line does. Its remedy is
+          # the operator's two paths (serve the release, or move the pin), and it is carried
+          # as INFRA so it never counts toward AI_REVIEW_AUTO_CLOSE_AFTER.
+          if [ "${ENGINE_UNRESOLVED:-}" = "true" ]; then
+            class="engine pin unresolvable — the pinned charly release could not be obtained, so NO review ran (opencharly/charly#723)"
+            rootcause="**Root cause (measured in this run).** \`${PIN_FROM}\` names \`${PIN_TAG}\`, and the gate could not download that release's assets: **${PIN_CLASS}**. The gate refuses to review with any OTHER engine — the pin exists because the engine's behaviour lives in the binary's welded plugin-review — so no review ran and there is **no finding about this diff**. Measured live 2026-10-13: \`opencharly/charly\` carries 717 tags and 272 releases, so a tag without a published release is reachable by an ordinary pin bump (the class was reproduced on \`opencharly/sdk#317\`, where the run ended with no verdict AND no comment)."
+            remedy1="1. serve the pinned release: \`gh release view ${PIN_TAG} --repo opencharly/charly\`; if the tag has no release, its build is \`release-binary.yml\` (workflow_run on tag-on-merge, or a manual dispatch) — publish it, then re-run this review;"
+            remedy2="2. or move the pin: \`vars.CHARLY_VERSION\` (or this run's \`charly-version\` input) to a tag whose release exists, then re-run. Either way the fix is the operator's, not the author's diff."
+          elif [ "$INCONCLUSIVE_CLASS" = "attempt-cap" ]; then
             class="whole-request cap (the ONE review call ran past AI_REVIEW_ATTEMPT_TIMEOUT and was cut; not retried)"
             rootcause="**Root cause (measured in this run).** The engine's own terminal line names the class: the generation ran longer than the whole-request cap. A generation that long is a reasoning length problem — compare \`reasoning_effort\` and \`max_tokens\` in the request line below with the org vars (an empty \`reasoning_effort\` means none was sent; opencharly/plugin-review#36)."
             remedy1="1. bound the generation: \`AI_REVIEW_REASONING_EFFORT\` and \`AI_REVIEW_MAX_TOKENS\` (org vars);"
