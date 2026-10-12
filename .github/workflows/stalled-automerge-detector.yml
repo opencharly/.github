@@ -1,22 +1,32 @@
-# DETECT PRs THAT CAN NEVER LAND (opencharly/.github#175).
+# DETECT PRs THAT CAN NEVER LAND, SILENTLY (opencharly/.github#175, #186).
 #
-# Native auto-merge armed + the org ruleset's required_status_checks.strict = true + a head that
-# is BEHIND a moved base is a SILENT stall. GitHub's auto-merge does not update the head branch
-# when the base moves, a BEHIND head cannot merge, and NOTHING goes red: the collapsed check
-# rollup shows the old run's conclusion, the `validate / validate` run on the newer base never
-# appears because nothing re-dispatched it, and the PR reads as "queued" rather than "stuck".
+# The subject is not "a PR that is blocked" — a red PR gets read — but a PR that is blocked while
+# reading as "queued". THREE shapes, each measured:
 #
-# Measured (opencharly/.github#175): 2026-10-07T22:43 → 2026-10-08T09:09 on this host, ~10 h with
-# ZERO landings while at least seven PRs sat green or armed (sdk#356, plugin-check#89,
-# plugin-clean#12, plugin-deploy-pod#30, plugin-fleet#32, …). The blast radius is every PR whose
-# base moves after its head is pushed — i.e. every PR in a busy org, and especially the
-# producer→consumer pin sequence this org lands all day.
+#   1. ARMED + BEHIND (#175). Native auto-merge armed + the org ruleset's
+#      required_status_checks.strict = true + a head behind a moved base: auto-merge does not update
+#      the head branch, a BEHIND head cannot merge, and NOTHING goes red. Measured 2026-10-07T22:43 →
+#      2026-10-08T09:09 on this host, ~10 h with ZERO landings while at least seven PRs sat green or
+#      armed (sdk#356, plugin-check#89, plugin-clean#12, plugin-deploy-pod#30, plugin-fleet#32, …).
+#      The blast radius is every PR whose base moves after its head is pushed — every producer→consumer
+#      pin sequence this org lands all day.
 #
-# WHY IT IS A WORKFLOW: the two fields that decide the stall are one org-wide GraphQL read away,
+#   2. ARMED + DIRTY (#175 comment 6084457430). Strictly worse: `gh pr update-branch` CANNOT resolve a
+#      conflict, so an armed conflicted PR waits forever with no signal at all (charly#432, ~30 h).
+#
+#   3. THE REQUIRED CHECK NEVER RESOLVED (#186). A superseded validator run leaves
+#      `validate / validate` CANCELLED; arming happens INSIDE the run that was cancelled, so the PR
+#      sits BLOCKED with autoMergeRequest == null and reads as "queued". Measured on this repo's own
+#      #185 (armed = Y *and* the required check CANCELLED) and on charly#871 (a re-run replaced a PASS
+#      with a BLOCK carrying a finding the first run had not raised — so re-dispatching RE-OPENS the
+#      verdict and must never be done against a head nobody has read and fixed).
+#
+# WHY IT IS A WORKFLOW: the fields that decide all three shapes are one org-wide GraphQL read away,
 # and nothing in this repo read them. A scheduled run is the alarm — a red run is visible in the
 # Actions tab — whereas a per-repo hook would have to be installed in ~400 repos to say the same
 # thing once. `scripts/check-stalled-automerge.sh` carries the rule, its self-test, and its scope
-# limit (a CANCELLED required check is a DIFFERENT shape and is not covered).
+# limit (an UNARMED behind/DIRTY head, and a head carrying no run of the required context at all —
+# the fork case, #179 — are deliberately not selected).
 #
 # REQUIRED APP PERMISSION: `pull_requests: read` (org-wide). The `charly-auto-merge` App already
 # carries the pull-request authority the landing chain needs, so no new grant is introduced.
@@ -56,7 +66,11 @@ jobs:
       - name: Self-test the selection rule
         run: bash scripts/check-stalled-automerge.sh --self-test
 
-      - name: Detect armed-but-BEHIND PRs org-wide
+      # The three shapes this alarm reads: ARMED + BEHIND, ARMED + DIRTY, and THE REQUIRED CHECK
+      # NEVER RESOLVED (#186). The self-test drives one fixture per class AND the POISON pair — an
+      # older cancelled run beside a newer success, which keeps a PR blocked forever — because a
+      # filter that reads only the newest run would miss it.
+      - name: Detect silently stalled PRs org-wide (BEHIND / DIRTY / non-resolving required check)
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
         run: bash scripts/check-stalled-automerge.sh
