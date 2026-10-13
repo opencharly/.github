@@ -75,6 +75,17 @@ gh() {
           printf 'created %s -> %s\n' "$ref" "$sha" >>"$STATE/transcript"
           printf 'main\n' >>"$STATE/main_$repo"
           printf '"%s"\n' "$ref"; return 0 ;;
+        /contents/*)
+          # The tag-on-merge caller install + its read-back assertion
+          # (opencharly/.github#180). PUT writes it; GET reports it only once written,
+          # so a "reported success but nothing on main" path is detectable.
+          if [[ "$method" == PUT ]]; then
+            printf 'PUT %s\n' "${rest%%\?*}" >>"$STATE/transcript"
+            printf 'installed\n' >"$STATE/caller_$repo"
+            printf '"commitsha"\n'; return 0
+          fi
+          if [[ -f "$STATE/caller_$repo" ]]; then printf '"blobsha"\n'; return 0; fi
+          return 1 ;;
         *) return 92 ;;
       esac ;;
     *) return 93 ;;
@@ -84,12 +95,28 @@ export -f gh
 export STATE
 
 # happy path: empty (from feat/x) + seeded (from dev) created; hasmain + bare skipped.
-GH_TOKEN=x OPENCHARLY_ORG=test "$root/scripts/bootstrap-repo-main.sh" >/dev/null
+GH_TOKEN=x OPENCHARLY_ORG=test "$root/scripts/bootstrap-repo-main.sh" >"$STATE/out" 2>"$STATE/err"
 grep -qx 'created refs/heads/main -> f3atsha' "$STATE/transcript" \
   || { echo "FAIL: empty repo main must be seeded from the default feat branch" >&2; exit 1; }
 grep -qx 'created refs/heads/main -> d3vsha' "$STATE/transcript" \
   || { echo "FAIL: seeded repo main must be seeded from dev" >&2; exit 1; }
 grep -q 'hasmain' "$STATE/transcript" && { echo "FAIL: a repo that already has main must not be touched" >&2; exit 1; }
+
+# The ref alone leaves the repo's FIRST merge untagged: the tag-on-merge caller must be
+# INSTALLED on the created main and READ BACK (opencharly/.github#180).
+grep -qx 'PUT /contents/.github/workflows/tag-on-merge.yml' "$STATE/transcript" \
+  || { echo "FAIL: the tag-on-merge caller must be installed on a created main" >&2; exit 1; }
+[[ -f "$STATE/caller_empty" && -f "$STATE/caller_seeded" ]] \
+  || { echo "FAIL: the caller must be installed for every created main" >&2; exit 1; }
+
+# The three settings the App token CANNOT set are named for the operator, and counted in
+# the machine-readable summary — the omission must not be silent in either surface.
+grep -q 'default_branch=main' "$STATE/err" \
+  || { echo "FAIL: the operator remedy must name the default-branch PATCH" >&2; exit 1; }
+grep -q 'allow_auto_merge=true' "$STATE/err" \
+  || { echo "FAIL: the operator remedy must name the auto-merge PATCH" >&2; exit 1; }
+grep -q 'needs_operator_settings=2' "$STATE/out" \
+  || { echo "FAIL: the summary must count the repos awaiting operator settings" >&2; exit 1; }
 
 # idempotent: a second run creates nothing new (all now have main or nothing to seed).
 : >"$STATE/transcript"
@@ -99,10 +126,15 @@ GH_TOKEN=x OPENCHARLY_ORG=test "$root/scripts/bootstrap-repo-main.sh" >/dev/null
 # explicit repo arguments restrict the target set (reset `empty` first).
 rm -f "$STATE/main_empty"
 : >"$STATE/transcript"
-GH_TOKEN=x OPENCHARLY_ORG=test "$root/scripts/bootstrap-repo-main.sh" empty >/dev/null
+GH_TOKEN=x OPENCHARLY_ORG=test "$root/scripts/bootstrap-repo-main.sh" empty >"$STATE/out3" 2>"$STATE/err3"
 grep -qx 'created refs/heads/main -> f3atsha' "$STATE/transcript" \
   || { echo "FAIL: explicit repo arg must bootstrap only that repo" >&2; exit 1; }
 grep -q 'd3vsha' "$STATE/transcript" && { echo "FAIL: explicit repo arg must not touch other repos" >&2; exit 1; }
+# the operator remedy is per-RUN: exactly the repos this run bootstrapped.
+grep -q 'needs_operator_settings=1' "$STATE/out3" \
+  || { echo "FAIL: the summary must count only this run's bootstrapped repos" >&2; exit 1; }
+grep -q 'PATCH repos/test/empty -f default_branch=main' "$STATE/err3" \
+  || { echo "FAIL: the remedy block must name the repo this run bootstrapped" >&2; exit 1; }
 
 # a repo discovery failure must ABORT, never read as "nothing to do".
 if FORCE_TARGETS_FAIL=1 GH_TOKEN=x OPENCHARLY_ORG=test "$root/scripts/bootstrap-repo-main.sh" >/dev/null 2>&1; then

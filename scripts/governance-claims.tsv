@@ -124,3 +124,19 @@ validator_enforces	validator rulebook	action-review/charly.yml	forbid	B(1[0-8]|[
 # The retired half-numbered rules (R4a / R7a became R4 / R8) appear in no rule surface.
 rule_numbering	umbrella AGENTS.md	AGENTS.md	forbid	\*\*R(4a|7a) —
 rule_numbering	PR template	dotgithub/.github/PULL_REQUEST_TEMPLATE.md	forbid	R4a|R7a
+# The org's ONE reader of the silent-stall shapes (opencharly/.github#175, #186): ARMED+BEHIND,
+# ARMED+DIRTY, and THE REQUIRED CHECK NEVER RESOLVED. The canonical phrase must be present in BOTH
+# the rule's carrier (the detector script) and its alarm surface (the workflow); the retired scope
+# sentence that declared the cancelled-required-check shape outside the detector's coverage must not
+# return to either — that sentence is how shape 3 stayed invisible while .github#185 sat armed with
+# its required check CANCELLED (measured 2026-10-09).
+stall_shapes	detector script	dotgithub/scripts/check-stalled-automerge.sh	require	REQUIRED CHECK NEVER RESOLVED
+stall_shapes	detector workflow	dotgithub/.github/workflows/stalled-automerge-detector.yml	require	REQUIRED CHECK NEVER RESOLVED
+stall_shapes	detector script	dotgithub/scripts/check-stalled-automerge.sh	forbid	not covered
+stall_shapes	detector workflow	dotgithub/.github/workflows/stalled-automerge-detector.yml	forbid	not covered
+# An ENGINE PIN whose release does not exist must be reported as an INFRASTRUCTURE INCONCLUSIVE
+# — a named PR comment, classified `infra` so it never counts toward AI_REVIEW_AUTO_CLOSE_AFTER —
+# instead of dying before the review with no verdict and no comment at all (opencharly/charly#723,
+# measured on opencharly/sdk#317). The class lives in the one workflow that can produce it; this
+# row keeps its name from drifting out of that path.
+unresolvable_pin_infra	validator workflow	dotgithub/.github/workflows/pr-validator.yml	require	engine pin unresolvable

@@ -14,15 +14,31 @@
 # retire-per-repo-dispatchers.yml, the operator-run scripts deliberately add NO human
 # bypass to the ruleset. The workflow mints the App token and exports it as GH_TOKEN.
 #
-# DEFAULT BRANCH: creating the ref is not enough — a repo whose default branch is
-# still the operator's first-pushed `feat/...` must have it set to `main`. The App
-# token CANNOT do that (`PATCH /repos/...` -> 403 "Resource not accessible by
-# integration"; measured), so after this workflow runs, set it with the operator's
-# admin token:
+# TWO THINGS THE REF IS NOT ENOUGH FOR (opencharly/.github#180).
 #
-#   gh api --method PATCH repos/opencharly/<repo> -f default_branch=main
+# 1. THE TAG-ON-MERGE CALLER. A repo's `tag-on-merge.yml` normally arrives with its first
+#    PR — and then neither of its triggers can fire for that FIRST merge: the
+#    `charly/pr-validator` run completed before the file existed on `main`, and GitHub
+#    creates ZERO runs for an auto-merge squash. So `bootstrap-repo-main.sh` INSTALLS the
+#    caller on the freshly created `main` with the App token (contents: write — the same
+#    capability the reusable already uses to write `CHANGELOG/<CalVer>.md`) and ASSERTS it
+#    by reading the file back. A new repo's first landing is therefore tagged.
 #
-# (The ref itself is created by the App; only the repo SETTING needs admin.)
+# 2. THE THREE REPOSITORY SETTINGS the App cannot set: it holds no `administration`
+#    permission (measured live 2026-10-12 — the `charly-auto-merge` installation carries
+#    actions/contents/deployments/issues/merge_queues/metadata/packages/pages/
+#    pull_requests/repository_custom_properties/workflows, and never administration), so
+#    `PATCH /repos/...` is 403 "Resource not accessible by integration". The script prints
+#    the exact operator commands for every repo it bootstrapped:
+#
+#      gh api --method PATCH repos/opencharly/<repo> -f default_branch=main
+#      gh api --method PATCH repos/opencharly/<repo> -f allow_auto_merge=true
+#      gh api --method PATCH repos/opencharly/<repo> -f delete_branch_on_merge=true
+#
+#    Until the first of those is done the repo is OUTSIDE the org gate: no required
+#    `validate / validate` check, no CalVer tag, no CHANGELOG. `scripts/org-ruleset.sh verify`
+#    now FAILS on that state rather than reporting a clean org (the summary line reports
+#    `needs_operator_settings=<n>`).
 #
 # REQUIRED APP PERMISSION: `contents: write` — the same ruleset bypass the App holds
 # for the protected-main CHANGELOG commits. No `workflows: write` is needed (this

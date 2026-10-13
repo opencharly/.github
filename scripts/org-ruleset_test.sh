@@ -22,13 +22,20 @@ printf 'present\n' >"$STATE/legacy_alpha"
 gh() {
   if [[ "$1 $2" == "repo list" ]]; then
     # Target discovery is the `main`-default filter; exclude discovery is the `!=`
-    # filter. FORCE_TARGETS_FAIL / FORCE_EXCLUDES_FAIL fail the respective read so the
-    # call-site abort on each is exercised independently.
+    # filter; the MEMBERSHIP read (opencharly/.github#180) selects on isFork/isArchived
+    # and prints "<name>\t<default>". FORCE_TARGETS_FAIL / FORCE_EXCLUDES_FAIL /
+    # FORCE_MEMBERSHIP_FAIL fail the respective read so the call-site abort on each is
+    # exercised independently.
     local jqfilter="${*: -1}"
     if [[ "$jqfilter" == *"!="* ]]; then
       [[ "${FORCE_EXCLUDES_FAIL:-}" == 1 ]] && return 1
       # EXCLUDE_LIST lets a case exercise exclude_json with real content.
       printf '%s\n' "${EXCLUDE_LIST:-}"
+      return 0
+    fi
+    if [[ "$jqfilter" == *'select(.isFork == false and .isArchived == false)'* ]]; then
+      [[ "${FORCE_MEMBERSHIP_FAIL:-}" == 1 ]] && return 1
+      printf 'alpha\tmain\nbeta\tmain\n%s' "${MEMBERSHIP_LIST:-}"
       return 0
     fi
     [[ "${FORCE_TARGETS_FAIL:-}" == 1 ]] && return 1
@@ -88,9 +95,15 @@ JSON
     fi
 
   local repo=""
-  [[ "$path" =~ ^repos/test/(alpha|beta)(/|$) ]] && repo="${BASH_REMATCH[1]}"
+  [[ "$path" =~ ^repos/test/(alpha|beta|has-main|no-main)(/|$) ]] && repo="${BASH_REMATCH[1]}"
 
   if [[ -n "$repo" ]]; then
+    # The membership arm's remedy branches on whether a `main` ref exists at all (#180):
+    # `has-main` has one, `no-main` does not.
+    if [[ "$path" == "repos/test/$repo/git/ref/heads/main" ]]; then
+      [[ "$repo" == has-main ]] && { printf 'c0ffee\n'; return 0; }
+      return 1
+    fi
     if [[ "$path" == "repos/test/$repo" && "$method" == GET ]]; then
       # The two per-repo settings are read by their own `--jq`. Return the setting the
       # caller asked for (default = allow_auto_merge) so a single mock endpoint serves
@@ -193,6 +206,42 @@ if OPENCHARLY_ORG=test "$root/scripts/org-ruleset.sh" verify >/dev/null 2>&1; th
   echo "FAIL: verify must fail when the ruleset's target scope drifts" >&2; exit 1
 fi
 rm -f "$STATE/scope_mismatch"
+
+# MEMBERSHIP INTEGRITY (opencharly/.github#180). The target set is DEFINED by
+# `defaultBranchRef == main`, so an active, non-fork repo that keeps another default is
+# silently outside the org gate — no required check, no CalVer tag — and the loop over
+# the target set can never notice. verify must fail, name the repo and its default, and
+# print the exact remedy.
+if MEMBERSHIP_LIST=$'has-main\tseed\nno-main\tfeat/x\n' OPENCHARLY_ORG=test "$root/scripts/org-ruleset.sh" verify >/dev/null 2>"$STATE/mem.err"; then
+  echo "FAIL: verify must fail on an active non-fork repo whose default branch is not main" >&2; exit 1
+fi
+grep -q "has-main: default branch is 'seed' but a 'main' ref exists" "$STATE/mem.err" \
+  || { echo "FAIL: verify must name the repo, its default and the existing main ref" >&2; exit 1; }
+grep -q 'PATCH repos/test/has-main -f default_branch=main' "$STATE/mem.err" \
+  || { echo "FAIL: verify must print the exact PATCH remedy when a main ref exists" >&2; exit 1; }
+grep -q "no-main: default branch is 'feat/x' and there is NO 'main' ref" "$STATE/mem.err" \
+  || { echo "FAIL: verify must distinguish a repo that was never bootstrapped" >&2; exit 1; }
+grep -q 'run scripts/bootstrap-repo-main.sh' "$STATE/mem.err" \
+  || { echo "FAIL: the never-bootstrapped remedy must name the bootstrap script" >&2; exit 1; }
+
+# The two NON-failures, both named rather than silently skipped: a by-design non-main
+# default declared in lib-org.sh's declared_non_main_defaults(), and an EMPTY repo (no
+# default branch yet — it cannot merge anything until it has one, and the moment it does
+# this arm fails).
+if ! MEMBERSHIP_LIST=$'pixelflux\tav1\nfresh\t\n' OPENCHARLY_ORG=test "$root/scripts/org-ruleset.sh" verify >"$STATE/mem2.out" 2>"$STATE/mem2.err"; then
+  echo "FAIL: a declared by-design default and an empty repo must not fail verify" >&2; exit 1
+fi
+grep -q 'pixelflux: default branch .av1. — declared by design' "$STATE/mem2.out" \
+  || { echo "FAIL: a declared by-design default must be reported as declared" >&2; exit 1; }
+grep -q 'fresh: no default branch yet (empty repo)' "$STATE/mem2.out" \
+  || { echo "FAIL: an empty repo must be named, not silently skipped" >&2; exit 1; }
+[[ -s "$STATE/mem2.err" ]] && { echo "FAIL: an undeclared failure must not appear for a declared/empty population: $(cat "$STATE/mem2.err")" >&2; exit 1; }
+
+# A failed MEMBERSHIP read must ABORT the verify — a failed read can never read as a
+# clean membership (the same discipline the excludes read already carries).
+if FORCE_MEMBERSHIP_FAIL=1 OPENCHARLY_ORG=test "$root/scripts/org-ruleset.sh" verify >/dev/null 2>&1; then
+  echo "FAIL: verify must refuse a clean membership from a failed read" >&2; exit 1
+fi
 
 # A failed EXCLUDES read must ABORT (an empty exclude set would apply the ruleset to
 # forks/archived repos too). This is the path the targets count-guard cannot catch.
