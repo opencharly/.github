@@ -115,6 +115,8 @@ main() {
   echo "  could-not-see (excluded by discover_repos — archived, fork, non-main default): ${#EXCLUDED[@]}"
   for repo in "${EXCLUDED[@]}"; do [[ -n "$repo" ]] && echo "    [could-not-see] $repo"; done
   echo
+  for repo in "${L_MUT[@]+"${L_MUT[@]}"}"; do echo "  [pin-mutable]  $repo"; done
+  for repo in "${L_BOTH[@]+"${L_BOTH[@]}"}"; do echo "  [both]         $repo"; done
   for repo in "${L_DRIFT[@]+"${L_DRIFT[@]}"}"; do
     echo "  [prose-drifted] $repo"
     show_how "$canonical" "$(fetch_caller "$repo")"
