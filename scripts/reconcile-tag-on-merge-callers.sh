@@ -115,7 +115,10 @@ main() {
   echo "  could-not-see (excluded by discover_repos — archived, fork, non-main default): ${#EXCLUDED[@]}"
   for repo in "${EXCLUDED[@]}"; do [[ -n "$repo" ]] && echo "    [could-not-see] $repo"; done
   echo
-  for repo in "${L_DRIFT[@]+"${L_DRIFT[@]}"}"; do echo "  [prose-drifted] $repo"; done
+  for repo in "${L_DRIFT[@]+"${L_DRIFT[@]}"}"; do
+    echo "  [prose-drifted] $repo"
+    show_how "$canonical" "$(fetch_caller "$repo")"
+  done
   for repo in "${L_ABSENT[@]+"${L_ABSENT[@]}"}"; do echo "  [caller-absent] $repo"; done
   if [[ "$mode" != "--apply" && $((m_pin+prose_drift)) -gt 0 ]]; then
     echo
