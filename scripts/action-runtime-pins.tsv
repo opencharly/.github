@@ -2,5 +2,5 @@
 actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1	node24
 actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1	node24
 actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3	node24
-actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e	node24
+actions/setup-go@v7.0.0	node24
 actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9	node24
