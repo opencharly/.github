@@ -1069,6 +1069,8 @@ jobs:
             "https://github.com/golangci/golangci-lint/releases/download/v$VER/golangci-lint-$VER-linux-amd64.tar.gz"
           tar -xzf "$D/lint.tar.gz" -C "$D"
           BIN="$D/golangci-lint-$VER-linux-amd64/golangci-lint"
+          FINDINGS="${RUNNER_TEMP}/golangci-findings.txt"
+          : > "$FINDINGS"
           "$BIN" version
 
           fail=0
@@ -1076,19 +1078,33 @@ jobs:
           # would be lost in a subshell and the gate would always exit green.
           while IFS= read -r root; do
             if [ -z "$root" ]; then continue; fi
-            echo "== golangci-lint: $root =="
+            echo "== golangci-lint: $root ==" | tee -a "$FINDINGS"
             if [ -n "$GO_MODULE_CONFIG" ]; then
               # The repo-level policy, applied explicitly so it cannot be shadowed by a
               # closer module config (golangci-lint would otherwise resolve that one).
-              ( cd "$root" && GOWORK=off "$BIN" run --config "$GITHUB_WORKSPACE/$GO_MODULE_CONFIG" ./... ) || fail=1
+              ( cd "$root" && GOWORK=off "$BIN" run --config "$GITHUB_WORKSPACE/$GO_MODULE_CONFIG" ./... ) 2>&1 | tee -a "$FINDINGS"
+              [ "${PIPESTATUS[0]}" -eq 0 ] || fail=1
             else
               # No repo-level policy: let golangci-lint resolve the module's own config by
               # walking up, which is exactly the one the detection step matched on.
-              ( cd "$root" && GOWORK=off "$BIN" run ./... ) || fail=1
+              ( cd "$root" && GOWORK=off "$BIN" run ./... ) 2>&1 | tee -a "$FINDINGS"
+              [ "${PIPESTATUS[0]}" -eq 0 ] || fail=1
             fi
           done <<< "$GO_MODULE_ROOTS"
           if [ "$fail" -ne 0 ]; then
-            echo "::error::the declared-lint gate FAILED — fix the findings above and push; auto-merge is NOT armed"
+            # THE FINDINGS MUST SURVIVE THE JOB (opencharly/.github#219). They were echoed to
+            # stdout, which lives in a step log this API does not return (gh run view
+            # --log-failed comes back empty), so the failure message told authors to fix
+            # findings they could not reach. The step summary is rendered on the run page and
+            # is fetchable, and the same text is echoed into the job log for completeness.
+            {
+              echo "## Declared-lint findings"
+              echo ""
+              echo '```'
+              cat "$FINDINGS"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::the declared-lint gate FAILED — the findings are in this run's step summary and job log; auto-merge is NOT armed"
           fi
           exit $fail
 
