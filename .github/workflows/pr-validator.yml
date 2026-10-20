@@ -1082,13 +1082,21 @@ jobs:
             if [ -n "$GO_MODULE_CONFIG" ]; then
               # The repo-level policy, applied explicitly so it cannot be shadowed by a
               # closer module config (golangci-lint would otherwise resolve that one).
-              ( cd "$root" && GOWORK=off "$BIN" run --config "$GITHUB_WORKSPACE/$GO_MODULE_CONFIG" ./... ) 2>&1 | tee -a "$FINDINGS"
-              [ "${PIPESTATUS[0]}" -eq 0 ] || fail=1
+              # ⚑ THE `if ! … ; then` IS LOAD-BEARING (opencharly/.github#221 review). This step
+              # declares no `shell:`, so it inherits GitHub's default `bash -eo pipefail`: an
+              # unguarded `… | tee` pipeline that fails would exit the shell AT THE PIPELINE,
+              # before fail=1 is set and before the summary and ::error:: below ever run — the
+              # findings would vanish exactly when they matter. A command in an `if` condition
+              # is exempt from errexit, so this both records the status and survives it.
+              if ! ( cd "$root" && GOWORK=off "$BIN" run --config "$GITHUB_WORKSPACE/$GO_MODULE_CONFIG" ./... ) 2>&1 | tee -a "$FINDINGS"; then
+                fail=1
+              fi
             else
               # No repo-level policy: let golangci-lint resolve the module's own config by
               # walking up, which is exactly the one the detection step matched on.
-              ( cd "$root" && GOWORK=off "$BIN" run ./... ) 2>&1 | tee -a "$FINDINGS"
-              [ "${PIPESTATUS[0]}" -eq 0 ] || fail=1
+              if ! ( cd "$root" && GOWORK=off "$BIN" run ./... ) 2>&1 | tee -a "$FINDINGS"; then
+                fail=1
+              fi
             fi
           done <<< "$GO_MODULE_ROOTS"
           if [ "$fail" -ne 0 ]; then
