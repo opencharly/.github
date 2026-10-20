@@ -203,6 +203,12 @@ jobs:
 
       - name: "Ensure charly (action-review config repo; self-hosted image: no-op)"
         id: ensure-charly
+        # This step once hung indefinitely (opencharly/.github#178): it never returned,
+        # so the job never concluded, so the check-run stayed in_progress and native
+        # auto-merge never armed. marketplace#503 and docs#166 each lost hours to it,
+        # and neither cancel nor `gh run rerun` could reap the run. A step timeout turns
+        # the silent hang into a clean, concluded failure with a log to read.
+        timeout-minutes: 15
         env:
           CHARLY_VERSION: ${{ inputs.charly-version || vars.CHARLY_VERSION || '' }}
           PIN_FROM: ${{ inputs.charly-version && 'inputs.charly-version' || 'vars.CHARLY_VERSION' }}
