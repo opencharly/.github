@@ -1045,6 +1045,15 @@ jobs:
         timeout-minutes: 12
         env:
           GOLANGCI_LINT_VERSION: ${{ vars.GOLANGCI_LINT_VERSION || 'v2.13.2' }}
+          # PIN THE TOOLCHAIN THE LINT RUNS UNDER (opencharly/.github#219). Left unpinned, the
+          # run inherits the runner image's GOTOOLCHAIN and the verdict moves with it: on the
+          # same tree, go1.27.1 reports "0 issues" and go1.27.2 reports 4 stdlib typecheck
+          # failures ("could not import sort"/"strings") in code no PR touched. The workflow's
+          # own comments already listed that sensitivity and left the 1.27.2 case unanswered;
+          # an org PR cannot fix it, and it reproduces on unmodified main. Default is the last
+          # toolchain measured clean; an operator moves it org-wide with
+          # `gh variable set GOLANGCI_LINT_GOTOOLCHAIN --org opencharly`.
+          GOTOOLCHAIN: ${{ vars.GOLANGCI_LINT_GOTOOLCHAIN || 'go1.27.1' }}
           GO_MODULE_ROOTS: ${{ steps.go-modules.outputs.roots }}
           GO_MODULE_CONFIG: ${{ steps.go-modules.outputs.config }}
         run: |
