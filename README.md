@@ -390,6 +390,40 @@ Setup (already done org-wide):
 The rename step hard-fails when neither is configured, so a missing
 secret never silently degrades to the approval-required loop.
 
+## Org-wide CI runners — the label contract
+
+The OpenCharly CI fleet is **charly-deployed and org-scoped**, and it registers the
+labels the organization's workflows already name:
+
+| Label | Serves | Notes |
+|---|---|---|
+| `ubuntu-latest` | every workflow that names it, unchanged | the label every upstream workflow and most org repos already use; no per-repo edit |
+| `opencharly` | `vars.CI_RUNNER_LABEL`, `vars.REVIEW_RUNNER_LABEL` | the distinct routing label; never a hosted-runner name |
+
+Consequences a repo author must know:
+
+- **A repo needs no runner configuration.** `runs-on: ubuntu-latest` resolves to the
+  fleet; a repo that prefers a variable keeps `vars.CI_RUNNER_LABEL`.
+- **The blast radius is org-wide by design.** An org-scoped runner carrying a hosted
+  label is matched by every repository in the org — that is what makes unmodified
+  workflows work everywhere. Narrow it with a runner group and a repository selection if
+  that trade is ever no longer wanted.
+- **Not served:** `windows-latest`, `xcode-27` (no Windows/macOS capacity exists) and
+  `blacksmith-*` (those workflows depend on Blacksmith's own actions). A job on one of
+  those labels stays unsupported; it is never faked on Linux.
+- **Repo-scoped instead?** A single project that should not share the fleet registers its
+  own runner with `RUNNER_URL=https://github.com/<owner>/<repo>` — see
+  `/charly-distros:github-runner-ubuntu`'s `charly-register-runners`.
+
+## First-party forks: the standard validator caller
+
+The org ruleset excludes forks, deliberately: while it targets a fork, its
+required-workflow rule makes `gh repo sync` fail (`opencharly/.github#179`). A first-party
+fork therefore carries ONE small caller instead of joining the ruleset. Use
+[`templates/fork-pr-validator.yml`](templates/fork-pr-validator.yml) verbatim (pin the
+`uses:` ref to a commit SHA if the fork's own pin policy requires it), so every fork's
+entry point is identical and the engine stays in this repository.
+
 ## The org-wide required workflow (ONE config, no per-repo copy)
 
 Branch protection AND the required validator used to be applied per repo (a branch
