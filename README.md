@@ -392,22 +392,27 @@ secret never silently degrades to the approval-required loop.
 
 ## Org-wide CI runners — the label contract
 
-The OpenCharly CI fleet is **charly-deployed and org-scoped**, and it registers the
-labels the organization's workflows already name:
+The OpenCharly CI fleet is **charly-deployed and org-scoped**, and it registers two
+labels:
 
-| Label | Serves | Notes |
+| Label | Selected by | Notes |
 |---|---|---|
-| `ubuntu-latest` | every workflow that names it, unchanged | the label every upstream workflow and most org repos already use; no per-repo edit |
-| `opencharly` | `vars.CI_RUNNER_LABEL`, `vars.REVIEW_RUNNER_LABEL` | the distinct routing label; never a hosted-runner name |
+| `opencharly-ubuntu` | `vars.CI_RUNNER_LABEL` (value set org-wide, visibility `all`) and the Docker jobs' `vars.CI_DOCKER_RUNNER_LABEL` | the Ubuntu + Docker pool; the one a workflow should name |
+| `opencharly` | `vars.REVIEW_RUNNER_LABEL` | the review fleet (validator); also present on the Ubuntu pool |
 
 Consequences a repo author must know:
 
-- **A repo needs no runner configuration.** `runs-on: ubuntu-latest` resolves to the
-  fleet; a repo that prefers a variable keeps `vars.CI_RUNNER_LABEL`.
-- **The blast radius is org-wide by design.** An org-scoped runner carrying a hosted
-  label is matched by every repository in the org — that is what makes unmodified
-  workflows work everywhere. Narrow it with a runner group and a repository selection if
-  that trade is ever no longer wanted.
+- **A hosted label is NOT captured.** A job that says `runs-on: ubuntu-latest` runs on
+  GitHub-hosted runners even though a self-hosted runner carries that label — measured:
+  every `ubuntu-latest` job stayed on hosted while the fleet was idle. A repo moves to the
+  fleet by naming the variable or the fleet label; nothing on the runner side can redirect
+  a hosted label.
+- **The variable is the no-edit path.** `runs-on: ${{ vars.CI_RUNNER_LABEL || 'opencharly' }}`
+  resolves to `opencharly-ubuntu` for every repo because the org variable's visibility is
+  `all`; a repo that hardcodes `ubuntu-latest` needs a one-line edit.
+- **The blast radius is org-wide by design.** The fleet serves every repository in the
+  org. Narrow it with a runner group and a repository selection if that trade is ever no
+  longer wanted.
 - **Not served:** `windows-latest`, `xcode-27` (no Windows/macOS capacity exists) and
   `blacksmith-*` (those workflows depend on Blacksmith's own actions). A job on one of
   those labels stays unsupported; it is never faked on Linux.
