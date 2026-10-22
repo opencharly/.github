@@ -207,9 +207,12 @@ carries the ruleset while every pre-existing fork does not, and `gh pr merge` re
 `Required status check "validate / validate" is expected`). The predicate is checked by the `same_repo_gate` row in
 `scripts/governance-claims.tsv`.
 
-**Consequence for a new fork repo.** Forks are **excluded from the ruleset by
-design** (`discover_excludes` filters on `isFork == true`), so they carry no required
-check and their same-repo PRs merge without an org verdict. The hazard is a fork
+**Consequence for a new fork repo.** Forks are **excluded from the ORG-WIDE
+ruleset by design** (`discover_excludes` filters on `isFork == true`), so that
+ruleset gives them no required check and the org validator does not gate their
+same-repo PRs automatically. A fork can still carry its own repo-scoped ruleset
+that requires the same org workflow (`crabbox` does) or land on its own CI
+(`openclaw-enterprise` does); exclusion is not a prohibition on merging. The hazard is a fork
 created *after* the last `scripts/org-ruleset.sh apply`: it is absent from the stale
 exclude list, so the ruleset's `~ALL`-minus-exclude scope still lists it and its
 same-repo PRs get the REQUIRED check. With the retired predicate that check was never
@@ -275,10 +278,30 @@ The org ruleset targets every **active, non-fork, `main`-default** repo
 4. Land the first change via a PR; the org validator is the gate (never a direct push).
 5. Add it to the umbrella as a submodule and bump the pin via `charly task sync` + PR.
 
-**Excluded by design** (no org workflow, no CalVer tags): forks
-(`gst-wayland-display`), archived repos (`pi-review-action`), and non-`main` defaults
-(`pixelflux` → `av1`, `omarchy-eval-artifacts` → `runs`). A repo in this set that should
-be tagged/validated must first become non-fork / active / `main`-default.
+**Excluded by design** — excluded from the ORG-WIDE AUTOMATIC coverage only: the
+org attaches no required check and mints no CalVer tag for the repo. Exclusion
+itself is not a prohibition on landing, but the four categories below are not
+interchangeable: ONLY the first is a landing target; the other three are not.
+
+- **forks under development** — `gst-wayland-display` (default `stable`),
+  `crabbox`, `openclaw-enterprise`. They run their own checks: `crabbox`
+  carries a repo-scoped ruleset requiring the SAME
+  `org-wide-pr-validator-required.yml`; `gst-wayland-display` carries rules on
+  `stable` including `validate / validate`; `openclaw-enterprise` has zero
+  branch rules, so no branch check is ENFORCED — its PRs run its own
+  `.github/workflows/ci.yml` and merge on that CI signal;
+- **vendored upstreams on a non-`main` default** — `pixelflux` → `av1`: a
+  vendored upstream, not a landing target;
+- **artifact-branch sinks** — `omarchy-eval-artifacts` → `runs`: a branch that
+  receives published output, not a landing target;
+- **archived repos** — `pi-review-action`: read-only, so GitHub rejects pushes
+  and new PRs.
+
+A repo in this set is not tagged by the org, so a CalVer tag you find there was
+minted out-of-band (`gst-wayland-display` has three). A repo that should have the
+ORG-WIDE coverage must become non-fork / active / `main`-default; a LIVE repo in
+this set that only needs to land changes can keep its own checks instead — an
+explicit choice, not a defect.
 
 **Measured gap.** `layer-nerdctl` and `plugin-nerdctl` were created with **no `.github`
 directory at all** (so no `tag-on-merge.yml` caller): they validate via the org ruleset,
