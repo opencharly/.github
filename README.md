@@ -281,8 +281,7 @@ The org ruleset targets every **active, non-fork, `main`-default** repo
 **Excluded by design** — excluded from the ORG-WIDE AUTOMATIC coverage only: the
 org attaches no required check and mints no CalVer tag for the repo. Exclusion
 itself is not a prohibition on landing, but the four categories below are not
-interchangeable: the first two are live repos with their own checks; the last two
-are not landing targets at all.
+interchangeable: ONLY the first is a landing target; the other three are not.
 
 - **forks under development** — `gst-wayland-display` (default `stable`),
   `crabbox`, `openclaw-enterprise`. They run their own checks: `crabbox`
@@ -291,8 +290,8 @@ are not landing targets at all.
   `stable` including `validate / validate`; `openclaw-enterprise` has zero
   branch rules, so no branch check is ENFORCED — its PRs run its own
   `.github/workflows/ci.yml` and merge on that CI signal;
-- **vendored upstreams on a non-`main` default** — `pixelflux` → `av1`: consumed
-  as a pin, not a landing target;
+- **vendored upstreams on a non-`main` default** — `pixelflux` → `av1`: a
+  vendored upstream, not a landing target;
 - **artifact-branch sinks** — `omarchy-eval-artifacts` → `runs`: a branch that
   receives published output, not a landing target;
 - **archived repos** — `pi-review-action`: read-only, so GitHub rejects pushes
