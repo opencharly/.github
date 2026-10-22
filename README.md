@@ -415,6 +415,25 @@ Consequences a repo author must know:
   own runner with `RUNNER_URL=https://github.com/<owner>/<repo>` — see
   `/charly-distros:github-runner-ubuntu`'s `charly-register-runners`.
 
+### What runs where
+
+| Workload | Runner | Why |
+|---|---|---|
+| `charly/pr-validator` | self-hosted (`vars.REVIEW_RUNNER_LABEL`) | already moved; needs only curl + the charly release |
+| `tag-on-merge` (every repo) | self-hosted (`vars.CI_RUNNER_LABEL`) | GitHub Actions + bash only — moved, one edit covers every caller |
+| repo CI that opts in | self-hosted (`vars.CI_RUNNER_LABEL`) | the repo's own workflows use the variable idiom |
+| Windows jobs (`windows-latest`) | GitHub-hosted | no Windows capacity exists |
+| macOS jobs (`xcode-27`) | GitHub-hosted | no macOS capacity exists |
+| Blacksmith testboxes | GitHub-hosted / Blacksmith | the `useblacksmith/*` actions need Blacksmith's service |
+| `candy-validate` | GitHub-hosted (for now) | builds charly with Go on every call; move it once the fleet has headroom, not before |
+
+**A hosted label cannot be captured by a self-hosted runner.** A job that says
+`runs-on: ubuntu-latest` (or `ubuntu-22.04`/`ubuntu-24.04`) is scheduled on GitHub-hosted
+runners even when a self-hosted runner carries the same label — measured: a dispatched CI
+run put every `ubuntu-latest` job on hosted runners while the fleet stayed idle. Vendored
+forks and repos with those literal labels need the per-workflow edit to the variable idiom;
+nothing on the runner side can redirect them.
+
 ## First-party forks: the standard validator caller
 
 The org ruleset excludes forks, deliberately: while it targets a fork, its
