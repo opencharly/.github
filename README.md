@@ -390,6 +390,64 @@ Setup (already done org-wide):
 The rename step hard-fails when neither is configured, so a missing
 secret never silently degrades to the approval-required loop.
 
+## Org-wide CI runners — the label contract
+
+The OpenCharly CI fleet is **charly-deployed and org-scoped**, and it registers two
+labels:
+
+| Label | Selected by | Notes |
+|---|---|---|
+| `opencharly-ubuntu` | `vars.CI_RUNNER_LABEL` (value set org-wide, visibility `all`) and the Docker jobs' `vars.CI_DOCKER_RUNNER_LABEL` | the Ubuntu + Docker pool; the one a workflow should name |
+| `opencharly` | `vars.REVIEW_RUNNER_LABEL` | the review fleet (validator); also present on the Ubuntu pool |
+
+Consequences a repo author must know:
+
+- **A hosted label is NOT captured.** A job that says `runs-on: ubuntu-latest` runs on
+  GitHub-hosted runners even though a self-hosted runner carries that label — measured:
+  every `ubuntu-latest` job stayed on hosted while the fleet was idle. A repo moves to the
+  fleet by naming the variable or the fleet label; nothing on the runner side can redirect
+  a hosted label.
+- **The variable is the no-edit path.** `runs-on: ${{ vars.CI_RUNNER_LABEL || 'opencharly' }}`
+  resolves to `opencharly-ubuntu` for every repo because the org variable's visibility is
+  `all`; a repo that hardcodes `ubuntu-latest` needs a one-line edit.
+- **The blast radius is org-wide by design.** The fleet serves every repository in the
+  org. Narrow it with a runner group and a repository selection if that trade is ever no
+  longer wanted.
+- **Not served:** `windows-latest`, `xcode-27` (no Windows/macOS capacity exists) and
+  `blacksmith-*` (those workflows depend on Blacksmith's own actions). A job on one of
+  those labels stays unsupported; it is never faked on Linux.
+- **Repo-scoped instead?** A single project that should not share the fleet registers its
+  own runner with `RUNNER_URL=https://github.com/<owner>/<repo>` — see
+  `/charly-distros:github-runner-ubuntu`'s `charly-register-runners`.
+
+### What runs where
+
+| Workload | Runner | Why |
+|---|---|---|
+| `charly/pr-validator` | self-hosted (`vars.REVIEW_RUNNER_LABEL`) | already moved; needs only curl + the charly release |
+| `tag-on-merge` (every repo) | self-hosted (`vars.CI_RUNNER_LABEL`) | GitHub Actions + bash only — moved, one edit covers every caller |
+| repo CI that opts in | self-hosted (`vars.CI_RUNNER_LABEL`) | the repo's own workflows use the variable idiom |
+| Windows jobs (`windows-latest`) | GitHub-hosted | no Windows capacity exists |
+| macOS jobs (`xcode-27`) | GitHub-hosted | no macOS capacity exists |
+| Blacksmith testboxes | GitHub-hosted / Blacksmith | the `useblacksmith/*` actions need Blacksmith's service |
+| `candy-validate` | GitHub-hosted (for now) | builds charly with Go on every call; move it once the fleet has headroom, not before |
+
+**A hosted label cannot be captured by a self-hosted runner.** A job that says
+`runs-on: ubuntu-latest` (or `ubuntu-22.04`/`ubuntu-24.04`) is scheduled on GitHub-hosted
+runners even when a self-hosted runner carries the same label — measured: a dispatched CI
+run put every `ubuntu-latest` job on hosted runners while the fleet stayed idle. Vendored
+forks and repos with those literal labels need the per-workflow edit to the variable idiom;
+nothing on the runner side can redirect them.
+
+## First-party forks: the standard validator caller
+
+The org ruleset excludes forks, deliberately: while it targets a fork, its
+required-workflow rule makes `gh repo sync` fail (`opencharly/.github#179`). A first-party
+fork therefore carries ONE small caller instead of joining the ruleset. Use
+[`templates/fork-pr-validator.yml`](templates/fork-pr-validator.yml) verbatim (pin the
+`uses:` ref to a commit SHA if the fork's own pin policy requires it), so every fork's
+entry point is identical and the engine stays in this repository.
+
 ## The org-wide required workflow (ONE config, no per-repo copy)
 
 Branch protection AND the required validator used to be applied per repo (a branch

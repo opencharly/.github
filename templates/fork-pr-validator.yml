@@ -1,0 +1,44 @@
+# TEMPLATE — copy to <fork>/.github/workflows/pr-validator.yml
+#
+# A first-party FORK cannot join the org ruleset: while the org ruleset targets a fork,
+# its required-workflow rule makes `gh repo sync` fail with
+#   Required workflow 'charly/pr-validator, charly/pr-validator' is not satisfied
+# (measured on opencharly/openclaw, opencharly/.github#179). A fork must stay outside the
+# ruleset to keep advancing, so it carries this ONE caller to produce the same check.
+#
+# It CALLS the org engine; it never re-implements policy. The engine, the rulebook prompt,
+# the verdict taxonomy and every AI_REVIEW_* knob stay in opencharly/.github.
+#
+# Copy this file verbatim. If the fork enforces immutable action references (crabbox does,
+# via scripts/workflow_action_pins.go), replace `@main` below with the commit SHA of
+# opencharly/.github's main and bump it deliberately.
+name: charly/pr-validator
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+  issues: write
+  checks: read
+
+concurrency:
+  group: pr-validator-${{ github.repository }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: validate
+    # SAME-REPO only: "head repo == base repo". Never "is this repo a fork" — that is true
+    # for every PR in a fork and would skip the gate entirely.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    uses: opencharly/.github/.github/workflows/pr-validator.yml@main
+    with:
+      pr-number: ${{ github.event.pull_request.number }}
+      ai_review_provider: ${{ vars.AI_REVIEW_PROVIDER }}
+      ai_review_model: ${{ vars.AI_REVIEW_MODEL }}
+      ai_review_base_url: ${{ vars.AI_REVIEW_BASE_URL }}
+    secrets: inherit
