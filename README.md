@@ -279,24 +279,30 @@ The org ruleset targets every **active, non-fork, `main`-default** repo
 5. Add it to the umbrella as a submodule and bump the pin via `charly task sync` + PR.
 
 **Excluded by design** — excluded from the ORG-WIDE AUTOMATIC coverage only: the
-org attaches no required check and mints no CalVer tag for the repo. The set mixes
-four different things, and none of them is a prohibition on landing:
+org attaches no required check and mints no CalVer tag for the repo. Exclusion
+itself is not a prohibition on landing, but the four categories below are not
+interchangeable: the first two are live repos with their own checks; the last two
+are not landing targets at all.
 
 - **forks under development** — `gst-wayland-display` (default `stable`),
-  `crabbox`, `openclaw-enterprise`. They land on their own gate: `crabbox`
+  `crabbox`, `openclaw-enterprise`. They run their own checks: `crabbox`
   carries a repo-scoped ruleset requiring the SAME
   `org-wide-pr-validator-required.yml`; `gst-wayland-display` carries rules on
   `stable` including `validate / validate`; `openclaw-enterprise` has zero
-  branch rules and relies on its own `.github/workflows/ci.yml`;
-- **vendored upstreams on a non-`main` default** — `pixelflux` → `av1`;
-- **artifact-branch sinks** — `omarchy-eval-artifacts` → `runs`;
-- **archived repos** — `pi-review-action`.
+  branch rules, so no branch check is ENFORCED — its PRs run its own
+  `.github/workflows/ci.yml` and merge on that CI signal;
+- **vendored upstreams on a non-`main` default** — `pixelflux` → `av1`: consumed
+  as a pin, not a landing target;
+- **artifact-branch sinks** — `omarchy-eval-artifacts` → `runs`: a branch that
+  receives published output, not a landing target;
+- **archived repos** — `pi-review-action`: read-only, so GitHub rejects pushes
+  and new PRs.
 
 A repo in this set is not tagged by the org, so a CalVer tag you find there was
 minted out-of-band (`gst-wayland-display` has three). A repo that should have the
-ORG-WIDE coverage must become non-fork / active / `main`-default; a repo in this
-set that only needs to land changes can keep its own gate instead — an explicit
-choice, not a defect.
+ORG-WIDE coverage must become non-fork / active / `main`-default; a LIVE repo in
+this set that only needs to land changes can keep its own checks instead — an
+explicit choice, not a defect.
 
 **Measured gap.** `layer-nerdctl` and `plugin-nerdctl` were created with **no `.github`
 directory at all** (so no `tag-on-merge.yml` caller): they validate via the org ruleset,
