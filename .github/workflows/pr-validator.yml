@@ -1415,6 +1415,29 @@ jobs:
               number: Number(process.env.PR_NUMBER),
             };
             const read = async () => (await github.graphql(query, variables)).repository.pullRequest;
+
+            // GITHUB'S MERGE STATE LAGS ITS OWN CHECK RUNS. MEASURED on crabbox#17: gate B read
+            // "all 33 check run(s) on this head passed" at 11:05:42Z, and the arming mutation one
+            // second later was refused — "Request failed due to following response errors: Pull
+            // request Pull request is in unstable status" — with the REST merge state still
+            // `unstable`. This is the SAME class of condition-wait gate B performs, against the
+            // other API: bounded, for a named condition, never a blind retry.
+            const MERGEABLE_WAIT_MS = 120_000;
+            const MERGEABLE_POLL_MS = 3_000;
+            const deadline = Date.now() + MERGEABLE_WAIT_MS;
+            let mergeableState = '';
+            for (;;) {
+              const { data } = await github.rest.pulls.get({
+                owner: context.repo.owner, repo: context.repo.repo,
+                pull_number: Number(process.env.PR_NUMBER),
+              });
+              mergeableState = data.mergeable_state || '';
+              if (mergeableState === 'clean') break;
+              if (Date.now() >= deadline) break;
+              await new Promise((r) => setTimeout(r, MERGEABLE_POLL_MS));
+            }
+            core.info(`merge state before arming: ${mergeableState || '(unknown)'}`);
+
             const pr = await read();
             if (pr.headRefOid !== process.env.REVIEWED_HEAD) throw new Error('PR head changed after review');
             if (pr.state !== 'OPEN') throw new Error(`reviewed PR is ${pr.state}`);
