@@ -298,7 +298,9 @@ jobs:
           # THE REVIEW'S OWN DECISION lives in the report's YAML frontmatter. The JSON has no
           # top-level `decision`, so `.decision // .status` was showing the RUN STATUS
           # ("completed"), not the verdict. Parsed here, from the engine's own field.
-          decision=""; confidence=""; review_status=""; findings=0
+          # findings starts EMPTY, not 0: only a successful parse may claim "no findings". A
+          # 0 default would let an unparsable record read as a clean review.
+          decision=""; confidence=""; review_status=""; findings=""
           if [ -s "$verdict" ] && jq -e . "$verdict" >/dev/null 2>&1; then
             raw_report="$(jq -r '.reports[0].report // empty' "$verdict")"
             if [ -n "$raw_report" ]; then
@@ -319,13 +321,13 @@ jobs:
               fi
             fi
           fi
-          echo "decision=${decision:-none} confidence=${confidence:-none} review_status=${review_status:-none} findings=${findings}"
+          echo "decision=${decision:-none} confidence=${confidence:-none} review_status=${review_status:-none} findings=${findings:-unparsed}"
           # The label decision. "reviewed" means a review COMPLETED with a valid report and
           # raised nothing; everything else that ran is needs-attention — a review that errored
           # has NOT reviewed the code, so labelling it reviewed would be a false claim.
           if [ "${SKIPPED:-}" = "true" ]; then
             label_decision="skip"
-          elif [ "$review_status" = "complete" ] && [ "${findings:-}" = "0" ]; then
+          elif [ "$review_status" = "complete" ] && [ "${findings:-}" = "0" ] && [ "${decision:-keep_open}" = "keep_open" ]; then
             label_decision="reviewed"
           else
             label_decision="needs-attention"
