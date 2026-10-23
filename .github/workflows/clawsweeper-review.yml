@@ -13,14 +13,23 @@
 #       pull-requests: write
 #       packages: read
 #
-# WHAT IT RUNS. One container of the pinned review image against the PR's own tree, mounted
-# READ-ONLY at /target. The IMAGE's entrypoint passes `--local-range`, so the engine reads
-# merge-base(base, HEAD)..HEAD and performs no GitHub reads or writes. No GitHub token enters
-# the container and no Docker socket is mounted; the JSON verdict leaves the sandbox on
-# stdout and THIS workflow posts it — the only surface holding a token is the workflow.
+# WHAT IT RUNS. One container of the pinned review image against a THROWAWAY fetch of the PR
+# at /target, invoked as `clawsweeper-review` (the image is a one-shot tool with no ENTRYPOINT,
+# so the command is named here). That entrypoint passes `--local-range`, so the engine reads
+# merge-base(base, HEAD)..HEAD and performs no GitHub reads or writes.
+#
+# WHY /target IS WRITABLE, AND WHY THAT IS STILL ISOLATED. The engine keeps its review state
+# under `<target>/.git/clawsweeper/` — measured: a read-only mount dies on
+# `mkdir '/target/.git/clawsweeper/reviews'`. The tree is NOT the runner's checkout: it is a
+# private fetch made in this job only (`refs/pull/<n>/head` into `${RUNNER_TEMP}`) and deleted
+# with the runner's temp dir, so a write there reaches nothing that can be pushed. The isolation
+# that matters is unchanged: no GitHub token enters the container, no Docker socket is mounted,
+# and the JSON verdict leaves on stdout for THIS workflow to post.
 #
 # NETWORK. `--network bridge` gives the container EGRESS, which it needs: the model endpoint
-# is remote. What it does NOT have is a credential, a socket, or a writable view of the PR.
+# is remote. What it does NOT have is a credential, a socket, or any writable path that can be
+# pushed: the writable tree it sees is the job's own throwaway fetch (see above), and the
+# runner's checkout is never mounted here at all.
 #
 # THE MODEL ENDPOINT is the org's existing Ollama Cloud one. The key is the org secret
 # `AI_REVIEW_API_KEY` — the SAME secret the required gate already uses — mapped onto
@@ -157,8 +166,12 @@ jobs:
             -e CLAWSWEEPER_TARGET_REPO="${GITHUB_REPOSITORY}" \
             -e BASE_SHA="${BASE_SHA}" \
             -e TARGET_DIR=/target \
-            -v "${REVIEW_DIR}:/target:ro" \
-            "${IMAGE}" > "${RUNNER_TEMP}/verdict.json" 2> "${RUNNER_TEMP}/review.log"
+            -e GIT_CONFIG_COUNT=1 \
+            -e GIT_CONFIG_KEY_0=safe.directory \
+            -e GIT_CONFIG_VALUE_0=/target \
+            -v "${REVIEW_DIR}:/target" \
+            "${IMAGE}" clawsweeper-review \
+            > "${RUNNER_TEMP}/verdict.json" 2> "${RUNNER_TEMP}/review.log"
           rc=$?
           set -e
 
@@ -175,8 +188,23 @@ jobs:
           tail -c 4000 "${RUNNER_TEMP}/review.log"
           echo "review_rc=${rc}" >> "$GITHUB_OUTPUT"
           echo "skipped=false" >> "$GITHUB_OUTPUT"
+          # A review that produced nothing, or ran and reported failure, is a RED check — an
+          # advisory check that always passes is indistinguishable from one that stopped
+          # working. The comment step still runs (it is gated on the review step having
+          # EXECUTED), so the red carries the redacted reason.
           if [ "$rc" -ne 0 ]; then
-            echo "::warning::clawsweeper-review exited ${rc}; the redacted output is posted as the comment."
+            echo "::error::clawsweeper-review exited ${rc}; the redacted output is posted as the comment."
+            exit 1
+          fi
+          if [ -s "${RUNNER_TEMP}/verdict.json" ] && jq -e . "${RUNNER_TEMP}/verdict.json" >/dev/null 2>&1; then
+            verdict_status="$(jq -r '.status // "unknown"' "${RUNNER_TEMP}/verdict.json")"
+            if [ "${verdict_status}" = "failed" ]; then
+              echo "::error::the review ran but reported status=failed; the redacted output is posted as the comment."
+              exit 1
+            fi
+          else
+            echo "::error::the review produced no JSON verdict; the redacted output is posted as the comment."
+            exit 1
           fi
 
       - name: Post the review comment, updating the previous one
