@@ -57,7 +57,7 @@ permissions:
 
 jobs:
   strip:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER_LABEL || 'ubuntu-latest' }}
     steps:
       - name: Create bot token (charly-auto-merge App)
         id: app
