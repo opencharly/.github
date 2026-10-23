@@ -1416,37 +1416,46 @@ jobs:
             };
             const read = async () => (await github.graphql(query, variables)).repository.pullRequest;
 
-            // GITHUB'S MERGE STATE LAGS ITS OWN CHECK RUNS. MEASURED on crabbox#17: gate B read
-            // "all 33 check run(s) on this head passed" at 11:05:42Z, and the arming mutation one
-            // second later was refused — "Request failed due to following response errors: Pull
-            // request Pull request is in unstable status" — with the REST merge state still
-            // `unstable`. This is the SAME class of condition-wait gate B performs, against the
-            // other API: bounded, for a named condition, never a blind retry.
-            const MERGEABLE_WAIT_MS = 120_000;
-            const MERGEABLE_POLL_MS = 3_000;
-            const deadline = Date.now() + MERGEABLE_WAIT_MS;
-            let mergeableState = '';
-            for (;;) {
-              const { data } = await github.rest.pulls.get({
-                owner: context.repo.owner, repo: context.repo.repo,
-                pull_number: Number(process.env.PR_NUMBER),
-              });
-              mergeableState = data.mergeable_state || '';
-              if (mergeableState === 'clean') break;
-              if (Date.now() >= deadline) break;
-              await new Promise((r) => setTimeout(r, MERGEABLE_POLL_MS));
-            }
-            core.info(`merge state before arming: ${mergeableState || '(unknown)'}`);
+            // ARM AGAINST THE MUTATION, NOT AGAINST A PROXY STATE. The previous revision polled
+            // `mergeable_state` for `clean` and then armed. MEASURED on crabbox#17: that window
+            // can never open, because `mergeable_state` is computed over EVERY check run on the
+            // head — including THIS job's, which is `in_progress` for exactly as long as it
+            // waits. So the poll always burned its full budget and the arming mutation that
+            // followed was refused, twice, three hours apart. The proxy was the problem.
+            //
+            // GitHub's refusal is itself the condition worth waiting on: while it recomputes
+            // mergeability after the last check settles it returns "Pull request is in unstable
+            // status". So attempt the mutation, and tolerate ONLY that named refusal inside a
+            // bounded window — anything else (auth, head moved, a real block) fails at once.
+            const ARM_BUDGET_MS = 180_000;
+            const ARM_POLL_MS = 5_000;
+            const armDeadline = Date.now() + ARM_BUDGET_MS;
 
             const pr = await read();
             if (pr.headRefOid !== process.env.REVIEWED_HEAD) throw new Error('PR head changed after review');
             if (pr.state !== 'OPEN') throw new Error(`reviewed PR is ${pr.state}`);
             if (pr.autoMergeRequest?.mergeMethod !== 'SQUASH') {
-              await github.graphql(`mutation($id: ID!) {
-                enablePullRequestAutoMerge(input: {pullRequestId: $id, mergeMethod: SQUASH}) {
-                  pullRequest { id }
+              for (let attempt = 1; ; attempt += 1) {
+                try {
+                  await github.graphql(`mutation($id: ID!) {
+                    enablePullRequestAutoMerge(input: {pullRequestId: $id, mergeMethod: SQUASH}) {
+                      pullRequest { id }
+                    }
+                  }`, { id: pr.id });
+                  core.info(`auto-merge armed on attempt ${attempt}`);
+                  break;
+                } catch (error) {
+                  const message = String(error?.message || error);
+                  const transient = /is in unstable status/i.test(message);
+                  if (!transient || Date.now() >= armDeadline) {
+                    if (transient) throw new Error(
+                      `GitHub still reports the pull request as unstable after ${ARM_BUDGET_MS / 1000}s: ${message}`);
+                    throw error;
+                  }
+                  core.info(`attempt ${attempt}: ${message} — re-attempting for up to ${Math.round((armDeadline - Date.now()) / 1000)}s more`);
+                  await new Promise((r) => setTimeout(r, ARM_POLL_MS));
                 }
-              }`, { id: pr.id });
+              }
             }
             const after = await read();
             if (after.headRefOid !== process.env.REVIEWED_HEAD) throw new Error('PR head changed while arming');
