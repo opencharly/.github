@@ -1431,17 +1431,32 @@ jobs:
             const ARM_POLL_MS = 5_000;
             const armDeadline = Date.now() + ARM_BUDGET_MS;
 
-            const pr = await read();
-            if (pr.headRefOid !== process.env.REVIEWED_HEAD) throw new Error('PR head changed after review');
-            if (pr.state !== 'OPEN') throw new Error(`reviewed PR is ${pr.state}`);
+            // EVERY ATTEMPT RE-READS THE PR. A 180 s window is long enough for a push to arrive,
+            // and `enablePullRequestAutoMerge` takes a pull-request ID, not a head SHA — so the
+            // identity check has to happen immediately BEFORE each mutation, not once before the
+            // loop. Verified on review of #242: checking only `pr` from before the loop would let
+            // a head change inside the window be armed.
+            const armHead = async () => {
+              const cur = await read();
+              if (cur.headRefOid !== process.env.REVIEWED_HEAD) throw new Error('PR head changed after review');
+              if (cur.state !== 'OPEN') throw new Error(`reviewed PR is ${cur.state}`);
+              return cur;
+            };
+
+            const pr = await armHead();
             if (pr.autoMergeRequest?.mergeMethod !== 'SQUASH') {
               for (let attempt = 1; ; attempt += 1) {
+                const target = attempt === 1 ? pr : await armHead();
+                if (target.autoMergeRequest?.mergeMethod === 'SQUASH') {
+                  core.info(`auto-merge was already armed by attempt ${attempt - 1}`);
+                  break;
+                }
                 try {
                   await github.graphql(`mutation($id: ID!) {
                     enablePullRequestAutoMerge(input: {pullRequestId: $id, mergeMethod: SQUASH}) {
                       pullRequest { id }
                     }
-                  }`, { id: pr.id });
+                  }`, { id: target.id });
                   core.info(`auto-merge armed on attempt ${attempt}`);
                   break;
                 } catch (error) {
@@ -1458,7 +1473,14 @@ jobs:
               }
             }
             const after = await read();
-            if (after.headRefOid !== process.env.REVIEWED_HEAD) throw new Error('PR head changed while arming');
+            // A head that moved mid-window must not be left armed. The mutation carries no head
+            // SHA, so the only safe close is to disarm before failing.
+            if (after.headRefOid !== process.env.REVIEWED_HEAD) {
+              await github.graphql(`mutation($id: ID!) {
+                disablePullRequestAutoMerge(input: {pullRequestId: $id}) { pullRequest { id } }
+              }`, { id: after.id }).catch((e) => core.warning(`could not disarm auto-merge: ${e?.message || e}`));
+              throw new Error('PR head changed while arming — auto-merge disarmed');
+            }
             if (after.state !== 'MERGED' && after.autoMergeRequest?.mergeMethod !== 'SQUASH') {
               throw new Error('native squash auto-merge was not armed');
             }
