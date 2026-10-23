@@ -1010,7 +1010,7 @@ jobs:
             printf '%s\n' "$roots"
           fi
 
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0, node24
+      - uses: actions/setup-go@v7.0.0 # v7.0.0, node24
         if: steps.parse.outputs.verdict == 'PASS' && steps.go-modules.outputs.present == 'true'
         with:
           # PINNED, not 'stable' (RCA 2026-10-09, opencharly/pod-github-runner#9).
