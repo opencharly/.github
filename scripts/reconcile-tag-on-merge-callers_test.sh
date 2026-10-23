@@ -57,6 +57,14 @@ check drifted   "$(prose_state "$CANON" "$PROSE_ONLY")" "old prose -> drifted (t
 check drifted   "$(prose_state "$CANON" "$BOTH")"       "both defects -> drifted on column 2"
 check absent    "$(prose_state "$CANON" "")"            "no caller -> absent"
 
+IN=$'alpha\nbeta\ngamma\n'
+check $'alpha\nbeta\ngamma' "$(printf '%s' "$IN" | select_repos "")"          "empty allow-list passes everything"
+check $'beta'               "$(printf '%s' "$IN" | select_repos "beta")"      "a single name keeps only itself"
+check $'alpha\ngamma'       "$(printf '%s' "$IN" | select_repos "alpha,gamma")" "comma-separated names keep both, in arrival order"
+check $'alpha\nbeta'        "$(printf '%s' "$IN" | select_repos "beta alpha")"  "space-separated names keep both, in ARRIVAL order not request order"
+check ''                    "$(printf '%s' "$IN" | select_repos "nope")"      "an unmatched allow-list selects nothing"
+check $'alpha\nbeta\ngamma' "$(printf '%s' "$IN" | select_repos " , ")"       "a whitespace-only allow-list passes everything"
+
 echo
 echo "reconcile-tag-on-merge-callers_test: $pass passed, $fail failed"
 [[ $fail -eq 0 ]]

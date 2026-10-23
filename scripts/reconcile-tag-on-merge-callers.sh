@@ -61,6 +61,24 @@ fetch_caller() {
 
 show_how() { diff <(norm "$1") <(norm "$2") | grep -E '^[<>]' | head -4 | sed 's/^/        /' || true; }
 
+# select_repos — PURE. Reads repo names on stdin, prints the ones the allow-list names, in
+# the order they arrived. An EMPTY (or all-space/comma) allow-list passes everything through.
+#
+# The allow-list exists because a distribution is one commit on each repo's `main`: it can
+# be PILOTED on a named few and read back before it reaches the rest. `.github/workflows/
+# reconcile-tag-on-merge-callers.yml` exposes it as its `repos` input.
+select_repos() {
+  local want="$1" line w
+  if [[ -z "${want//[ ,	]/}" ]]; then cat; return 0; fi
+  local -A keep=()
+  for w in ${want//,/ }; do keep["$w"]=1; done
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    [[ -n "${keep[$line]:-}" ]] && printf '%s\n' "$line"
+  done
+  return 0
+}
+
 main() {
   local mode="${1:-verify}"
   case "$mode" in verify|--apply) ;; *) echo "usage: $0 [verify|--apply]" >&2; exit 2 ;; esac
@@ -71,6 +89,7 @@ main() {
   local -a REPOS=() EXCLUDED=()
   local repos_raw excludes_raw
   if ! repos_raw="$(discover_repos)"; then echo "FATAL: discover_repos failed" >&2; exit 1; fi
+  repos_raw="$(printf '%s\n' "$repos_raw" | select_repos "${RECONCILE_REPOS:-}")"
   mapfile -t REPOS <<<"$repos_raw"
   if ! excludes_raw="$(discover_excludes)"; then echo "FATAL: discover_excludes failed" >&2; exit 1; fi
   mapfile -t EXCLUDED <<<"$excludes_raw"
@@ -100,6 +119,7 @@ main() {
   echo "  canonical template : ${TEMPLATE#"$HERE/../"}  (blob ${blob:0:12})"
   echo "  canonical pin      : $(grep -m1 -oE 'actions/github-script@[^ ]*' "$TEMPLATE")"
   echo "  repos examined     : ${#REPOS[@]}"
+  echo "  repos allow-list   : ${RECONCILE_REPOS:-<all discovered>}"
   echo
   echo "  COLUMN 1 — pin (the T3 / Node-20 question)"
   echo "    pin-mutable (still unpinned)  : $m_pin"

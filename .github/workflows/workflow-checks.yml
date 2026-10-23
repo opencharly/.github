@@ -29,6 +29,11 @@ jobs:
         run: bash scripts/retire-per-repo-candy-gates_test.sh
       - name: Run the version-strip cutover script test (offline, mock gh)
         run: bash scripts/strip-config-version_test.sh
+      # The reconcile script's two dimensions and its repo allow-list. This test existed but
+      # nothing ran it: a script whose own coverage is never executed is a script whose
+      # regressions are found in the org instead of here.
+      - name: Run the tag-on-merge caller-reconcile script test (offline)
+        run: bash scripts/reconcile-tag-on-merge-callers_test.sh
       - name: Check action runtime pins
         run: python3 scripts/check-action-runtimes.py
       - name: Prove the action runtime checker rejects Node 20
