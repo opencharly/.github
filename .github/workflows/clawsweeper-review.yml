@@ -1,0 +1,197 @@
+# ORG-WIDE CLAWSWEEPER ADVISORY REVIEW (reusable, called via workflow_call)
+#
+# A SECOND REVIEWER, ADVISORY ONLY. The required gate stays `validate / validate`
+# (pr-validator.yml): this check is never a branch-protection requirement, it can never
+# block a merge, and a red run here is a review that did not happen, not a policy
+# verdict. Any repo enables it with a six-line caller.
+#
+# WHAT IT RUNS. One container of the pinned review image, against the PR's own tree,
+# mounted READ-ONLY at /target, with `--local-range`: the engine reads
+# merge-base(base, HEAD)..HEAD and performs NO GitHub reads or writes. No token enters the
+# container, and no Docker socket is mounted, so nothing in the image can act on the
+# repo. The JSON verdict leaves the sandbox on stdout and THIS workflow posts it — the
+# only surface with a token is the workflow, never the engine.
+#
+# THE MODEL ENDPOINT is the org's existing Ollama Cloud one. The key is the org secret
+# `AI_REVIEW_API_KEY` — the SAME secret the required gate already uses — mapped onto the
+# `OLLAMA_API_KEY` env var the image's CODEX_HOME names. One key, no new secret (R2).
+#
+# IMAGE PIN. `vars.CLAWSWEEPER_IMAGE` is the single bump point, exactly as
+# `vars.CHARLY_VERSION` already is for the required gate; the `image` input exists for a
+# one-off run against a candidate build. An unset variable is a LOUD failure, never a
+# silent fallback to a rolling tag.
+#
+# VISIBLE SKIP, NEVER A MOCK (R8). With no `AI_REVIEW_API_KEY` in scope the workflow
+# posts a comment saying the review was NOT exercised and exits 0. It never fabricates a
+# verdict and never reports a pass it did not obtain.
+#
+# NO CONCURRENCY BLOCK: unlike the required gate this check costs no API budget worth
+# cancelling, and a caller may lack `actions: write`; re-runs are cheap here.
+
+name: clawsweeper
+
+on:
+  workflow_call:
+    inputs:
+      pr-number:
+        required: true
+        type: string
+      # IMAGE PIN OVERRIDE. Empty = org variable CLAWSWEEPER_IMAGE.
+      image:
+        required: false
+        type: string
+    secrets:
+      AI_REVIEW_API_KEY:
+        required: false
+
+permissions:
+  contents: read
+  # ONE PR comment per head: the review's only output surface.
+  pull-requests: write
+  # The review image lives in GHCR as an org-INTERNAL package, so the pull needs a token
+  # (anonymous pulls are refused). Read-only.
+  packages: read
+
+jobs:
+  review:
+    name: clawsweeper
+    # The Docker-capable fleet. `vars.CI_DOCKER_RUNNER_LABEL` is the org variable the
+    # repo CI already uses for container jobs.
+    runs-on: [self-hosted, "${{ vars.CI_DOCKER_RUNNER_LABEL || 'opencharly-ubuntu' }}"]
+    # A review is a bounded model round-trip. The cap converts a provider stall into a
+    # concluded red run instead of a job that occupies a runner for hours.
+    timeout-minutes: 30
+    steps:
+      - name: Check the image pin is configured
+        id: pin
+        env:
+          IMAGE: ${{ inputs.image || vars.CLAWSWEEPER_IMAGE }}
+        run: |
+          set -euo pipefail
+          if [ -z "${IMAGE}" ]; then
+            echo "::error::Neither the 'image' input nor vars.CLAWSWEEPER_IMAGE is set."
+            exit 1
+          fi
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch the PR head and its base, and resolve the merge base
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          pr='${{ inputs.pr-number }}'
+          read -r head_sha base_ref < <(gh api "repos/${GITHUB_REPOSITORY}/pulls/${pr}" \
+            --jq '[.head.sha, .base.ref] | @tsv')
+
+          # Fetch both sides from the BASE repository, never the fork: `refs/pull/<n>/head`
+          # exists in the base repo for every PR, fork or not, so this works uniformly.
+          review="${RUNNER_TEMP}/review"
+          rm -rf "$review" && mkdir -p "$review"
+          git init -q "$review"
+          git -C "$review" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+          git -C "$review" fetch -q --no-tags origin \
+            "+refs/pull/${pr}/head:refs/remotes/pr/head" \
+            "+refs/heads/${base_ref}:refs/remotes/origin/${base_ref}"
+          git -C "$review" checkout -q -B pr refs/remotes/pr/head
+
+          base_sha="$(git -C "$review" merge-base HEAD "refs/remotes/origin/${base_ref}")"
+          echo "review=${review}" >> "$GITHUB_OUTPUT"
+          echo "base_sha=${base_sha}" >> "$GITHUB_OUTPUT"
+          echo "head_sha=${head_sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Run one review in a throwaway container
+        id: review
+        env:
+          IMAGE: ${{ steps.pin.outputs.image }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          OLLAMA_API_KEY: ${{ secrets.AI_REVIEW_API_KEY }}
+          REVIEW_DIR: ${{ steps.pr.outputs.review }}
+          BASE_SHA: ${{ steps.pr.outputs.base_sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "${OLLAMA_API_KEY:-}" ]; then
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+            echo "SKIP: AI_REVIEW_API_KEY is not in scope — the review was NOT exercised."
+            exit 0
+          fi
+
+          # The image is an org-internal GHCR package: authenticate the PULL here, in the
+          # workflow. The token never enters the container — it is used by docker on the
+          # host, and the container still gets no credentials of any kind.
+          echo "${GITHUB_TOKEN:-}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+          # --network: the model endpoint is remote, so egress is required; nothing else
+          # is reachable from inside. No token, no socket, read-only target tree.
+          set +e
+          docker run --rm \
+            --network bridge \
+            -e OLLAMA_API_KEY \
+            -e CLAWSWEEPER_TARGET_REPO="${GITHUB_REPOSITORY}" \
+            -e BASE_SHA="${BASE_SHA}" \
+            -e TARGET_DIR=/target \
+            -v "${REVIEW_DIR}:/target:ro" \
+            "${IMAGE}" > "${RUNNER_TEMP}/verdict.json" 2> "${RUNNER_TEMP}/review.log"
+          rc=$?
+          set -e
+          cat "${RUNNER_TEMP}/review.log"
+          echo "review_rc=${rc}" >> "$GITHUB_OUTPUT"
+          echo "skipped=false" >> "$GITHUB_OUTPUT"
+          if [ "$rc" -ne 0 ]; then
+            echo "::warning::clawsweeper-review exited ${rc}; the raw output is posted as the comment."
+          fi
+
+      - name: Post ONE comment for this head, updating the previous one
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SKIPPED: ${{ steps.review.outputs.skipped }}
+          REVIEW_RC: ${{ steps.review.outputs.review_rc }}
+        run: |
+          set -euo pipefail
+          pr='${{ inputs.pr-number }}'
+          marker='<!-- clawsweeper-review -->'
+          body_file="${RUNNER_TEMP}/comment.md"
+          verdict="${RUNNER_TEMP}/verdict.json"
+
+          {
+            echo "$marker"
+            echo "## ClawSweeper review (advisory)"
+            echo
+            if [ "${SKIPPED:-}" = "true" ]; then
+              echo "**Not exercised.** \`AI_REVIEW_API_KEY\` is not in scope for this run, so no"
+              echo "review was performed. This is a visible skip, not a pass."
+            elif [ -s "$verdict" ] && jq -e . "$verdict" >/dev/null 2>&1; then
+              echo "**Decision:** \`$(jq -r '.decision // "unknown"' "$verdict")\`"
+              echo
+              echo "<details><summary>Raw JSON verdict</summary>"
+              echo
+              echo '```json'
+              jq . "$verdict"
+              echo '```'
+              echo
+              echo "</details>"
+            else
+              echo "**No verdict was produced** (exit \`${REVIEW_RC:-?}\`). The raw output:"
+              echo
+              echo '```'
+              tail -c 20000 "${RUNNER_TEMP}/review.log" 2>/dev/null || echo "(no output captured)"
+              echo '```'
+            fi
+            echo
+            echo "This check is advisory: it never blocks a merge. The required gate is"
+            echo "\`validate / validate\`."
+          } > "$body_file"
+
+          existing="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${pr}/comments?per_page=100" \
+            --jq "[.[] | select(.body | startswith(\"${marker}\"))] | last | .id // empty")"
+          # --input with a jq-built payload, never -f body=@file: the field form's
+          # @file handling is engine-specific, the JSON payload is not.
+          jq -Rs '{body: .}' "$body_file" > "${RUNNER_TEMP}/payload.json"
+          if [ -n "$existing" ]; then
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${existing}" \
+              --input "${RUNNER_TEMP}/payload.json" >/dev/null
+          else
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${pr}/comments" \
+              --input "${RUNNER_TEMP}/payload.json" >/dev/null
+          fi
