@@ -1,0 +1,75 @@
+# DISTRIBUTE THE CANONICAL TAG-ON-MERGE CALLER (org-wide).
+#
+# Every repo that has `.github/workflows/tag-on-merge.yml` carries a COPY of
+# `.github/workflows/tag-on-merge-dispatcher.yml`. `bootstrap-repo-main.sh` installs it into
+# NEW repos and deliberately leaves an existing one alone, so a template change never reaches
+# repos that already had a caller. `scripts/reconcile-tag-on-merge-callers.sh` is the binding
+# that does; its `verify` mode is read-only and reports the drift.
+#
+# WHY IT IS A WORKFLOW: this writes to a protected `main` in every repo, and such a commit
+# must come from a ruleset BYPASS actor. The org ruleset's only bypass actor is the
+# `charly-auto-merge` App — deliberately, so that no human token can bypass main protection.
+# A contents-API PUT made with a user token therefore fails with
+#
+#   Required workflow 'charly/pr-validator, charly/pr-validator' is not satisfied
+#   Required status check "validate / validate" is expected.        (HTTP 409)
+#
+# MEASURED on 2026-10-23 against `spec`, `marketplace` and `plugin-task`. The App does the
+# write; the human-run script cannot.
+#
+# REQUIRED APP PERMISSIONS: `contents: write` (the write itself and the ruleset bypass) and
+# `workflows: write` (GitHub refuses create/update of any `.github/workflows/*` file without
+# it, even for an App that may otherwise push). Both are the same pair
+# `retire-per-repo-dispatchers.yml` documents.
+#
+# RUN ORDER: dispatch with `mode=verify` first and read the report; then dispatch with
+# `mode=apply` and a `repos` allow-list to PILOT a named few; then, once those read back
+# canonical and their post-merge job has landed on the fleet, dispatch `mode=apply` with an
+# empty `repos` for the rest. The script stops on the first read-back mismatch, so a broken
+# sweep cannot continue silently.
+name: reconcile-tag-on-merge-callers
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "verify (read-only) or apply (write the canonical caller)"
+        required: true
+        type: choice
+        options: [verify, apply]
+        default: verify
+      repos:
+        description: "Optional allow-list: space- or comma-separated repo names. Empty = every discovered repo."
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  reconcile:
+    runs-on: ${{ vars.CI_RUNNER_LABEL || 'ubuntu-latest' }}
+    timeout-minutes: 60
+    steps:
+      - name: Create bot token (charly-auto-merge App)
+        id: app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0, node24
+        with:
+          app-id: ${{ secrets.CHARLY_AUTO_MERGE_APP_ID }}
+          private-key: ${{ secrets.CHARLY_AUTO_MERGE_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7, node24
+
+      - name: Reconcile the per-repo callers with the canonical template
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          RECONCILE_REPOS: ${{ inputs.repos }}
+        run: |
+          set -o pipefail
+          if [[ "${{ inputs.mode }}" == "apply" ]]; then
+            bash scripts/reconcile-tag-on-merge-callers.sh --apply
+          else
+            bash scripts/reconcile-tag-on-merge-callers.sh verify
+          fi
