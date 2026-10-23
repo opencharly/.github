@@ -143,14 +143,29 @@ jobs:
           umbrella="${RUNNER_TEMP}/umbrella"
           rm -rf "$umbrella" && mkdir -p "$umbrella"
           for f in SOUL.md VISION.md; do
-            gh api "repos/opencharly/opencharly/contents/${f}?ref=${UMBRELLA_REF}" \
-              -H "Accept: application/vnd.github.raw" > "${umbrella}/${f}"
+            if ! gh api "repos/opencharly/opencharly/contents/${f}?ref=${UMBRELLA_REF}" \
+                 -H "Accept: application/vnd.github.raw" > "${umbrella}/${f}"; then
+              # The governing program is not optional: a review that cannot read it is not the
+              # review this workflow promises, so this is a VISIBLE failure of the check, not a
+              # silent downgrade to a repo-only review.
+              echo "::error::Could not fetch opencharly/opencharly@${UMBRELLA_REF}/${f}; refusing a review without the governing program."
+              exit 1
+            fi
             test -s "${umbrella}/${f}"
           done
 
           echo "review=${review}" >> "$GITHUB_OUTPUT"
           echo "base_sha=${base_sha}" >> "$GITHUB_OUTPUT"
           echo "umbrella=${umbrella}" >> "$GITHUB_OUTPUT"
+
+          # THE PR BODY, handed to the engine with --body-file. The engine reviews THIS exact
+          # body and assesses its proof claims against it ("AUTHORITATIVE PR BODY … Do NOT
+          # fetch, prefer, or assume any other version"). Without it the review could not see
+          # what the PR claims it did — which is most of what a reviewer must judge.
+          gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.body // ""' \
+            > "${RUNNER_TEMP}/pr-body.md"
+          echo "body_chars=$(wc -c < "${RUNNER_TEMP}/pr-body.md")"
+          echo "body=${RUNNER_TEMP}/pr-body.md" >> "$GITHUB_OUTPUT"
 
       - name: Run one review in a throwaway container
         id: review
@@ -161,6 +176,7 @@ jobs:
           OLLAMA_API_KEY: ${{ secrets.AI_REVIEW_API_KEY }}
           REVIEW_DIR: ${{ steps.pr.outputs.review }}
           UMBRELLA_DIR: ${{ steps.pr.outputs.umbrella }}
+          PR_BODY_FILE: ${{ steps.pr.outputs.body }}
           BASE_SHA: ${{ steps.pr.outputs.base_sha }}
           GOVERNING_PROMPT: |
             ## Governing program (the opencharly umbrella)
@@ -206,8 +222,10 @@ jobs:
             -e GIT_CONFIG_VALUE_0=/target \
             -v "${REVIEW_DIR}:/target" \
             -v "${UMBRELLA_DIR}:/umbrella:ro" \
+            -v "${PR_BODY_FILE}:/body.md:ro" \
             -e CLAWSWEEPER_ADDITIONAL_PROMPT="${GOVERNING_PROMPT}" \
             "${IMAGE}" clawsweeper-review \
+            --body-file /body.md \
             > "${RUNNER_TEMP}/verdict.json" 2> "${RUNNER_TEMP}/review.log"
           rc=$?
           set -e
@@ -232,7 +250,11 @@ jobs:
               | awk 'NR==1 && $0=="---"{fm=1;next} fm && $0=="---"{fm=0;next} !fm' \
               > "${RUNNER_TEMP}/report.md"
           fi
-          echo "report_chars=$(wc -c < "${RUNNER_TEMP}/report.md" 2>/dev/null || echo 0)"
+          if [ -f "${RUNNER_TEMP}/report.md" ]; then
+            echo "report_chars=$(wc -c < "${RUNNER_TEMP}/report.md")"
+          else
+            echo "report_chars=0"
+          fi
           echo "review_rc=${rc}" >> "$GITHUB_OUTPUT"
           echo "skipped=false" >> "$GITHUB_OUTPUT"
           # A review that produced nothing, or ran and reported failure, is a RED check — an
@@ -276,7 +298,7 @@ jobs:
               echo "**Not exercised.** \`AI_REVIEW_API_KEY\` is not in scope for this run, so no"
               echo "review was performed. This is a visible skip, not a pass."
             elif [ -s "${RUNNER_TEMP}/report.md" ]; then
-              echo "**Decision:** \`$(jq -r '.reports[0].decision // .status // "unknown"' "$verdict" 2>/dev/null || echo unknown)\`"
+              echo "**Decision:** \`$(jq -r '.decision // .status // "unknown"' "$verdict")\`"
               echo
               # THE FULL REVIEW. The engine writes a complete markdown report; posting the raw
               # JSON instead threw almost all of it away.
