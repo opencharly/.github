@@ -714,6 +714,18 @@ jobs:
             });
             if (closed.state !== 'closed') throw new Error('auto-close postcondition failed');
 
+      # ---------------------------------------------------------------------------
+      # THE VERDICT GATES — IN THIS JOB, ON PURPOSE, AND THEY MUST STAY HERE.
+      #
+      # A BLOCK (exit 1), an AMBIGUOUS parse (exit 2) and an INCONCLUSIVE (exit 3) each fail
+      # THIS job — which is the org's REQUIRED context — so the check goes RED, the comment
+      # says why, and the merge is blocked by branch protection. This is the one place in the
+      # workflow where a red check is the POINT: moving these into the non-required `arm` job
+      # would let reviewer-rejected or unreviewed code merge with the required check green.
+      #
+      # `arm` is `needs: validate` and gated on a PASS verdict, so on any of these it does not
+      # run at all: nothing is armed, and nothing about the failure is softened.
+      # ---------------------------------------------------------------------------
       - name: Gate (BLOCK)
         if: steps.parse.outputs.verdict == 'BLOCK'
         run: |
