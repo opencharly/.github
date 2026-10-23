@@ -78,8 +78,9 @@ on:
 
 permissions:
   contents: read
-  # ONE comment per pull request: the review's only output surface.
+  # ONE comment per pull request, plus the advisory labels — both are writes.
   pull-requests: write
+  issues: write
   # The review image is an org-internal GHCR package; the pull needs a token. Read-only.
   packages: read
 
@@ -94,6 +95,9 @@ jobs:
     timeout-minutes: 30
     env:
       PR_NUMBER: ${{ inputs.pr-number }}
+      # The governing program is read from a PINNED umbrella commit, not `main`: the review
+      # must judge against a fixed text, exactly as it judges a fixed PR head.
+      UMBRELLA_REF: d4f6b0d4a32366ef8428986057186fc3984cebf9
     steps:
       - name: Check the image pin is configured
         id: pin
@@ -132,8 +136,40 @@ jobs:
           git -C "$review" checkout -q -B pr refs/remotes/pr/head
 
           base_sha="$(git -C "$review" merge-base HEAD "refs/remotes/origin/${base_ref}")"
+
+          # THE GOVERNING PROGRAM. The umbrella repo's SOUL.md and VISION.md are handed to the
+          # reviewer read-only at /umbrella: they are the statement of who the project is and
+          # where it is going, and a review that ignores them is incomplete. Fetched here with
+          # the run's own token, from a pinned ref, so the review reads a fixed text.
+          umbrella="${RUNNER_TEMP}/umbrella"
+          rm -rf "$umbrella" && mkdir -p "$umbrella"
+          for f in SOUL.md VISION.md; do
+            if ! gh api "repos/opencharly/opencharly/contents/${f}?ref=${UMBRELLA_REF}" \
+                 -H "Accept: application/vnd.github.raw" > "${umbrella}/${f}"; then
+              # The governing program is not optional: a review that cannot read it is not the
+              # review this workflow promises, so this is a VISIBLE failure of the check, not a
+              # silent downgrade to a repo-only review.
+              echo "::error::Could not fetch opencharly/opencharly@${UMBRELLA_REF}/${f}; refusing a review without the governing program."
+              exit 1
+            fi
+            if ! test -s "${umbrella}/${f}"; then
+              echo "::error::opencharly/opencharly@${UMBRELLA_REF}/${f} came back empty."
+              exit 1
+            fi
+          done
+
           echo "review=${review}" >> "$GITHUB_OUTPUT"
           echo "base_sha=${base_sha}" >> "$GITHUB_OUTPUT"
+          echo "umbrella=${umbrella}" >> "$GITHUB_OUTPUT"
+
+          # THE PR BODY, handed to the engine with --body-file. The engine reviews THIS exact
+          # body and assesses its proof claims against it ("AUTHORITATIVE PR BODY … Do NOT
+          # fetch, prefer, or assume any other version"). Without it the review could not see
+          # what the PR claims it did — which is most of what a reviewer must judge.
+          gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.body // ""' \
+            > "${RUNNER_TEMP}/pr-body.md"
+          echo "body_chars=$(wc -c < "${RUNNER_TEMP}/pr-body.md")"
+          echo "body=${RUNNER_TEMP}/pr-body.md" >> "$GITHUB_OUTPUT"
 
       - name: Run one review in a throwaway container
         id: review
@@ -143,7 +179,18 @@ jobs:
           GITHUB_ACTOR: ${{ github.actor }}
           OLLAMA_API_KEY: ${{ secrets.AI_REVIEW_API_KEY }}
           REVIEW_DIR: ${{ steps.pr.outputs.review }}
+          UMBRELLA_DIR: ${{ steps.pr.outputs.umbrella }}
+          PR_BODY_FILE: ${{ steps.pr.outputs.body }}
           BASE_SHA: ${{ steps.pr.outputs.base_sha }}
+          GOVERNING_PROMPT: |
+            ## Governing program (the opencharly umbrella)
+            The umbrella repository opencharly/opencharly is mounted READ-ONLY at /umbrella.
+            Before judging anything, read /umbrella/SOUL.md and /umbrella/VISION.md IN FULL.
+            They are the governing statement of who this project is and where it is going, and
+            they outrank local convenience.
+            Your report must say explicitly whether the change fits that vision and character.
+            Flag anything that works against them, and name it in the review findings rather
+            than leaving it implicit.
         run: |
           set -euo pipefail
           if [ -z "${OLLAMA_API_KEY:-}" ]; then
@@ -178,7 +225,11 @@ jobs:
             -e GIT_CONFIG_KEY_0=safe.directory \
             -e GIT_CONFIG_VALUE_0=/target \
             -v "${REVIEW_DIR}:/target" \
+            -v "${UMBRELLA_DIR}:/umbrella:ro" \
+            -v "${PR_BODY_FILE}:/body.md:ro" \
+            -e CLAWSWEEPER_ADDITIONAL_PROMPT="${GOVERNING_PROMPT}" \
             "${IMAGE}" clawsweeper-review \
+            --body-file /body.md \
             > "${RUNNER_TEMP}/verdict.json" 2> "${RUNNER_TEMP}/review.log"
           rc=$?
           set -e
@@ -194,6 +245,20 @@ jobs:
             done
           done
           tail -c 4000 "${RUNNER_TEMP}/review.log"
+
+          # THE FULL REVIEW, extracted here so the comment can post it. The engine writes a
+          # complete markdown report inside reports[0].report; its leading YAML frontmatter is
+          # metadata for the engine, not for a reader, so it is stripped.
+          if jq -e . "${RUNNER_TEMP}/verdict.json" >/dev/null 2>&1; then
+            jq -r '.reports[0].report // empty' "${RUNNER_TEMP}/verdict.json" \
+              | awk 'NR==1 && $0=="---"{fm=1;next} fm && $0=="---"{fm=0;next} !fm' \
+              > "${RUNNER_TEMP}/report.md"
+          fi
+          if [ -f "${RUNNER_TEMP}/report.md" ]; then
+            echo "report_chars=$(wc -c < "${RUNNER_TEMP}/report.md")"
+          else
+            echo "report_chars=0"
+          fi
           echo "review_rc=${rc}" >> "$GITHUB_OUTPUT"
           echo "skipped=false" >> "$GITHUB_OUTPUT"
           # A review that produced nothing, or ran and reported failure, is a RED check — an
@@ -216,6 +281,7 @@ jobs:
           fi
 
       - name: Post the review comment, updating the previous one
+        id: comment
         # ONLY when the review step actually ran. A pin or fetch failure is an INFRA error and
         # must not be dressed up as "the engine produced no verdict".
         if: always() && steps.review.outcome != 'skipped'
@@ -229,6 +295,45 @@ jobs:
           body_file="${RUNNER_TEMP}/comment.md"
           verdict="${RUNNER_TEMP}/verdict.json"
 
+          # THE REVIEW'S OWN DECISION lives in the report's YAML frontmatter. The JSON has no
+          # top-level `decision`, so `.decision // .status` was showing the RUN STATUS
+          # ("completed"), not the verdict. Parsed here, from the engine's own field.
+          # findings starts EMPTY, not 0: only a successful parse may claim "no findings". A
+          # 0 default would let an unparsable record read as a clean review.
+          decision=""; confidence=""; review_status=""; findings=""
+          if [ -s "$verdict" ] && jq -e . "$verdict" >/dev/null 2>&1; then
+            raw_report="$(jq -r '.reports[0].report // empty' "$verdict")"
+            if [ -n "$raw_report" ]; then
+              # Only a report that ACTUALLY begins with `---` has frontmatter; anything else
+              # yields an empty block rather than "everything after line 1".
+              fm="$(printf '%s\n' "$raw_report" | awk 'NR==1 && $0!="---"{exit} NR==1{next} /^---$/{exit} {print}')"
+              decision="$(printf '%s\n' "$fm" | awk -F': ' '/^decision: /{print $2; exit}')"
+              confidence="$(printf '%s\n' "$fm" | awk -F': ' '/^confidence: /{print $2; exit}')"
+              review_status="$(printf '%s\n' "$fm" | awk -F': ' '/^review_status: /{print $2; exit}')"
+              # FINDINGS come from the engine's OWN structured record, not from counting
+              # markdown bullets: the report embeds `review_record:` as JSON and its
+              # `decision.reviewFindings` array is the authoritative list. An unparsable
+              # record leaves the count EMPTY, which the label rule treats as attention —
+              # it fails toward a human look, never toward "reviewed".
+              record="$(printf '%s\n' "$raw_report" | awk '/^review_record: /{sub(/^review_record: /,""); print; exit}')"
+              if [ -n "$record" ] && printf '%s' "$record" | jq -e . >/dev/null 2>&1; then
+                findings="$(printf '%s' "$record" | jq -r '.decision.reviewFindings | length')"
+              fi
+            fi
+          fi
+          echo "decision=${decision:-none} confidence=${confidence:-none} review_status=${review_status:-none} findings=${findings:-unparsed}"
+          # The label decision. "reviewed" means a review COMPLETED with a valid report and
+          # raised nothing; everything else that ran is needs-attention — a review that errored
+          # has NOT reviewed the code, so labelling it reviewed would be a false claim.
+          if [ "${SKIPPED:-}" = "true" ]; then
+            label_decision="skip"
+          elif [ "$review_status" = "complete" ] && [ "${findings:-}" = "0" ] && [ "${decision:-keep_open}" = "keep_open" ]; then
+            label_decision="reviewed"
+          else
+            label_decision="needs-attention"
+          fi
+          echo "decision=${label_decision}" >> "$GITHUB_OUTPUT"
+
           {
             echo "$marker"
             echo "## ClawSweeper review (advisory)"
@@ -237,7 +342,22 @@ jobs:
               echo "**Not exercised.** \`AI_REVIEW_API_KEY\` is not in scope for this run, so no"
               echo "review was performed. This is a visible skip, not a pass."
             elif [ -s "$verdict" ] && jq -e . "$verdict" >/dev/null 2>&1; then
-              echo "**Decision:** \`$(jq -r '.decision // .status // "unknown"' "$verdict")\`"
+              # A VALID verdict always shows its decision, even when the markdown report came
+              # back empty — hiding a real decision behind a generic message would be worse
+              # than showing it with a note.
+              if [ -n "$decision" ]; then
+                echo "**Decision:** \`${decision}\`${confidence:+ (confidence: ${confidence})}"
+              else
+                echo "**Decision:** \`$(jq -r '.status // "unknown"' "$verdict")\`"
+              fi
+              echo
+              if [ -s "${RUNNER_TEMP}/report.md" ]; then
+                # THE FULL REVIEW. The engine writes a complete markdown report; posting the
+                # raw JSON instead threw almost all of it away.
+                cat "${RUNNER_TEMP}/report.md"
+              else
+                echo "_The engine returned a decision but no markdown report. The JSON is below._"
+              fi
               echo
               echo "<details><summary>Raw JSON verdict</summary>"
               echo
@@ -247,7 +367,7 @@ jobs:
               echo
               echo "</details>"
             else
-              echo "**No verdict was produced** (exit \`${REVIEW_RC:-?}\`). The redacted output:"
+              echo "**The engine produced no report** (exit \`${REVIEW_RC:-?}\`). The redacted output:"
               echo
               echo '```'
               tail -c 20000 "${RUNNER_TEMP}/review.log" 2>/dev/null || echo "(no output captured)"
@@ -272,6 +392,44 @@ jobs:
             gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
               --input "${RUNNER_TEMP}/payload.json" >/dev/null
           fi
+
+      - name: Apply the advisory labels
+        # ADVISORY LABELS ONLY — this never closes, approves or merges anything.
+        #   clawsweeper:reviewed        this head was reviewed
+        #   clawsweeper:needs-attention the review raised findings, or could not complete
+        # Gated on the COMMENT step succeeding: if posting failed, its outputs are empty and
+        # the label would describe an infra failure as a review finding.
+        if: always() && steps.review.outcome != 'skipped' && steps.comment.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DECISION: ${{ steps.comment.outputs.decision }}
+        run: |
+          set -euo pipefail
+          ensure_label() {
+            gh api "repos/${GITHUB_REPOSITORY}/labels/$1" >/dev/null 2>&1 && return 0
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/labels" \
+              -f name="$1" -f color="$2" -f description="$3" >/dev/null
+          }
+          case "${DECISION:-}" in
+            skip)
+              echo "no review was performed; labels untouched"
+              exit 0
+              ;;
+            reviewed)
+              ensure_label "clawsweeper:reviewed" "0e8a16" "ClawSweeper reviewed this pull request"
+              ensure_label "clawsweeper:needs-attention" "d93f0b" "ClawSweeper raised a finding a human should look at"
+              gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/labels" \
+                -f "labels[]=clawsweeper:reviewed" >/dev/null
+              gh api -X DELETE "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/labels/clawsweeper:needs-attention" >/dev/null 2>&1 || true
+              ;;
+            *)
+              ensure_label "clawsweeper:needs-attention" "d93f0b" "ClawSweeper raised a finding a human should look at"
+              gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/labels" \
+                -f "labels[]=clawsweeper:needs-attention" >/dev/null
+              # "reviewed" is a claim about THIS head; a later failing run must not leave it.
+              gh api -X DELETE "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/labels/clawsweeper:reviewed" >/dev/null 2>&1 || true
+              ;;
+          esac
 
       - name: Drop the throwaway docker credentials
         if: always()
