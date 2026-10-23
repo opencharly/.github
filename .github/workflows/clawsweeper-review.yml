@@ -302,7 +302,9 @@ jobs:
           if [ -s "$verdict" ] && jq -e . "$verdict" >/dev/null 2>&1; then
             raw_report="$(jq -r '.reports[0].report // empty' "$verdict")"
             if [ -n "$raw_report" ]; then
-              fm="$(printf '%s\n' "$raw_report" | awk 'NR>1 && /^---$/{exit} NR>1')"
+              # Only a report that ACTUALLY begins with `---` has frontmatter; anything else
+              # yields an empty block rather than "everything after line 1".
+              fm="$(printf '%s\n' "$raw_report" | awk 'NR==1 && $0!="---"{exit} NR==1{next} /^---$/{exit} {print}')"
               decision="$(printf '%s\n' "$fm" | awk -F': ' '/^decision: /{print $2; exit}')"
               confidence="$(printf '%s\n' "$fm" | awk -F': ' '/^confidence: /{print $2; exit}')"
               review_status="$(printf '%s\n' "$fm" | awk -F': ' '/^review_status: /{print $2; exit}')"
