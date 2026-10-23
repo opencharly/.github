@@ -1,23 +1,24 @@
 # ORG-WIDE PR VALIDATOR (reusable, called via workflow_call)
 #
-# Two JOBS, and the split is the design:
+# THREE JOBS, and the split is the design: the REQUIRED check is the review and nothing else,
+# and everything that used to serialise behind it now runs beside it.
 #
-#   validate — the REVIEW VERDICT, and nothing else. It is the org's ONE required context
-#     (`validate / validate`, org ruleset 23827016), so it must be INDEPENDENT of every
-#     other job: it neither waits for the repo's CI nor turns red because of it. A repo's
-#     own CI (e.g. `go`) is not a required context and this job does not read it.
+#   validate — the REVIEW VERDICT. The org's ONE required context (`validate / validate`, org
+#     ruleset 23827016), so it must be INDEPENDENT of every other job: no checkout, no lint,
+#     no check-run reads, no arming. It cannot wait on another job and cannot be reddened by
+#     one. A BLOCK, an ambiguous parse or an INCONCLUSIVE fails THIS job — hard, with
+#     `::error::` — because a red required check is exactly what must stop the merge.
 #
-#   arm — AUTO-MERGE, and the price of it. NOT a required check. It runs only after the
-#     verdict is PASS, waits for EVERY check on the head — INCLUDING `validate / validate`
-#     itself — and arms native squash auto-merge only when all of them are green. Two
-#     DETERMINISTIC gates run here first:
-#       * gate A runs the repo's own DECLARED golangci-lint config over its Go module roots,
-#         and skips repos that declare none;
-#       * gate B reads EVERY check run on this head off the API and fails on any that did
-#         not pass, WAITING (bounded) for in-flight ones to settle.
-#     So the invariant — nothing merges on a head whose checks are not all green — is
-#     enforced where it belongs, by what gets ARMED, and a busy fleet can no longer redden
-#     the required check while it waits.
+#   lint — gate A, IN PARALLEL. Nothing in it depends on the verdict: it reads the PR head and
+#     the repo's DECLARED golangci-lint config. Running it here makes the merge gate's critical
+#     path `max(review, lint)` instead of `review + lint`.
+#
+#   arm — AUTO-MERGE, and the price of it. NOT a required check. Runs only when the verdict is
+#     PASS AND `lint` passed, then gate B: it waits for EVERY check on the head — INCLUDING
+#     `validate / validate` itself — and arms native squash auto-merge only when all are green.
+#     So the invariant — nothing merges on a head whose checks are not all green — is enforced
+#     where it belongs, by what gets ARMED, and a busy fleet can no longer redden the required
+#     check while it waits.
 #
 # Both gates and their measured justification are documented at the steps themselves.
 #
@@ -1031,76 +1032,87 @@ jobs:
   # invariant the old design protected is preserved and tightened: nothing merges on a
   # head whose checks are not all green, because nothing is ARMED until they are.
   # ===========================================================================
-  arm:
-    name: arm
-    needs: validate
-    if: needs.validate.outputs.verdict == 'PASS'
+  # ===========================================================================
+  # ---------------------------------------------------------------------------
+  # THE TWO DETERMINISTIC GATES THAT MAKE A `PASS` MEAN "the head is green"
+  # (opencharly/charly#796).
+  #
+  # WHY THEY EXIST AT ALL. Checklist item QUAL (then B18) used to tell the reviewer that
+  # "CI status is NOT a review input ... branch protection enforces the repo's required
+  # checks mechanically". MEASURED, that premise was FALSE: the ONE org ruleset (23827016)
+  # requires exactly ONE context — `validate / validate` — so a repo's own `ci` job was
+  # enforced by NOBODY: not by branch protection, and (on that check's explicit
+  # instruction) not by the reviewer either. MEASURED cost, two merged heads:
+  #   charly#795 — `go` FAILED at 02:35:42Z; the review PASSed at 02:44:58Z, 9m16s LATER,
+  #                and the merge landed at 02:45:21Z on that already-red head.
+  #   charly#791 — the merge landed at 21:25:04Z while `go` was STILL RUNNING; `go` then
+  #                failed at its Test step at 21:27:24Z, 2m20s AFTER the merge.
+  # #791 is why gate B below WAITS rather than taking a snapshot: at gate time the doomed
+  # check was `in_progress`, not `failure`, so a snapshot would have missed it entirely.
+  #
+  # GATE B — EVERY CHECK ON THIS HEAD, read from the GitHub API. Generic by construction:
+  # it reproduces whatever gate the repo declares, with no linter, no checkout and no
+  # per-repo coupling. It WAITS, bounded, for in-flight checks to finish — because the
+  # review is FASTER than the repo's own CI in 4 of 5 sampled PRs (`validate` 0m40s–14m15s
+  # vs `go` 3m57s–5m11s), so failing closed the instant a check is pending would block
+  # most PRs. A check that is absent is of course not evidence of anything, so a repo
+  # with no other checks at all is unaffected.
+  #
+  # GATE A — THE REPO'S DECLARED LINT. Gate B cannot see a repo that declares a lint
+  # policy nothing ever runs (MEASURED: `plugin-check` carries `.golangci.yml` and its only
+  # workflow is `tag-on-merge.yml`). Gate A runs golangci-lint over each Go module root
+  # that has a DECLARED config — and SKIPS the rest, because falling back to
+  # golangci-lint's standard set would impose a NEW gate on repos that never linted:
+  # MEASURED, 6 of 8 sampled org repos holding a `go.mod` and NO config FAIL that standard
+  # set (`SA1019` in a generated `schema_splice_test.go` scaffold, `errcheck` on tests,
+  # one `typecheck`). The repo's own CI stays advisory, exactly as designed.
+  #
+  # CONFIG SELECTION IS THE SUBTLE PART — measured, and it decided the design.
+  # golangci-lint resolves its config by walking UP from its CWD, so `cd <module root>` is
+  # NOT what a repo's CI does. charly carries TWO configs: `charly/.golangci.yml` (the
+  # baseline its CI resolves, running `run ./charly/...` from the repo root) and the
+  # stricter curated `charly/charly/.golangci.yml`. Same commit: root config -> `0 issues`;
+  # the module's own -> `2 issues`. A naive `cd` gate would falsely red charly itself. So:
+  #   * a config at the repo root IS the repo-level policy and is applied to every module;
+  #   * with no root config, each module uses the config it declares itself (walk-up);
+  #   * a module with neither is SKIPPED — it has declared no lint policy.
+  # `GOWORK=off` is REQUIRED: charly's 5 `tools/*` modules are not members of
+  # `charly/go.work` (`use ./charly` only), so without it the gate ERRORS on them instead
+  # of linting. With both corrections, all six charly module roots yield `0 issues`.
+  # gofmt is deliberately NOT asserted separately: it is a FORMATTER, enabled by the
+  # repo's OWN config (charly's enables it), and inventing a gofmt gate for repos that
+  # chose differently would be new policy, not enforcement.
+  #
+  # BOTH GATE THE MERGE ONLY, and they live in the `arm` JOB — not in the required
+  # `validate` check — so the review, its comment and the auto-close counter are
+  # untouched, and a failure here blocks ARMING AUTO-MERGE without ever reddening the
+  # org's required context. It does not suppress or replace the verdict.
+  #
+  # THE CHECKOUT IS A SUBPATH (`pr-head`), never the workspace root: the review step
+  # runs from `$GITHUB_WORKSPACE/runner-config`, and a self-modifying gate must not
+  # change what its own review input looks like.
+  # ---------------------------------------------------------------------------
+
+  # LINT (NOT a required check). Gate A used to run inside `arm`, i.e. AFTER the review
+  # finished — so the critical path was `review + lint`. Nothing in gate A depends on the
+  # verdict: it reads the PR head and the repo's declared golangci-lint config. Running it
+  # here makes the path `max(review, lint)` and takes it off the merge gate's clock entirely.
+  # ===========================================================================
+  lint:
+    name: lint
     runs-on: ${{ vars.REVIEW_RUNNER_LABEL || 'ubuntu-latest' }}
-    timeout-minutes: 75
+    timeout-minutes: 20
     steps:
-      # ---------------------------------------------------------------------------
-      # THE TWO DETERMINISTIC GATES THAT MAKE A `PASS` MEAN "the head is green"
-      # (opencharly/charly#796).
-      #
-      # WHY THEY EXIST AT ALL. Checklist item QUAL (then B18) used to tell the reviewer that
-      # "CI status is NOT a review input ... branch protection enforces the repo's required
-      # checks mechanically". MEASURED, that premise was FALSE: the ONE org ruleset (23827016)
-      # requires exactly ONE context — `validate / validate` — so a repo's own `ci` job was
-      # enforced by NOBODY: not by branch protection, and (on that check's explicit
-      # instruction) not by the reviewer either. MEASURED cost, two merged heads:
-      #   charly#795 — `go` FAILED at 02:35:42Z; the review PASSed at 02:44:58Z, 9m16s LATER,
-      #                and the merge landed at 02:45:21Z on that already-red head.
-      #   charly#791 — the merge landed at 21:25:04Z while `go` was STILL RUNNING; `go` then
-      #                failed at its Test step at 21:27:24Z, 2m20s AFTER the merge.
-      # #791 is why gate B below WAITS rather than taking a snapshot: at gate time the doomed
-      # check was `in_progress`, not `failure`, so a snapshot would have missed it entirely.
-      #
-      # GATE B — EVERY CHECK ON THIS HEAD, read from the GitHub API. Generic by construction:
-      # it reproduces whatever gate the repo declares, with no linter, no checkout and no
-      # per-repo coupling. It WAITS, bounded, for in-flight checks to finish — because the
-      # review is FASTER than the repo's own CI in 4 of 5 sampled PRs (`validate` 0m40s–14m15s
-      # vs `go` 3m57s–5m11s), so failing closed the instant a check is pending would block
-      # most PRs. A check that is absent is of course not evidence of anything, so a repo
-      # with no other checks at all is unaffected.
-      #
-      # GATE A — THE REPO'S DECLARED LINT. Gate B cannot see a repo that declares a lint
-      # policy nothing ever runs (MEASURED: `plugin-check` carries `.golangci.yml` and its only
-      # workflow is `tag-on-merge.yml`). Gate A runs golangci-lint over each Go module root
-      # that has a DECLARED config — and SKIPS the rest, because falling back to
-      # golangci-lint's standard set would impose a NEW gate on repos that never linted:
-      # MEASURED, 6 of 8 sampled org repos holding a `go.mod` and NO config FAIL that standard
-      # set (`SA1019` in a generated `schema_splice_test.go` scaffold, `errcheck` on tests,
-      # one `typecheck`). The repo's own CI stays advisory, exactly as designed.
-      #
-      # CONFIG SELECTION IS THE SUBTLE PART — measured, and it decided the design.
-      # golangci-lint resolves its config by walking UP from its CWD, so `cd <module root>` is
-      # NOT what a repo's CI does. charly carries TWO configs: `charly/.golangci.yml` (the
-      # baseline its CI resolves, running `run ./charly/...` from the repo root) and the
-      # stricter curated `charly/charly/.golangci.yml`. Same commit: root config -> `0 issues`;
-      # the module's own -> `2 issues`. A naive `cd` gate would falsely red charly itself. So:
-      #   * a config at the repo root IS the repo-level policy and is applied to every module;
-      #   * with no root config, each module uses the config it declares itself (walk-up);
-      #   * a module with neither is SKIPPED — it has declared no lint policy.
-      # `GOWORK=off` is REQUIRED: charly's 5 `tools/*` modules are not members of
-      # `charly/go.work` (`use ./charly` only), so without it the gate ERRORS on them instead
-      # of linting. With both corrections, all six charly module roots yield `0 issues`.
-      # gofmt is deliberately NOT asserted separately: it is a FORMATTER, enabled by the
-      # repo's OWN config (charly's enables it), and inventing a gofmt gate for repos that
-      # chose differently would be new policy, not enforcement.
-      #
-      # BOTH GATE THE MERGE ONLY, and they live in the `arm` JOB — not in the required
-      # `validate` check — so the review, its comment and the auto-close counter are
-      # untouched, and a failure here blocks ARMING AUTO-MERGE without ever reddening the
-      # org's required context. It does not suppress or replace the verdict.
-      #
-      # THE CHECKOUT IS A SUBPATH (`pr-head`), never the workspace root: the review step
-      # runs from `$GITHUB_WORKSPACE/runner-config`, and a self-modifying gate must not
-      # change what its own review input looks like.
-      # ---------------------------------------------------------------------------
+      - name: Resolve the PR head
+        id: head
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "head_sha=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${{ inputs.pr-number }}" --jq '.head.sha')" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7, node24
-        if: needs.validate.outputs.verdict == 'PASS'
         with:
-          ref: ${{ needs.validate.outputs.head_sha }}
+          ref: ${{ steps.head.outputs.head_sha }}
           path: pr-head
           fetch-depth: 1
           persist-credentials: false
@@ -1109,7 +1121,6 @@ jobs:
 
       - name: "Detect Go modules under a declared golangci-lint config (skip cleanly otherwise)"
         id: go-modules
-        if: needs.validate.outputs.verdict == 'PASS'
         run: |
           # A config at the repo ROOT is the repo-level policy and governs every module
           # below it. This is the resolution charly's own CI gets (it runs from the repo
@@ -1169,7 +1180,7 @@ jobs:
           fi
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0, node24
-        if: needs.validate.outputs.verdict == 'PASS' && steps.go-modules.outputs.present == 'true'
+        if: steps.go-modules.outputs.present == 'true'
         with:
           # PINNED, not 'stable' (RCA 2026-10-09, opencharly/pod-github-runner#9).
           # 'stable' resolves from the network to the NEWEST released Go, which became
@@ -1197,7 +1208,7 @@ jobs:
 
       - name: "golangci-lint (the repo's declared lint, enforced)"
         id: golint
-        if: needs.validate.outputs.verdict == 'PASS' && steps.go-modules.outputs.present == 'true'
+        if: steps.go-modules.outputs.present == 'true'
         # Its OWN wall clock, so a hung linter fails fast instead of consuming the job's
         # timeout-minutes backstop — which exists for a provider-unanswered REVIEW.
         timeout-minutes: 12
@@ -1276,9 +1287,25 @@ jobs:
 
       # ----- GATE B — every check on this head (see the block comment above) -----------
 
+
+
+  # ===========================================================================
+  # ARM AUTO-MERGE (NOT a required check).
+  #
+  # Runs only when the review verdict is PASS **and** the parallel `lint` job passed, then
+  # waits for EVERY check on the head — including `validate / validate` itself — and arms
+  # native squash auto-merge only when all of them are green. A timeout or a red check here
+  # means "not armed", never "the required check is red".
+  # ===========================================================================
+  arm:
+    name: arm
+    needs: [validate, lint]
+    if: needs.validate.outputs.verdict == 'PASS' && needs.lint.result == 'success'
+    runs-on: ${{ vars.REVIEW_RUNNER_LABEL || 'ubuntu-latest' }}
+    timeout-minutes: 75
+    steps:
       - name: "Head check-runs (wait for the head to settle, then fail on any check that did not pass)"
         id: head-checks
-        if: needs.validate.outputs.verdict == 'PASS'
         # Its OWN wall clock: the wait below is bounded, this is the backstop should the
         # API hang rather than answer.
         timeout-minutes: 70
@@ -1372,7 +1399,6 @@ jobs:
       # A PASS must arm native auto-merge and verify the live postcondition.
       # Arming errors fail this required check; no retries, branch mutation, or manual-merge fallback.
       - name: Enable auto-merge
-        if: needs.validate.outputs.verdict == 'PASS'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0, node24
         env:
           PR_NUMBER: ${{ inputs.pr-number }}
