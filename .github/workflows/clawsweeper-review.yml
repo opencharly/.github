@@ -151,7 +151,10 @@ jobs:
               echo "::error::Could not fetch opencharly/opencharly@${UMBRELLA_REF}/${f}; refusing a review without the governing program."
               exit 1
             fi
-            test -s "${umbrella}/${f}"
+            if ! test -s "${umbrella}/${f}"; then
+              echo "::error::opencharly/opencharly@${UMBRELLA_REF}/${f} came back empty."
+              exit 1
+            fi
           done
 
           echo "review=${review}" >> "$GITHUB_OUTPUT"
@@ -297,12 +300,19 @@ jobs:
             if [ "${SKIPPED:-}" = "true" ]; then
               echo "**Not exercised.** \`AI_REVIEW_API_KEY\` is not in scope for this run, so no"
               echo "review was performed. This is a visible skip, not a pass."
-            elif [ -s "${RUNNER_TEMP}/report.md" ]; then
+            elif [ -s "$verdict" ] && jq -e . "$verdict" >/dev/null 2>&1; then
+              # A VALID verdict always shows its decision, even when the markdown report came
+              # back empty — hiding a real decision behind a generic message would be worse
+              # than showing it with a note.
               echo "**Decision:** \`$(jq -r '.decision // .status // "unknown"' "$verdict")\`"
               echo
-              # THE FULL REVIEW. The engine writes a complete markdown report; posting the raw
-              # JSON instead threw almost all of it away.
-              cat "${RUNNER_TEMP}/report.md"
+              if [ -s "${RUNNER_TEMP}/report.md" ]; then
+                # THE FULL REVIEW. The engine writes a complete markdown report; posting the
+                # raw JSON instead threw almost all of it away.
+                cat "${RUNNER_TEMP}/report.md"
+              else
+                echo "_The engine returned a decision but no markdown report. The JSON is below._"
+              fi
               echo
               echo "<details><summary>Raw JSON verdict</summary>"
               echo
@@ -312,7 +322,7 @@ jobs:
               echo
               echo "</details>"
             else
-              echo "**No verdict was produced** (exit \`${REVIEW_RC:-?}\`). The redacted output:"
+              echo "**The engine produced no report** (exit \`${REVIEW_RC:-?}\`). The redacted output:"
               echo
               echo '```'
               tail -c 20000 "${RUNNER_TEMP}/review.log" 2>/dev/null || echo "(no output captured)"
