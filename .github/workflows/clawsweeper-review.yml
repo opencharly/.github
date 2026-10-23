@@ -160,6 +160,7 @@ jobs:
 
           echo "review=${review}" >> "$GITHUB_OUTPUT"
           echo "base_sha=${base_sha}" >> "$GITHUB_OUTPUT"
+          echo "head_sha=${head_sha}" >> "$GITHUB_OUTPUT"
           echo "umbrella=${umbrella}" >> "$GITHUB_OUTPUT"
 
           # THE PR BODY, handed to the engine with --body-file. The engine reviews THIS exact
@@ -287,10 +288,21 @@ jobs:
         if: always() && steps.review.outcome != 'skipped'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REVIEWED_HEAD: ${{ steps.pr.outputs.head_sha }}
           SKIPPED: ${{ steps.review.outputs.skipped }}
           REVIEW_RC: ${{ steps.review.outputs.review_rc }}
         run: |
           set -euo pipefail
+          # ONLY THE CURRENT HEAD MAY WRITE THE COMMENT. A push during a review makes this
+          # run stale; its upsert would be last-writer-wins and could overwrite a newer
+          # review with an older one. The caller should also cancel the superseded run
+          # (concurrency + cancel-in-progress); this is the backstop for callers that cannot
+          # grant `actions: write`.
+          current_head="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.head.sha')"
+          if [ "${current_head}" != "${REVIEWED_HEAD}" ]; then
+            echo "::notice::the PR head moved to ${current_head} after this review started; leaving the comment to the newer run."
+            exit 0
+          fi
           marker='<!-- clawsweeper-review -->'
           body_file="${RUNNER_TEMP}/comment.md"
           verdict="${RUNNER_TEMP}/verdict.json"
