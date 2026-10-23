@@ -27,7 +27,9 @@
 # and the JSON verdict leaves on stdout for THIS workflow to post.
 #
 # NETWORK. `--network bridge` gives the container EGRESS, which it needs: the model endpoint
-# is remote. What it does NOT have is a credential, a socket, or a writable view of the PR.
+# is remote. What it does NOT have is a credential, a socket, or any writable path that can be
+# pushed: the writable tree it sees is the job's own throwaway fetch (see above), and the
+# runner's checkout is never mounted here at all.
 #
 # THE MODEL ENDPOINT is the org's existing Ollama Cloud one. The key is the org secret
 # `AI_REVIEW_API_KEY` — the SAME secret the required gate already uses — mapped onto
