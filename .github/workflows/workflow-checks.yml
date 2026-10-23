@@ -11,7 +11,10 @@ permissions:
 jobs:
   harness:
     name: workflow-checks
-    runs-on: ubuntu-latest
+    # A FORK PR runs untrusted code. It never lands on the fleet: our runners are long-lived
+    # and keep state between jobs, so a fork PR would execute attacker-controlled code on them.
+    # Own-code PRs, pushes and dispatches take the fleet; a fork PR stays on GitHub-hosted.
+    runs-on: ${{ (github.event.pull_request.head.repo.fork == true) && 'ubuntu-latest' || (vars.CI_RUNNER_LABEL || 'ubuntu-latest') }}
     env:
       GIT_CONFIG_COUNT: "1"
       GIT_CONFIG_KEY_0: init.defaultBranch
