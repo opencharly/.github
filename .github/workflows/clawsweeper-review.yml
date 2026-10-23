@@ -78,8 +78,9 @@ on:
 
 permissions:
   contents: read
-  # ONE comment per pull request: the review's only output surface.
+  # ONE comment per pull request, plus the advisory labels — both are writes.
   pull-requests: write
+  issues: write
   # The review image is an org-internal GHCR package; the pull needs a token. Read-only.
   packages: read
 
@@ -280,6 +281,7 @@ jobs:
           fi
 
       - name: Post the review comment, updating the previous one
+        id: comment
         # ONLY when the review step actually ran. A pin or fetch failure is an INFRA error and
         # must not be dressed up as "the engine produced no verdict".
         if: always() && steps.review.outcome != 'skipped'
@@ -293,6 +295,32 @@ jobs:
           body_file="${RUNNER_TEMP}/comment.md"
           verdict="${RUNNER_TEMP}/verdict.json"
 
+          # THE REVIEW'S OWN DECISION lives in the report's YAML frontmatter. The JSON has no
+          # top-level `decision`, so `.decision // .status` was showing the RUN STATUS
+          # ("completed"), not the verdict. Parsed here, from the engine's own field.
+          decision=""; confidence=""; review_status=""; findings=0
+          if [ -s "$verdict" ] && jq -e . "$verdict" >/dev/null 2>&1; then
+            raw_report="$(jq -r '.reports[0].report // empty' "$verdict")"
+            if [ -n "$raw_report" ]; then
+              fm="$(printf '%s\n' "$raw_report" | awk 'NR>1 && /^---$/{exit} NR>1')"
+              decision="$(printf '%s\n' "$fm" | awk -F': ' '/^decision: /{print $2; exit}')"
+              confidence="$(printf '%s\n' "$fm" | awk -F': ' '/^confidence: /{print $2; exit}')"
+              review_status="$(printf '%s\n' "$fm" | awk -F': ' '/^review_status: /{print $2; exit}')"
+              findings="$(printf '%s\n' "$raw_report" | awk '/^## Review Findings/{f=1;next} f&&/^## /{exit} f&&/^- /{c++} END{print c+0}')"
+            fi
+          fi
+          echo "decision=${decision:-none} confidence=${confidence:-none} review_status=${review_status:-none} findings=${findings}"
+          # The label decision, kept separate from the review's own vocabulary: attention is
+          # needed when the review raised findings or could not complete honestly.
+          if [ "${SKIPPED:-}" = "true" ]; then
+            label_decision=""
+          elif [ "${findings:-0}" -gt 0 ] || { [ -n "$review_status" ] && [ "$review_status" != "complete" ]; }; then
+            label_decision="needs-attention"
+          else
+            label_decision=""
+          fi
+          echo "decision=${label_decision}" >> "$GITHUB_OUTPUT"
+
           {
             echo "$marker"
             echo "## ClawSweeper review (advisory)"
@@ -304,7 +332,11 @@ jobs:
               # A VALID verdict always shows its decision, even when the markdown report came
               # back empty — hiding a real decision behind a generic message would be worse
               # than showing it with a note.
-              echo "**Decision:** \`$(jq -r '.decision // .status // "unknown"' "$verdict")\`"
+              if [ -n "$decision" ]; then
+                echo "**Decision:** \`${decision}\`${confidence:+ (confidence: ${confidence})}"
+              else
+                echo "**Decision:** \`$(jq -r '.status // "unknown"' "$verdict")\`"
+              fi
               echo
               if [ -s "${RUNNER_TEMP}/report.md" ]; then
                 # THE FULL REVIEW. The engine writes a complete markdown report; posting the
@@ -346,6 +378,32 @@ jobs:
           else
             gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
               --input "${RUNNER_TEMP}/payload.json" >/dev/null
+          fi
+
+      - name: Apply the advisory labels
+        # ADVISORY LABELS ONLY — this never closes, approves or merges anything.
+        #   clawsweeper:reviewed        this head was reviewed
+        #   clawsweeper:needs-attention the review raised findings, or could not complete
+        if: always() && steps.review.outcome != 'skipped'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DECISION: ${{ steps.comment.outputs.decision }}
+        run: |
+          set -euo pipefail
+          ensure_label() {
+            gh api "repos/${GITHUB_REPOSITORY}/labels/$1" >/dev/null 2>&1 && return 0
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/labels" \
+              -f name="$1" -f color="$2" -f description="$3" >/dev/null
+          }
+          ensure_label "clawsweeper:reviewed" "0e8a16" "ClawSweeper reviewed this pull request"
+          ensure_label "clawsweeper:needs-attention" "d93f0b" "ClawSweeper raised a finding a human should look at"
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/labels" \
+            -f "labels[]=clawsweeper:reviewed" >/dev/null
+          if [ "${DECISION:-}" = "needs-attention" ]; then
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/labels" \
+              -f "labels[]=clawsweeper:needs-attention" >/dev/null
+          else
+            gh api -X DELETE "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/labels/clawsweeper:needs-attention" >/dev/null 2>&1 || true
           fi
 
       - name: Drop the throwaway docker credentials
