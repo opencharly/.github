@@ -308,7 +308,15 @@ jobs:
               decision="$(printf '%s\n' "$fm" | awk -F': ' '/^decision: /{print $2; exit}')"
               confidence="$(printf '%s\n' "$fm" | awk -F': ' '/^confidence: /{print $2; exit}')"
               review_status="$(printf '%s\n' "$fm" | awk -F': ' '/^review_status: /{print $2; exit}')"
-              findings="$(printf '%s\n' "$raw_report" | awk '/^## Review Findings/{f=1;next} f&&/^## /{exit} f&&/^- /{c++} END{print c+0}')"
+              # FINDINGS come from the engine's OWN structured record, not from counting
+              # markdown bullets: the report embeds `review_record:` as JSON and its
+              # `decision.reviewFindings` array is the authoritative list. An unparsable
+              # record leaves the count EMPTY, which the label rule treats as attention —
+              # it fails toward a human look, never toward "reviewed".
+              record="$(printf '%s\n' "$raw_report" | awk '/^review_record: /{sub(/^review_record: /,""); print; exit}')"
+              if [ -n "$record" ] && printf '%s' "$record" | jq -e . >/dev/null 2>&1; then
+                findings="$(printf '%s' "$record" | jq -r '.decision.reviewFindings | length')"
+              fi
             fi
           fi
           echo "decision=${decision:-none} confidence=${confidence:-none} review_status=${review_status:-none} findings=${findings}"
@@ -317,7 +325,7 @@ jobs:
           # has NOT reviewed the code, so labelling it reviewed would be a false claim.
           if [ "${SKIPPED:-}" = "true" ]; then
             label_decision="skip"
-          elif [ "$review_status" = "complete" ] && [ "${findings:-0}" -eq 0 ]; then
+          elif [ "$review_status" = "complete" ] && [ "${findings:-}" = "0" ]; then
             label_decision="reviewed"
           else
             label_decision="needs-attention"
@@ -387,7 +395,9 @@ jobs:
         # ADVISORY LABELS ONLY — this never closes, approves or merges anything.
         #   clawsweeper:reviewed        this head was reviewed
         #   clawsweeper:needs-attention the review raised findings, or could not complete
-        if: always() && steps.review.outcome != 'skipped'
+        # Gated on the COMMENT step succeeding: if posting failed, its outputs are empty and
+        # the label would describe an infra failure as a review finding.
+        if: always() && steps.review.outcome != 'skipped' && steps.comment.outcome == 'success'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DECISION: ${{ steps.comment.outputs.decision }}
