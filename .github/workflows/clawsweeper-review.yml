@@ -94,6 +94,9 @@ jobs:
     timeout-minutes: 30
     env:
       PR_NUMBER: ${{ inputs.pr-number }}
+      # The governing program is read from a PINNED umbrella commit, not `main`: the review
+      # must judge against a fixed text, exactly as it judges a fixed PR head.
+      UMBRELLA_REF: d4f6b0d4a32366ef8428986057186fc3984cebf9
     steps:
       - name: Check the image pin is configured
         id: pin
@@ -132,8 +135,22 @@ jobs:
           git -C "$review" checkout -q -B pr refs/remotes/pr/head
 
           base_sha="$(git -C "$review" merge-base HEAD "refs/remotes/origin/${base_ref}")"
+
+          # THE GOVERNING PROGRAM. The umbrella repo's SOUL.md and VISION.md are handed to the
+          # reviewer read-only at /umbrella: they are the statement of who the project is and
+          # where it is going, and a review that ignores them is incomplete. Fetched here with
+          # the run's own token, from a pinned ref, so the review reads a fixed text.
+          umbrella="${RUNNER_TEMP}/umbrella"
+          rm -rf "$umbrella" && mkdir -p "$umbrella"
+          for f in SOUL.md VISION.md; do
+            gh api "repos/opencharly/opencharly/contents/${f}?ref=${UMBRELLA_REF}" \
+              -H "Accept: application/vnd.github.raw" > "${umbrella}/${f}"
+            test -s "${umbrella}/${f}"
+          done
+
           echo "review=${review}" >> "$GITHUB_OUTPUT"
           echo "base_sha=${base_sha}" >> "$GITHUB_OUTPUT"
+          echo "umbrella=${umbrella}" >> "$GITHUB_OUTPUT"
 
       - name: Run one review in a throwaway container
         id: review
@@ -143,7 +160,17 @@ jobs:
           GITHUB_ACTOR: ${{ github.actor }}
           OLLAMA_API_KEY: ${{ secrets.AI_REVIEW_API_KEY }}
           REVIEW_DIR: ${{ steps.pr.outputs.review }}
+          UMBRELLA_DIR: ${{ steps.pr.outputs.umbrella }}
           BASE_SHA: ${{ steps.pr.outputs.base_sha }}
+          GOVERNING_PROMPT: |
+            ## Governing program (the opencharly umbrella)
+            The umbrella repository opencharly/opencharly is mounted READ-ONLY at /umbrella.
+            Before judging anything, read /umbrella/SOUL.md and /umbrella/VISION.md IN FULL.
+            They are the governing statement of who this project is and where it is going, and
+            they outrank local convenience.
+            Your report must say explicitly whether the change fits that vision and character.
+            Flag anything that works against them, and name it in the review findings rather
+            than leaving it implicit.
         run: |
           set -euo pipefail
           if [ -z "${OLLAMA_API_KEY:-}" ]; then
@@ -178,6 +205,8 @@ jobs:
             -e GIT_CONFIG_KEY_0=safe.directory \
             -e GIT_CONFIG_VALUE_0=/target \
             -v "${REVIEW_DIR}:/target" \
+            -v "${UMBRELLA_DIR}:/umbrella:ro" \
+            -e CLAWSWEEPER_ADDITIONAL_PROMPT="${GOVERNING_PROMPT}" \
             "${IMAGE}" clawsweeper-review \
             > "${RUNNER_TEMP}/verdict.json" 2> "${RUNNER_TEMP}/review.log"
           rc=$?
@@ -194,6 +223,16 @@ jobs:
             done
           done
           tail -c 4000 "${RUNNER_TEMP}/review.log"
+
+          # THE FULL REVIEW, extracted here so the comment can post it. The engine writes a
+          # complete markdown report inside reports[0].report; its leading YAML frontmatter is
+          # metadata for the engine, not for a reader, so it is stripped.
+          if jq -e . "${RUNNER_TEMP}/verdict.json" >/dev/null 2>&1; then
+            jq -r '.reports[0].report // empty' "${RUNNER_TEMP}/verdict.json" \
+              | awk 'NR==1 && $0=="---"{fm=1;next} fm && $0=="---"{fm=0;next} !fm' \
+              > "${RUNNER_TEMP}/report.md"
+          fi
+          echo "report_chars=$(wc -c < "${RUNNER_TEMP}/report.md" 2>/dev/null || echo 0)"
           echo "review_rc=${rc}" >> "$GITHUB_OUTPUT"
           echo "skipped=false" >> "$GITHUB_OUTPUT"
           # A review that produced nothing, or ran and reported failure, is a RED check — an
@@ -236,8 +275,12 @@ jobs:
             if [ "${SKIPPED:-}" = "true" ]; then
               echo "**Not exercised.** \`AI_REVIEW_API_KEY\` is not in scope for this run, so no"
               echo "review was performed. This is a visible skip, not a pass."
-            elif [ -s "$verdict" ] && jq -e . "$verdict" >/dev/null 2>&1; then
-              echo "**Decision:** \`$(jq -r '.decision // .status // "unknown"' "$verdict")\`"
+            elif [ -s "${RUNNER_TEMP}/report.md" ]; then
+              echo "**Decision:** \`$(jq -r '.reports[0].decision // .status // "unknown"' "$verdict" 2>/dev/null || echo unknown)\`"
+              echo
+              # THE FULL REVIEW. The engine writes a complete markdown report; posting the raw
+              # JSON instead threw almost all of it away.
+              cat "${RUNNER_TEMP}/report.md"
               echo
               echo "<details><summary>Raw JSON verdict</summary>"
               echo
