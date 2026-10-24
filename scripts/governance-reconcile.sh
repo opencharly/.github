@@ -18,6 +18,12 @@ set -euo pipefail
 # phrase NO surface may carry; the gate asserts both. Adding a row is how a rule is
 # protected from drifting; editing a listed surface out of compliance FAILS the gate.
 #
+# A SURFACE MUST ALSO EXIST. A named surface that is ABSENT while its owner repo is
+# materialized in this checkout is a STALE POINTER — the manifest points at a file
+# that moved — and it FAILS. Silently downgrading it to "not checked" is how 19 of
+# 81 rows protected nothing while the gate looked green (opencharly/.github#246). A
+# skip is right ONLY for a surface this checkout does not carry at all.
+#
 # OFFLINE and dependency-free (`bash` + coreutils + `grep`/`sed`). It runs from
 # opencharly/.github's `validator-harness.yml` CI job — there, only the .github-local
 # surfaces exist, so the cross-repo rows SKIP cleanly and visibly (a silent pass is
@@ -55,7 +61,9 @@ done
 # repo prefix (e.g. `dotgithub/.github/workflows/pr-validator.yml`). Such a surface MUST
 # exist — its absence is a structural error, never a skip. Every other path names a
 # sibling-repo surface (the umbrella `AGENTS.md`, `layer-charly-internals/…`,
-# `marketplace/…`) — absent in a standalone .github checkout, so it SKIPS cleanly.
+# `marketplace/…`) — absent in a standalone .github checkout, so it SKIPS cleanly;
+# but in an UMBRELLA checkout, where the sibling repo IS materialized, its absence is
+# a STALE POINTER and FAILS (see owner_present).
 is_local() { case "$1" in dotgithub/*) return 0;; *) return 1;; esac; }
 
 # resolve_path <root> <manifest-path> — the file for a row, or empty if absent.
@@ -87,6 +95,37 @@ resolve_path() {
   printf ''
 }
 
+# owner_present <root> <manifest-path> — is the surface's OWNER REPO materialized in
+# this checkout?
+#
+# A sibling path names a surface inside another repo: `layer-charly-internals/…` is
+# owned by the `layer-charly-internals` repo, `marketplace/…` by `marketplace`. The
+# FIRST path segment is the owner. A TOP-LEVEL file (the umbrella's own AGENTS.md)
+# is owned by the ROOT itself, which is present by construction.
+#
+# "Materialized" means the owner directory exists AND is not empty: an uninitialized
+# submodule path in a light checkout is an empty directory, and an empty directory
+# is NOT a repo this checkout carries. That distinction is what keeps the control
+# below from turning an unmaterialized sibling into a false red.
+#
+# A bare path is judged only where a bare path is RESOLVED at all: the UMBRELLA
+# root, where the .github repo is mounted as `dotgithub/` — the same discriminator
+# resolve_path uses. In a standalone .github checkout a directory that merely shares
+# a sibling repo's name is a coincidence, not a mount, so it must never become a
+# false red.
+owner_present() {
+  local rt="$1" p="$2" owner
+  [[ -d "$rt/dotgithub" ]] || return 1
+  owner="${p%%/*}"
+  if [[ "$owner" == "$p" ]]; then
+    # A top-level file: the root owns it, and the root is present by construction.
+    return 0
+  fi
+  [[ -d "$rt/$owner" ]] || return 1
+  [[ -n "$(ls -A "$rt/$owner" 2>/dev/null)" ]] || return 1
+  return 0
+}
+
 # check_manifest <manifest> <root> — the checker. 0 = reconciled, 1 = drift.
 check_manifest() {
   local mf="$1" rt="$2" fail=0 checked=0 skipped=0 lineno=0
@@ -111,6 +150,16 @@ check_manifest() {
       if is_local "$path"; then
         # A LOCAL surface must exist — its absence is a structural error, never a skip.
         echo "FAIL  $claim/$surface — local surface missing: $path" >&2
+        fail=1
+      elif owner_present "$rt" "$path"; then
+        # A NAMED surface whose OWNER REPO is materialized in this checkout, but
+        # whose FILE is absent: that is a STALE POINTER, not an uncarried surface
+        # (opencharly/.github#246). The manifest exists to answer "is this claim
+        # still stated in the surface it names?" — so a surface that is not there
+        # cannot answer it, and silently downgrading it to "not checked" is how 19
+        # of 81 rows protected nothing while the gate looked green. A skip is
+        # right ONLY for a surface this checkout does not carry at all.
+        echo "FAIL  $claim/$surface — the named surface is ABSENT: $path (its owner repo IS present in this checkout, so this is a stale pointer, not an uncarried surface)" >&2
         fail=1
       else
         echo "skip  $claim/$surface — $path not in this checkout"
@@ -208,6 +257,72 @@ TSV
   printf 'the umbrella rulebook: Agent:. FIRST\n' > "$tmp/umbrella/AGENTS.md"
   check_manifest "$tmp/bare.tsv" "$tmp/umbrella" >/dev/null 2>&1 \
     || { echo "SELF-TEST FAIL: a bare sibling path did not resolve in an umbrella root" >&2; exit 1; }
+  # ---- the STALE-POINTER control (opencharly/.github#246) ---------------------------
+  # A NAMED surface whose OWNER REPO is materialized in this checkout, but whose FILE
+  # is absent, is a STALE POINTER and must FAIL — never a skip. A skip means "this
+  # checkout does not carry that surface"; a materialized owner with a missing file
+  # means the manifest points at a file that moved, and the claim it protects is
+  # silently unasserted. That is how 19 of 81 rows protected nothing while the gate
+  # looked green.
+  mkdir -p "$tmp/stale/dotgithub" "$tmp/stale/owner-repo"
+  printf 'a materialized owner repo, with a different file in it\n' > "$tmp/stale/owner-repo/README.md"
+  cat > "$tmp/stale-pointer.tsv" <<TSV
+# claim	surface	path	kind	pattern
+canon	x	owner-repo/moved.md	require	anything
+TSV
+  out4="$(check_manifest "$tmp/stale-pointer.tsv" "$tmp/stale" 2>&1)" \
+    && { echo "SELF-TEST FAIL: a stale pointer (materialized owner, absent file) was accepted" >&2; exit 1; }
+  grep -q 'stale pointer' <<<"$out4" \
+    || { echo "SELF-TEST FAIL: a stale pointer was not reported as one" >&2; exit 1; }
+  # A surface whose owner repo is NOT in this checkout SKIPS cleanly — the one
+  # legitimate skip, and it stays visible (never a silent pass).
+  mkdir -p "$tmp/unmaterialized/dotgithub" "$tmp/unmaterialized/absent-repo"
+  cat > "$tmp/uncarried.tsv" <<TSV
+# claim	surface	path	kind	pattern
+canon	x	absent-repo/some.md	require	anything
+TSV
+  out5="$(check_manifest "$tmp/uncarried.tsv" "$tmp/unmaterialized" 2>&1)" \
+    || { echo "SELF-TEST FAIL: an uncarried surface was not skipped cleanly" >&2; exit 1; }
+  grep -q 'skipped=1' <<<"$out5" \
+    || { echo "SELF-TEST FAIL: the uncarried-surface skip was not reported" >&2; exit 1; }
+  # An EMPTY owner directory is an uninitialized submodule path, NOT a materialized
+  # repo: it must SKIP, not fail. This is what keeps the control from turning a
+  # light (working-set) checkout into a false red.
+  mkdir -p "$tmp/light/dotgithub" "$tmp/light/empty-owner"
+  cat > "$tmp/light.tsv" <<TSV
+# claim	surface	path	kind	pattern
+canon	x	empty-owner/some.md	require	anything
+TSV
+  out6="$(check_manifest "$tmp/light.tsv" "$tmp/light" 2>&1)" \
+    || { echo "SELF-TEST FAIL: an uninitialized submodule path was reported as a stale pointer" >&2; exit 1; }
+  grep -q 'skipped=1' <<<"$out6" \
+    || { echo "SELF-TEST FAIL: an uninitialized submodule path did not skip" >&2; exit 1; }
+  # A TOP-LEVEL file (the umbrella's own AGENTS.md) is owned by the ROOT, which is
+  # present by construction: absent there, it is a stale pointer and must FAIL.
+  mkdir -p "$tmp/noag/dotgithub"
+  cat > "$tmp/top-level.tsv" <<TSV
+# claim	surface	path	kind	pattern
+canon	x	AGENTS.md	require	anything
+TSV
+  out7="$(check_manifest "$tmp/top-level.tsv" "$tmp/noag" 2>&1)" \
+    && { echo "SELF-TEST FAIL: an absent top-level surface was accepted" >&2; exit 1; }
+  grep -q 'stale pointer' <<<"$out7" \
+    || { echo "SELF-TEST FAIL: an absent top-level surface was not reported as a stale pointer" >&2; exit 1; }
+  # A STANDALONE .github checkout that happens to carry a directory named like a
+  # SIBLING repo must SKIP, not FAIL: a bare path is judged only in an umbrella
+  # root (the `dotgithub/` mount), so a name collision there is a coincidence, not
+  # a stale pointer. Without this the control would turn a coincidental directory
+  # into a false red.
+  mkdir -p "$tmp/coincide/marketplace"
+  printf 'a local directory that merely shares a sibling repo name\n' > "$tmp/coincide/marketplace/README.md"
+  cat > "$tmp/coincide.tsv" <<TSV
+# claim	surface	path	kind	pattern
+canon	x	marketplace/internals/skills/x/SKILL.md	require	anything
+TSV
+  out8="$(check_manifest "$tmp/coincide.tsv" "$tmp/coincide" 2>&1)" \
+    || { echo "SELF-TEST FAIL: a name collision in a standalone checkout was reported as a stale pointer" >&2; exit 1; }
+  grep -q 'skipped=1' <<<"$out8" \
+    || { echo "SELF-TEST FAIL: the name-collision skip was not reported" >&2; exit 1; }
   # The real manifest's header row must be ignored, never reported as a bad kind.
   out2="$(check_manifest "$HERE/governance-claims.tsv" "$tmp" 2>&1)" || true
   grep -q "unknown kind 'kind'" <<<"$out2" && { echo "SELF-TEST FAIL: the manifest header row was parsed as a claim" >&2; exit 1; }
