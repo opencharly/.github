@@ -103,10 +103,22 @@ resolve_path() {
 # FIRST path segment is the owner. A TOP-LEVEL file (the umbrella's own AGENTS.md)
 # is owned by the ROOT itself, which is present by construction.
 #
-# "Materialized" means the owner directory exists AND is not empty: an uninitialized
-# submodule path in a light checkout is an empty directory, and an empty directory
-# is NOT a repo this checkout carries. That distinction is what keeps the control
-# below from turning an unmaterialized sibling into a false red.
+# "Materialized" means the owner path is a DIRECTORY that is not empty. Three
+# filesystem states are NOT a materialized owner, and each of them is one the
+# control below must skip rather than turn into a false red:
+#
+#   - the owner dir does NOT EXIST at all — this checkout does not carry that repo;
+#   - the owner dir is EMPTY — an uninitialized submodule path in a light checkout;
+#   - the owner path is NOT A DIRECTORY — a stray file that happens to share a
+#     sibling repo's name (`ls -A` on a FILE prints the file's name, so without the
+#     directory guard the owner would look materialized and the checker would raise
+#     a false stale-pointer red).
+#
+# The first two share a verdict, and so they share a mechanism — but the third is
+# why the directory guard exists at all, and it is the only one of the three that a
+# test can tell apart: remove the `-d` guard and the absent-owner and empty-owner
+# cases skip either way, while the non-directory case turns red. The self-test
+# asserts that case for exactly that reason.
 #
 # A bare path is judged only where a bare path is RESOLVED at all: the UMBRELLA
 # root, where the .github repo is mounted as `dotgithub/` — the same discriminator
@@ -264,6 +276,22 @@ TSV
   # means the manifest points at a file that moved, and the claim it protects is
   # silently unasserted. That is how 19 of 81 rows protected nothing while the gate
   # looked green.
+  #
+  # The blocks below are TWO kinds of assertion, and they are not interchangeable:
+  #
+  #   FAIL assertions (the control must be loud):
+  #     out4  a stale pointer — a materialized owner with an absent file — FAILS
+  #     out7  an absent TOP-LEVEL surface, owned by the root, FAILS
+  #
+  #   SKIP assertions (the control must not be paid for with a false red):
+  #     out3  a same-named root FILE in a standalone checkout skips  (pre-existing)
+  #     out5  an ABSENT owner dir skips
+  #     out6  an EMPTY owner dir (an uninitialized submodule path) skips
+  #     out8  a name-collision DIRECTORY in a standalone checkout skips
+  #     out9  a NON-DIRECTORY owner path skips — the only one of the skip
+  #           assertions that can tell the directory guard apart from the
+  #           emptiness guard, and therefore the one that fails if either is
+  #           removed. See the note at out9.
   mkdir -p "$tmp/stale/dotgithub" "$tmp/stale/owner-repo"
   printf 'a materialized owner repo, with a different file in it\n' > "$tmp/stale/owner-repo/README.md"
   cat > "$tmp/stale-pointer.tsv" <<TSV
@@ -274,9 +302,12 @@ TSV
     && { echo "SELF-TEST FAIL: a stale pointer (materialized owner, absent file) was accepted" >&2; exit 1; }
   grep -q 'stale pointer' <<<"$out4" \
     || { echo "SELF-TEST FAIL: a stale pointer was not reported as one" >&2; exit 1; }
-  # A surface whose owner repo is NOT in this checkout SKIPS cleanly — the one
-  # legitimate skip, and it stays visible (never a silent pass).
-  mkdir -p "$tmp/unmaterialized/dotgithub" "$tmp/unmaterialized/absent-repo"
+  # A surface whose owner repo is NOT in this checkout at all — the owner directory
+  # does NOT EXIST — SKIPS cleanly: the one legitimate skip, and it stays visible
+  # (never a silent pass). The owner dir is deliberately NOT created here: an
+  # ABSENT owner and an EMPTY owner are different filesystem states, and the
+  # empty one is asserted on its own below.
+  mkdir -p "$tmp/unmaterialized/dotgithub"
   cat > "$tmp/uncarried.tsv" <<TSV
 # claim	surface	path	kind	pattern
 canon	x	absent-repo/some.md	require	anything
@@ -287,7 +318,8 @@ TSV
     || { echo "SELF-TEST FAIL: the uncarried-surface skip was not reported" >&2; exit 1; }
   # An EMPTY owner directory is an uninitialized submodule path, NOT a materialized
   # repo: it must SKIP, not fail. This is what keeps the control from turning a
-  # light (working-set) checkout into a false red.
+  # light (working-set) checkout into a false red. (Distinct from out5 above: here
+  # the owner dir EXISTS and is empty; there it does not exist at all.)
   mkdir -p "$tmp/light/dotgithub" "$tmp/light/empty-owner"
   cat > "$tmp/light.tsv" <<TSV
 # claim	surface	path	kind	pattern
@@ -323,6 +355,24 @@ TSV
     || { echo "SELF-TEST FAIL: a name collision in a standalone checkout was reported as a stale pointer" >&2; exit 1; }
   grep -q 'skipped=1' <<<"$out8" \
     || { echo "SELF-TEST FAIL: the name-collision skip was not reported" >&2; exit 1; }
+  # A NON-DIRECTORY owner path — a stray FILE that happens to share a sibling
+  # repo's name — must SKIP, not FAIL. This is the assertion that DISCRIMINATES
+  # the two owner guards: `ls -A` on a FILE prints the file's name, so with the
+  # `[[ -d "$rt/$owner" ]]` guard removed the owner would look materialized and
+  # the checker would raise a false stale-pointer red. The absent-owner (out5)
+  # and empty-owner (out6) cases cannot do this job — they skip with or without
+  # the guard — so without this assertion the directory guard has no coverage
+  # that can fail (opencharly/.github#253).
+  mkdir -p "$tmp/filed/dotgithub"
+  printf 'a stray file that merely shares a sibling repo name\n' > "$tmp/filed/marketplace"
+  cat > "$tmp/filed-owner.tsv" <<TSV
+# claim	surface	path	kind	pattern
+canon	x	marketplace/internals/skills/x/SKILL.md	require	anything
+TSV
+  out9="$(check_manifest "$tmp/filed-owner.tsv" "$tmp/filed" 2>&1)" \
+    || { echo "SELF-TEST FAIL: a non-directory owner path was reported as a stale pointer" >&2; exit 1; }
+  grep -q 'skipped=1' <<<"$out9" \
+    || { echo "SELF-TEST FAIL: the non-directory-owner skip was not reported" >&2; exit 1; }
   # The real manifest's header row must be ignored, never reported as a bad kind.
   out2="$(check_manifest "$HERE/governance-claims.tsv" "$tmp" 2>&1)" || true
   grep -q "unknown kind 'kind'" <<<"$out2" && { echo "SELF-TEST FAIL: the manifest header row was parsed as a claim" >&2; exit 1; }
