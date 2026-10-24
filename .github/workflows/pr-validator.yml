@@ -1430,6 +1430,40 @@ jobs:
           #   1 NOT-PASSED a check on the head did not pass — a FINDING about the change.
           #   2 IN-FLIGHT  a check is still RUNNING — NOT a finding: re-run THIS job.
           #   3 UNREAD     the head could not be read — refusing to arm on an unread head.
+          #   4 EMPTY      the head carries NO check run at all — refusing to arm on an
+          #                 unjudgeable head (opencharly/.github#248).
+          #
+          # CLASS 4 — THE SET MUST NOT BE EMPTY. The snapshot's guard is on the BODY
+          # (`[[ -n "$body" ]]`): an empty body is an UNREAD head. But a body of
+          # `{"total_count":0,"check_runs":[]}` is NOT empty — it passes that guard, the
+          # filter yields `{pending:[],bad:[],all:[],total:0}`, every count reads 0, and
+          # the step fell through to
+          #   "all 0 check run(s) on this head passed — safe to arm auto-merge"
+          # with exit 0. The gate was then satisfied by observing NOTHING — the same
+          # fail-open shape #247 removed for the empty body, one level down.
+          #
+          # AND THE EMPTY SET IS NOT A LEGITIMATE STATE FOR THIS JOB. `arm` has
+          # `needs: [validate, lint]`, so the `validate` job — the REQUIRED context —
+          # has COMPLETED by the time this step reads the head, and it left a check run
+          # on that head. The `lint` job is unconditional today and left one too. Only
+          # THIS job's own run is excluded. So the non-self set is never empty by
+          # construction: a total of 0 means the head's check runs are not visible here
+          # (a wrong HEAD_SHA, an API anomaly, or a lookup that does not cover them) —
+          # NOT that the head is green. MEASURED over 48 merged PRs in 6 repos: the
+          # non-self set was never empty (minimum 2), with the required
+          # `validate / validate` present 48/48. Unobserved is not unreachable, so the
+          # gate refuses.
+          ntotal="$(jq -r '.total' <<<"$snap")"
+          if [ "$ntotal" -eq 0 ]; then
+            echo "::error title=The head carries no check run to judge::the API answered for ${HEAD_SHA} with ZERO check runs (this gate excluded), so there is nothing to judge. Refusing to arm auto-merge on an unjudgeable head."
+            echo "::error::NOT a finding about the change: this gate could not OBSERVE the head's checks. Auto-merge is NOT armed."
+            echo "::error::This job runs only after 'validate' completed, so the required context's check run is on the head. An empty set means that run is not VISIBLE here — a wrong head SHA, an API anomaly, or a lookup that does not cover it — not that the head is green."
+            echo "::error::Re-run ONLY this job. It has no dependent jobs, so the review is NOT re-run and the verdict cannot change:"
+            echo "::error::  gh run view ${GITHUB_RUN_ID} --repo ${GITHUB_REPOSITORY} --json jobs --jq '.jobs[] | select(.name==\"arm\") | .databaseId'"
+            echo "::error::  gh run rerun --job <that databaseId> --repo ${GITHUB_REPOSITORY}"
+            exit 4
+          fi
+
           nbad="$(jq -r '.bad | length' <<<"$snap")"
           if [ "$nbad" -ne 0 ]; then
             while IFS= read -r line; do echo "::error title=A check on this head did not pass::${line}"; done < <(jq -r '.bad[]' <<<"$snap")
