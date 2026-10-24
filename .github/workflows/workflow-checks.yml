@@ -29,6 +29,13 @@ jobs:
         run: bash scripts/retire-per-repo-candy-gates_test.sh
       - name: Run the version-strip cutover script test (offline, mock gh)
         run: bash scripts/strip-config-version_test.sh
+      # The head-settle gate lives INSIDE the reusable workflow and runs in the
+      # CALLER's repository, so it cannot be a script here: the test EXTRACTS the
+      # shipped step's `run:` text and runs THAT against fixtures. It is the only
+      # coverage the settle logic has — without it, a regression in the merge
+      # guardrail is found in the org instead of here.
+      - name: Run the head-settle gate test (offline, extracted step text)
+        run: bash scripts/head-settle_test.sh
       # The reconcile script's two dimensions and its repo allow-list. This test existed but
       # nothing ran it: a script whose own coverage is never executed is a script whose
       # regressions are found in the org instead of here.
