@@ -1307,12 +1307,16 @@ jobs:
       - name: "Head check-runs (wait for the head to settle, then fail on any check that did not pass)"
         id: head-checks
         # Its OWN wall clock: the wait below is bounded, this is the backstop should the
-        # API hang rather than answer.
+        # API hang rather than answer. The wait's BUDGET is DERIVED from this backstop
+        # (below) — and scripts/head-settle_test.sh proves the two agree, so a second,
+        # independently hard-coded budget can never drift away from it again.
         timeout-minutes: 70
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ needs.validate.outputs.head_sha }}
-          WAIT_BUDGET_SECONDS: '3600'
+          # The backstop in SECONDS — the same 70 minutes as timeout-minutes above. The
+          # wait's budget is DERIVED from it, never a second literal.
+          SETTLE_BACKSTOP_SECONDS: '4200'
         run: |
           api="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}"
           auth=(-H "Authorization: Bearer ${GH_TOKEN}" \
@@ -1350,9 +1354,30 @@ jobs:
           # The 100-run page cap is the only residual limit; a head would need >100 attempts
           # across ALL of its workflows to truncate, and per-name the list is newest-first.
           snapshot() {
-            curl -fsS "${auth[@]}" \
-              "${api}/commits/${HEAD_SHA}/check-runs?per_page=100&filter=all" \
-            | jq --arg selfctx "$self_ctx" -c '
+            # The FETCH is checked, not just the parse (opencharly/.github#229). It used
+            # to be `curl … | jq …`, and in a pipeline the exit status is JQ's: a failed
+            # API read produced an empty body, and jq reads a blank line as NO INPUT —
+            # so it printed nothing and exited 0. The snapshot was therefore EMPTY, not
+            # missing, and every count read from it was the empty STRING: the
+            # comparisons `[: : integer expected` failed with status 2, every `if` that
+            # read them was false, the poll ran out its budget, and the classification
+            # fell through to its last line. MEASURED on the pre-#229 text: an
+            # unreadable head ended with
+            #   "all  check run(s) on this head passed — safe to arm auto-merge"
+            # (the count is EMPTY — the snapshot carried no checks at all) and exit 0
+            # — so the NEXT step, "Enable auto-merge", RAN, and auto-merge
+            # was enabled on a head whose checks this gate had never read. The
+            # "refusing to arm auto-merge on an unread head" guard was unreachable.
+            # The jq filter below is unchanged, byte for byte; only the fetch around it
+            # is now honest about failure — and an unread head is its own class.
+            local body
+            if ! body="$(curl -fsS "${auth[@]}" \
+              "${api}/commits/${HEAD_SHA}/check-runs?per_page=100&filter=all")"; then
+              return 1
+            fi
+            # An empty body is an unread head, not an empty check set.
+            [[ -n "$body" ]] || return 1
+            printf '%s' "$body" | jq --arg selfctx "$self_ctx" -c '
                 [ .check_runs[] | select(.name != $selfctx) ]
                 | group_by(.name + "\u0000" + (.app.slug // ""))
                 | map(max_by(.id))
@@ -1365,33 +1390,60 @@ jobs:
                     total:   length }'
           }
 
-          deadline=$(( $(date +%s) + WAIT_BUDGET_SECONDS ))
+          # THE BUDGET IS DERIVED, NEVER A SECOND LITERAL (opencharly/.github#229).
+          # The wait is bounded by the step's OWN backstop minus the margin the final
+          # report needs, so the wait can never outlast the step that waits, and the step
+          # can always finish its report and CLASSIFY the head before the runner takes it
+          # away. It used to be an INDEPENDENT literal (3600s) under this step's own
+          # backstop (4200s): two unrelated numbers, and nothing asserted how they
+          # related. The shape that #236 replaced made the gap OBSERVABLE — a 600s
+          # literal against an 840s backstop, which truncated a real 10-minute sibling
+          # and exited 1, the same status as a failed check
+          # (opencharly/marketplace#540, 2026-10-23).
+          backstop="${SETTLE_BACKSTOP_SECONDS:-4200}"
+          margin="${SETTLE_REPORT_MARGIN_SECONDS:-300}"
+          budget=$(( backstop - margin ))
+          interval="${SETTLE_POLL_INTERVAL_SECONDS:-15}"
+          deadline=$(( $(date +%s) + budget ))
+
           while :; do
             if ! snap="$(snapshot)"; then
-              echo "::error::could not read the check runs for ${HEAD_SHA} — refusing to arm auto-merge on an unread head"
-              exit 1
+              echo "::error title=The head could not be read::could not read the check runs for ${HEAD_SHA} — refusing to arm auto-merge on an unread head"
+              exit 3
             fi
             npending="$(jq -r '.pending | length' <<<"$snap")"
             if [ "$npending" -eq 0 ]; then break; fi
             if [ "$(date +%s)" -ge "$deadline" ]; then break; fi
             echo "waiting on ${npending} in-flight check(s): $(jq -r '.pending | join(", ")' <<<"$snap")"
-            sleep 15
+            sleep "$interval"
           done
-
           echo "check runs on ${HEAD_SHA} in ${GITHUB_REPOSITORY} (this gate excluded):"
           jq -r '.all[]' <<<"$snap"
 
+          # THE CLASSES, AND THE EXIT CODE IS THE CLASS (opencharly/.github#229). "a check
+          # did not pass" and "a check is still RUNNING" are DIFFERENT facts, and they used
+          # to share ONE exit code and ONE remedy — so a merely-SLOW sibling was reported
+          # as a failure of the change, and the remedy named a re-run of the WHOLE
+          # validator: a FRESH REVIEW, which can even change the verdict
+          # (opencharly/.github#186). They are separate classes with separate remedies now:
+          #   0 GREEN      every check on the head passed — arm it.
+          #   1 NOT-PASSED a check on the head did not pass — a FINDING about the change.
+          #   2 IN-FLIGHT  a check is still RUNNING — NOT a finding: re-run THIS job.
+          #   3 UNREAD     the head could not be read — refusing to arm on an unread head.
           nbad="$(jq -r '.bad | length' <<<"$snap")"
           if [ "$nbad" -ne 0 ]; then
-            while IFS= read -r line; do echo "::error::a check on this head did not pass — ${line}"; done < <(jq -r '.bad[]' <<<"$snap")
-            echo "::error::${nbad} check(s) on this head did not pass. Auto-merge is NOT armed — fix them and push."
+            while IFS= read -r line; do echo "::error title=A check on this head did not pass::${line}"; done < <(jq -r '.bad[]' <<<"$snap")
+            echo "::error title=A check on this head did not pass::${nbad} check(s) on this head did not pass. Auto-merge is NOT armed — fix them and push."
             exit 1
           fi
 
           if [ "$npending" -ne 0 ]; then
-            echo "::error::could not confirm this head is green: still in flight after ${WAIT_BUDGET_SECONDS}s — $(jq -r '.pending | join(", ")' <<<"$snap")"
-            echo "::error::re-run this check once they finish (a push, or a REST re-run of this workflow run, re-evaluates it)."
-            exit 1
+            echo "::error title=Still in flight — this head could not be confirmed green::still in flight after ${budget}s — $(jq -r '.pending | join(", ")' <<<"$snap")"
+            echo "::error::NOT a finding about the change: the check is RUNNING, not failing. This is the workflow's own INCONCLUSIVE class."
+            echo "::error::Re-run ONLY this job. It has no dependent jobs, so the review is NOT re-run and the verdict cannot change (GitHub REST: 'Re-run a job and its dependent jobs'):"
+            echo "::error::  gh run view ${GITHUB_RUN_ID} --repo ${GITHUB_REPOSITORY} --json jobs --jq '.jobs[] | select(.name==\"arm\") | .databaseId'"
+            echo "::error::  gh run rerun --job <that databaseId> --repo ${GITHUB_REPOSITORY}"
+            exit 2
           fi
 
           echo "all $(jq -r '.total' <<<"$snap") check run(s) on this head passed — safe to arm auto-merge"
