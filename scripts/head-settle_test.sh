@@ -16,6 +16,8 @@
 #   1 NOT-PASSED  a check on the head did not pass — a FINDING about the change.
 #   2 IN-FLIGHT   a check is still RUNNING — NOT a finding: re-run only this job.
 #   3 UNREAD      the head could not be read — refuse to arm.
+#   4 EMPTY       the head carries NO check run at all — refuse to arm
+#                 (opencharly/.github#248).
 #
 # The pre-#229 shape had three defects, and this test proves each one against a
 # restored copy of that shape:
@@ -27,6 +29,14 @@
 #     failed API read produced an empty snapshot, every count read from it was the
 #     empty STRING, and the step fell through to "safe to arm auto-merge" with exit
 #     0 — arming auto-merge on a head whose checks it had never read.
+#
+# The pre-#248 shape had ONE more defect, and this test proves it against a
+# restored copy of that shape too:
+#   * the snapshot's guard was on the BODY, not on the SET: a body of
+#     `{"total_count":0,"check_runs":[]}` is not empty, so it passed the guard, the
+#     filter yielded `{pending:[],bad:[],all:[],total:0}`, every count read 0, and
+#     the step fell through to "all 0 check run(s) on this head passed — safe to arm
+#     auto-merge" with exit 0 — the gate satisfied by observing NOTHING.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -86,7 +96,35 @@ awk '
 [[ -s "$STATE/step.yaml" ]] \
   || { echo "FAIL: the head-settle step's YAML block was not found in $WF" >&2; exit 1; }
 
-# ---- the PRE-#229 SHAPE, restored in a copy of the shipped text ---------------------
+# ---- the PRE-#248 SHAPE: the shipped text with the class-4 guard removed ------------
+# The NEGATIVE CONTROL for #248, and it is ISOLATED: it is the shipped text with
+# EXACTLY ONE block removed — the guard on the SET. If the shipped text ever stops
+# carrying that guard, this control stops being the pre-#248 shape and the assertions
+# below fail, so the control cannot silently rot into a tautology.
+python3 - "$STATE/step.sh" "$STATE/step-248.sh" <<'PY'
+import sys
+
+lines = open(sys.argv[1], encoding="utf-8").read().split("\n")
+out, i, removed = [], 0, 0
+while i < len(lines):
+    if lines[i].strip().startswith("#   4 EMPTY"):
+        # The whole class-4 span: the class-table row, the comment that explains it,
+        # the `ntotal=…` read, the `if … ; then`, its annotations, `exit 4`, and the
+        # closing `fi`. The block holds no nested `if`, so the first `fi` closes it.
+        j = i
+        while j < len(lines) and lines[j].strip() != "fi":
+            j += 1
+        assert j < len(lines), "the class-4 block is not closed by an `fi` — the shipped shape moved"
+        removed += 1
+        i = j + 1
+        continue
+    out.append(lines[i])
+    i += 1
+assert removed == 1, f"the control removed {removed} class-4 block(s) — the shipped shape moved"
+open(sys.argv[2], "w", encoding="utf-8").write("\n".join(out))
+PY
+
+# ---- the PRE-#229 SHAPE, restored in a copy of the pre-#248 text --------------------
 # This is the NEGATIVE CONTROL: the coverage must be able to FAIL. Restoring the old
 # shape in the shipped text keeps the control stable — it does not depend on what
 # `main` looks like tomorrow, which is what a `git show origin/main:…` control would.
@@ -95,7 +133,7 @@ awk '
 #   * the budget: an INDEPENDENT literal (WAIT_BUDGET_SECONDS), not derived;
 #   * the classes: "still in flight" merged back into "a check did not pass" (exit 1),
 #     with the old whole-validator remedy.
-python3 - "$STATE/step.sh" "$STATE/step-legacy.sh" <<'PY'
+python3 - "$STATE/step-248.sh" "$STATE/step-legacy.sh" <<'PY'
 import sys
 
 src = open(sys.argv[1], encoding="utf-8").read()
@@ -247,9 +285,10 @@ MOCK
 chmod +x "$STATE/bin/curl" "$STATE/bin/date" "$STATE/bin/sleep"
 
 # ---- the fixtures ------------------------------------------------------------------
-# Every fixture carries the gate's own check ("validate / arm"), which the gate
-# EXCLUDES: it is in flight for the whole poll, so counting it would make every PR
-# wait out the budget.
+# Every fixture but one carries the gate's own check ("validate / arm"), which the
+# gate EXCLUDES: it is in flight for the whole poll, so counting it would make every
+# PR wait out the budget. The exception is fx-empty.json, which carries NO check at
+# all — that is the point of it.
 cat >"$STATE/fx-green.json" <<'JSON'
 {"check_runs":[
  {"id":101,"name":"validate / validate","status":"completed","conclusion":"success","app":{"slug":"github-actions"}},
@@ -284,6 +323,15 @@ JSON
 printf '%s\n' "$STATE/fx-green.json" >"$STATE/seq-green.txt"
 printf '%s\n' "$STATE/fx-bad.json" >"$STATE/seq-bad.txt"
 printf '%s\n' "$STATE/fx-pending.json" >"$STATE/seq-pending.txt"
+# The EMPTY SET (opencharly/.github#248). The body is NOT empty — it is a well-formed
+# answer from the API that reports ZERO check runs — so it passes the snapshot's
+# body-guard, and the filter yields {pending:[], bad:[], all:[], total:0}. Every
+# count reads 0, so before #248 the step fell through to "all 0 check run(s) on this
+# head passed — safe to arm auto-merge" with exit 0.
+cat >"$STATE/fx-empty.json" <<'JSON'
+{"total_count":0,"check_runs":[]}
+JSON
+printf '%s\n' "$STATE/fx-empty.json" >"$STATE/seq-empty.txt"
 # The slow sibling: 37 polls in flight, then it settles. Each poll advances the mock
 # clock by 100 s, so it settles at t=3700 s — LATER than the pre-#229 budget
 # (3600 s) and INSIDE the derived one (4200 - 300 = 3900 s). The gap between the
@@ -441,5 +489,62 @@ grep -q 're-evaluates it' "$STATE/c.out" \
   && { echo "FAIL: (G2) the shipped in-flight class must NOT name a whole-validator re-run" >&2; exit 1; }
 echo "ok  (G2) the remedy       -> the pre-#229 shape names a whole-validator re-run; the shipped one names this job only"
 echo "ok  (G3) the shipped text -> exit 3 (an unread head NEVER reaches the arming line)"
+
+# ---- (H) THE EMPTY SET: the gate must not be satisfied by observing NOTHING -------
+# (opencharly/.github#248). The snapshot's guard is on the BODY, so a well-formed
+# answer that reports ZERO check runs passes it; the filter yields an all-zero
+# snapshot; every count reads 0; and the step falls through to "all 0 check run(s) on
+# this head passed — safe to arm auto-merge" with exit 0. The gate was then satisfied
+# by observing nothing — the same fail-open shape #247 removed for the empty body,
+# one level down.
+#
+# And the empty set is not a legitimate state for THIS job: `arm` has
+# `needs: [validate, lint]`, so the `validate` job — the required context — has
+# completed by the time this step reads the head, and it left a check run on it.
+# Only this job's own run is excluded. A total of 0 means the head's check runs are
+# not VISIBLE here — not that the head is green.
+rc=0
+run_settle "$STATE/h1.out" "$STATE/step.sh" 4200 300 "$STATE/seq-empty.txt" 100 || rc=$?
+[[ "$rc" == 4 ]] \
+  || { echo "FAIL: (H1) an empty check set must exit 4, not 0 (got $rc)" >&2; cat "$STATE/h1.out" >&2; exit 1; }
+grep -q 'safe to arm auto-merge' "$STATE/h1.out" \
+  && { echo "FAIL: (H1) an empty check set must NEVER reach the arming line" >&2; cat "$STATE/h1.out" >&2; exit 1; }
+grep -q 'no check run to judge' "$STATE/h1.out" \
+  || { echo "FAIL: (H1) the empty set must be refused by name" >&2; cat "$STATE/h1.out" >&2; exit 1; }
+grep -q 'NOT a finding about the change' "$STATE/h1.out" \
+  || { echo "FAIL: (H1) the empty set is NOT a finding about the change — it must say so" >&2; exit 1; }
+echo "ok  (H1) EMPTY           -> exit 4  ($(grep -m1 'no check run to judge' "$STATE/h1.out" | tr -s ' '))"
+
+# (H2) THE NEGATIVE CONTROL for #248: the shipped text with EXACTLY the class-4
+# block removed — the pre-#248 shape — on the SAME empty set reaches the arming line
+# with exit 0. This is the hole, isolated to this one change: if the guard is removed
+# again, the control proves the coverage can fire.
+rc=0
+run_settle "$STATE/h2.out" "$STATE/step-248.sh" 4200 300 "$STATE/seq-empty.txt" 100 || rc=$?
+[[ "$rc" == 0 ]] \
+  || { echo "FAIL: (H2) the pre-#248 shape must exit 0 on an empty check set (got $rc) — the control is stale" >&2; cat "$STATE/h2.out" >&2; exit 1; }
+grep -q 'safe to arm auto-merge' "$STATE/h2.out" \
+  || { echo "FAIL: (H2) the pre-#248 shape must reach the arming line on an empty check set — the control is stale" >&2; cat "$STATE/h2.out" >&2; exit 1; }
+grep -q 'all 0 check run(s) on this head passed' "$STATE/h2.out" \
+  || { echo "FAIL: (H2) the pre-#248 shape must report ZERO observed checks as the arming reason — the control is stale" >&2; cat "$STATE/h2.out" >&2; exit 1; }
+echo "ok  (H2) the pre-#248 shape -> exit 0  (an EMPTY set reached 'safe to arm auto-merge' — the hole)"
+
+# (H3) the older pre-#229 shape has the same hole, for the same reason: its counts
+# also read 0 on an empty set. Asserted so the defect's history is on the record.
+rc=0
+run_settle "$STATE/h3.out" "$STATE/step-legacy.sh" 4200 300 "$STATE/seq-empty.txt" 100 || rc=$?
+[[ "$rc" == 0 ]] \
+  || { echo "FAIL: (H3) the pre-#229 shape must exit 0 on an empty check set (got $rc) — the control is stale" >&2; cat "$STATE/h3.out" >&2; exit 1; }
+grep -q 'safe to arm auto-merge' "$STATE/h3.out" \
+  || { echo "FAIL: (H3) the pre-#229 shape must reach the arming line on an empty check set — the control is stale" >&2; exit 1; }
+echo "ok  (H3) the pre-#229 shape -> exit 0  (the same hole, one shape older)"
+
+# The class table in the shipped text must NAME the class it implements, so the
+# exit code and its meaning cannot drift apart.
+grep -q '4 EMPTY' "$STATE/step.sh" \
+  || { echo "FAIL: (H4) the shipped class table must name the EMPTY class" >&2; exit 1; }
+grep -q '4 EMPTY' "$STATE/step-248.sh" \
+  && { echo "FAIL: (H4) the pre-#248 control must NOT carry the EMPTY class" >&2; exit 1; }
+echo "ok  (H4) the class table  -> 4 EMPTY is named in the shipped text, and absent from the pre-#248 control"
 
 echo "head-settle_test: all assertions passed"
