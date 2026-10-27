@@ -65,6 +65,15 @@ auto_close_threshold	validator workflow	dotgithub/.github/workflows/pr-validator
 auto_close_infra_excluded	validator workflow	dotgithub/.github/workflows/pr-validator.yml	require	excluded as clear .*infrastructure
 candy_gate_single_pin	org-wide candy validate reusable	dotgithub/.github/workflows/candy-validate.yml	require	vars.CHARLY_VERSION
 candy_gate_no_hand_pin	org-wide candy validate reusable	dotgithub/.github/workflows/candy-validate.yml	forbid	--branch v20
+# The candy gate's ACTIVATION PRECONDITION must name the LIVE condition. The retired
+# `version:` stamp is DISCHARGED (opencharly/.github#162 closed it), so a precondition that
+# rests on it is a stale claim: the 'require' rows assert the LIVE condition (the
+# routing-only `skill:` shape) is NAMED, and the 'forbid' rows assert the discharged one is
+# no longer cited as the reason. Both surfaces carry the rule, so both are asserted.
+candy_gate_activation_names_routing_shape	org-wide candy validate reusable	dotgithub/.github/workflows/candy-validate.yml	require	routing-only
+candy_gate_activation_names_routing_shape	dotgithub README	dotgithub/README.md	require	routing-only
+candy_gate_activation_not_on_the_discharged_stamp	org-wide candy validate reusable	dotgithub/.github/workflows/candy-validate.yml	forbid	still[^a-zA-Z]*requires[^a-zA-Z]*the[^a-zA-Z]*retired
+candy_gate_activation_not_on_the_discharged_stamp	dotgithub README	dotgithub/README.md	forbid	still[^a-zA-Z]*requires[^a-zA-Z]*the[^a-zA-Z]*retired
 auto_close_threshold	umbrella AGENTS.md	AGENTS.md	require	AI_REVIEW_AUTO_CLOSE_AFTER., default 5
 auto_close_threshold	git-workflow skill source	.agents/skills/git-workflow/references/multi-repo-coordination.md	require	AI_REVIEW_AUTO_CLOSE_AFTER., (effective )?default 5
 # charly#796: the org's ONE required context is `validate / validate`, so a repo's own `ci`
