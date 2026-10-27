@@ -24,6 +24,15 @@ set -euo pipefail
 # 81 rows protected nothing while the gate looked green (opencharly/.github#246). A
 # skip is right ONLY for a surface this checkout does not carry at all.
 #
+# AND EVERY SURFACE MUST BE ANCHORED. A path that no 'require' row pins is UNANCHORED:
+# the only rows that name it are 'forbid' rows, and a forbid row asserts that a phrase
+# is ABSENT — vacuously true of ANY file at that path, including a file that holds no
+# rule at all. So the table could not say "this path IS the surface": the day the
+# surface moved, its forbid row would keep passing against whatever sat at the path,
+# and it could never go red (opencharly/.github#250). The control is about the TABLE,
+# not about this checkout: an unanchored path FAILS in every root, including one that
+# does not carry the surface at all.
+#
 # OFFLINE and dependency-free (`bash` + coreutils + `grep`/`sed`). It runs from
 # opencharly/.github's `validator-harness.yml` CI job — there, only the .github-local
 # surfaces exist, so the cross-repo rows SKIP cleanly and visibly (a silent pass is
@@ -60,10 +69,10 @@ done
 # A path is LOCAL to the .github repo when the manifest names it with the `dotgithub/`
 # repo prefix (e.g. `dotgithub/.github/workflows/pr-validator.yml`). Such a surface MUST
 # exist — its absence is a structural error, never a skip. Every other path names a
-# sibling-repo surface (the umbrella `AGENTS.md`, `layer-charly-internals/…`,
-# `marketplace/…`) — absent in a standalone .github checkout, so it SKIPS cleanly;
-# but in an UMBRELLA checkout, where the sibling repo IS materialized, its absence is
-# a STALE POINTER and FAILS (see owner_present).
+# surface that lives elsewhere in the UMBRELLA (the umbrella's own `AGENTS.md` and
+# `.agents/skills/…` trees, the `marketplace/…` corpus) — absent in a standalone .github
+# checkout, so it SKIPS cleanly; but in an UMBRELLA checkout, where the owner IS
+# materialized, its absence is a STALE POINTER and FAILS (see owner_present).
 is_local() { case "$1" in dotgithub/*) return 0;; *) return 1;; esac; }
 
 # resolve_path <root> <manifest-path> — the file for a row, or empty if absent.
@@ -72,8 +81,8 @@ is_local() { case "$1" in dotgithub/*) return 0;; *) return 1;; esac; }
 # <root>/dotgithub/<p> in the umbrella and at <root>/<p> in a standalone .github
 # checkout (where the repo IS the root).
 #
-# Every other (bare) path names a SIBLING-repo surface relative to the UMBRELLA
-# root (`AGENTS.md`, `layer-charly-internals/…`, `marketplace/…`). Those resolve
+# Every other (bare) path names a surface relative to the UMBRELLA root
+# (`AGENTS.md`, `.agents/skills/…`, `marketplace/…`). Those resolve
 # ONLY when <root> is the umbrella — i.e. it mounts the .github repo as
 # `dotgithub/`. A standalone .github checkout is NOT the umbrella, so a bare path
 # SKIPS cleanly EVEN WHEN a file of the same name exists at the repo root (e.g. the
@@ -98,10 +107,10 @@ resolve_path() {
 # owner_present <root> <manifest-path> — is the surface's OWNER REPO materialized in
 # this checkout?
 #
-# A sibling path names a surface inside another repo: `layer-charly-internals/…` is
-# owned by the `layer-charly-internals` repo, `marketplace/…` by `marketplace`. The
-# FIRST path segment is the owner. A TOP-LEVEL file (the umbrella's own AGENTS.md)
-# is owned by the ROOT itself, which is present by construction.
+# A bare path names a surface that lives elsewhere in the UMBRELLA: `marketplace/…` is
+# owned by the `marketplace` repo, `.agents/skills/…` by the umbrella's own `.agents`
+# tree. The FIRST path segment is the owner. A TOP-LEVEL file (the umbrella's own
+# AGENTS.md) is owned by the ROOT itself, which is present by construction.
 #
 # "Materialized" means the owner path is a DIRECTORY that is not empty. Three
 # filesystem states are NOT a materialized owner, and each of them is one the
@@ -138,11 +147,43 @@ owner_present() {
   return 0
 }
 
+# unanchored_surfaces <manifest> — the paths the manifest names that NO 'require' row
+# pins, one line each: claim<TAB>surface<TAB>path.
+#
+# The claim and the surface are the FIRST row that names the path, so the finding names
+# the row a reader would edit. The path is the whole verdict: a 'forbid' row alone
+# asserts that a phrase is ABSENT, which is vacuously true of any file at that path.
+unanchored_surfaces() {
+  awk -F'\t' '
+    /^#/ { next }
+    NF < 5 { next }
+    $1 == "claim" { next }
+    {
+      if (!($3 in first)) first[$3] = $1 "\t" $2
+      if ($4 == "require") anchored[$3] = 1
+    }
+    END {
+      for (p in first) if (!(p in anchored)) print first[p] "\t" p
+    }' "$1" | sort
+}
+
 # check_manifest <manifest> <root> — the checker. 0 = reconciled, 1 = drift.
 check_manifest() {
   local mf="$1" rt="$2" fail=0 checked=0 skipped=0 lineno=0
   [[ -f "$mf" ]] || { echo "FATAL: manifest not found: $mf" >&2; return 1; }
   local claim surface path kind pattern target
+  # The ANCHOR control (opencharly/.github#250). A path that no 'require' row pins is
+  # UNANCHORED: the only rows that name it are 'forbid' rows, whose assertion ("this
+  # phrase is ABSENT") is vacuously true of ANY file at that path — including a file
+  # that holds no rule at all. So the table could not say "this path IS the surface",
+  # and the row could never go red. The verdict is about the TABLE, not about this
+  # checkout, so it is reported before the rows and it FAILS in every root.
+  local uclaim usurface upath
+  while IFS=$'\t' read -r uclaim usurface upath; do
+    [[ -n "${upath:-}" ]] || continue
+    echo "FAIL  $uclaim/$usurface — UNANCHORED surface: $upath is named by a 'forbid' row only, so nothing pins that the path IS the surface (opencharly/.github#250)" >&2
+    fail=1
+  done < <(unanchored_surfaces "$mf")
   # TSV fields: claim, surface, path, kind (require|forbid), pattern (an ERE, may have spaces).
   while IFS=$'\t' read -r claim surface path kind pattern || [[ -n "${claim:-}" ]]; do
     lineno=$((lineno+1))
@@ -216,6 +257,7 @@ if [[ "$self_test" == 1 ]]; then
   cat > "$tmp/pass.tsv" <<TSV
 # claim	surface	path	kind	pattern
 canon	a	dotgithub/one.txt	require	canonical phrase
+modern	b	sibling/two.txt	require	modern phrase
 legacy	b	sibling/two.txt	forbid	old legacy phrase
 TSV
   cat > "$tmp/fail-absent.tsv" <<TSV
@@ -224,6 +266,7 @@ canon	a	dotgithub/one.txt	require	a phrase that is ABSENT
 TSV
   cat > "$tmp/fail-forbid.tsv" <<TSV
 # claim	surface	path	kind	pattern
+modern	b	sibling/two.txt	require	modern phrase is here
 legacy	b	sibling/two.txt	forbid	modern phrase
 TSV
   cat > "$tmp/fail-local-missing.tsv" <<TSV
@@ -234,6 +277,7 @@ TSV
   # A sibling-only manifest against a root WITHOUT the sibling must SKIP, not fail.
   cat > "$tmp/skip.tsv" <<TSV
 # claim	surface	path	kind	pattern
+modern	b	sibling/two.txt	require	modern phrase
 legacy	b	sibling/two.txt	forbid	legacy phrase
 TSV
   check_manifest "$tmp/pass.tsv" "$tmp" >/dev/null \
@@ -251,7 +295,7 @@ TSV
     || { echo "SELF-TEST FAIL: a dotgithub-prefixed path did not resolve in its own checkout" >&2; exit 1; }
   out="$(check_manifest "$tmp/skip.tsv" "$tmp/dotgithub" 2>&1)" \
     || { echo "SELF-TEST FAIL: an absent sibling surface was not skipped cleanly" >&2; exit 1; }
-  grep -q 'skipped=1' <<<"$out" || { echo "SELF-TEST FAIL: skip not reported (silent pass)" >&2; exit 1; }
+  grep -q 'skipped=2' <<<"$out" || { echo "SELF-TEST FAIL: skip not reported (silent pass)" >&2; exit 1; }
   # A bare (sibling) path must SKIP in a standalone .github checkout EVEN WHEN a file of the
   # same name exists at the repo root — the repo's own AGENTS.md signpost is not the umbrella
   # rulebook. Only a root that MOUNTS the .github repo as `dotgithub/` is the umbrella.
@@ -373,6 +417,34 @@ TSV
     || { echo "SELF-TEST FAIL: a non-directory owner path was reported as a stale pointer" >&2; exit 1; }
   grep -q 'skipped=1' <<<"$out9" \
     || { echo "SELF-TEST FAIL: the non-directory-owner skip was not reported" >&2; exit 1; }
+  # ---- the ANCHOR control (opencharly/.github#250) ----------------------------------
+  # A path that NO 'require' row pins is UNANCHORED: the only rows that name it are
+  # 'forbid' rows, and a forbid row asserts that a phrase is ABSENT — vacuously true of
+  # ANY file at that path, including a file that holds no rule at all. So the table could
+  # not say "this path IS the surface", and the row could never go red.
+  #
+  # The control is about the TABLE, not about the checkout, so the verdict does not
+  # depend on whether the surface is carried here: out11 asserts it in a checkout that
+  # does not carry the surface at all.
+  cat > "$tmp/unanchored.tsv" <<TSV
+# claim	surface	path	kind	pattern
+canon	a	dotgithub/one.txt	require	canonical phrase
+legacy	b	sibling/two.txt	forbid	old legacy phrase
+TSV
+  out10="$(check_manifest "$tmp/unanchored.tsv" "$tmp" 2>&1)" \
+    && { echo "SELF-TEST FAIL: an unanchored surface was accepted" >&2; exit 1; }
+  grep -q 'UNANCHORED' <<<"$out10" \
+    || { echo "SELF-TEST FAIL: the unanchored surface was not reported as one" >&2; exit 1; }
+  out11="$(check_manifest "$tmp/unanchored.tsv" "$tmp/dotgithub" 2>&1)" \
+    && { echo "SELF-TEST FAIL: an unanchored surface was accepted in a checkout that does not carry it" >&2; exit 1; }
+  grep -q 'UNANCHORED' <<<"$out11" \
+    || { echo "SELF-TEST FAIL: the unanchored surface was not reported in a checkout that does not carry it" >&2; exit 1; }
+  # The SHIPPED manifest must have no unanchored surface: every path it names is pinned
+  # by at least one 'require' row. (The rows themselves are judged against the real
+  # umbrella by the CI form and by the strong form; this asserts the TABLE's shape.)
+  out12="$(check_manifest "$HERE/governance-claims.tsv" "$tmp" 2>&1)" || true
+  grep -q 'UNANCHORED' <<<"$out12" \
+    && { echo "SELF-TEST FAIL: the shipped manifest holds an unanchored surface" >&2; exit 1; }
   # The real manifest's header row must be ignored, never reported as a bad kind.
   out2="$(check_manifest "$HERE/governance-claims.tsv" "$tmp" 2>&1)" || true
   grep -q "unknown kind 'kind'" <<<"$out2" && { echo "SELF-TEST FAIL: the manifest header row was parsed as a claim" >&2; exit 1; }
