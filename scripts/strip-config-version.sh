@@ -121,9 +121,14 @@ trap 'rm -rf "$TMP"' EXIT
 # ALWAYS returns 0 (the caller branches on the leading status field).
 #
 # The Contents API omits inline `.content` for blobs > 1 MB (returns `.encoding:
-# "none"`) — measured live: layer-charly-internals/charly.yml is 1,038,418 bytes, so
-# its base64 body exceeds 1 MB. When the inline body decodes empty we fall back to the
-# git blob API (`git/blobs/<sha>`) so a large charly.yml is still filtered, not failed.
+# "none"`). When the inline body decodes empty we fall back to the git blob API
+# (`git/blobs/<sha>`) so a large charly.yml is still filtered, not failed.
+#
+# This is a FORWARD GUARD, not a live path: it triggers when a charly.yml grows past
+# 1 MiB (1,048,576 bytes). No file in the org is near that today — the largest is
+# charly/charly.yml at 316,230 bytes (measured 2026-10-27; re-measure before citing
+# it). The branch itself is not dead code: scripts/strip-config-version_test.sh
+# exercises it with a > 1 MB fixture on every run of this repo's gate.
 fetch_config() {
   local repo="$1" path="$2" out="$3" json sha b64 blob
   : > "$out"  # never leave a prior file's bytes to be mistaken for this one's
@@ -217,8 +222,8 @@ for repo in "${repos[@]}"; do
 
     # Build the PUT body with `jq -Rs` (raw-slurp the base64 from stdin) and feed it
     # via `--input -`: the base64 never touches argv, which would blow the OS ARG_MAX
-    # on a > 1 MB content field (layer-charly-internals/charly.yml is 1,038,418 bytes
-    # → a 1.39 MB base64). `-Rs` keeps the base64 byte-exact (no trailing newline).
+    # on a > 1 MB content field (a 1 MiB charly.yml → a 1.39 MB base64). `-Rs` keeps
+    # the base64 byte-exact (no trailing newline).
     base64 -w0 < "$new" > "$TMP/b64" || { echo "ERROR: $repo:$path base64 encode failed" >&2; record_failure "$repo:$path"; continue; }
     # Gate the counter on the PUT's EXIT STATUS, never on `resp` being non-empty:
     # `2>&1` captures error text on failure, so a non-empty `resp` alone would
