@@ -28,8 +28,44 @@
 # The caller is either an org-wide required workflow named by the org ruleset's
 # `workflows` rule (org-wide, zero per-repo copies) or a repo's thin caller. Do NOT
 # activate it as a required gate until `vars.CHARLY_VERSION` names a release that
-# carries the schema-versioning removal — the pre-removal pin still requires the
-# retired stamp and would fail the very PRs this leg unblocks.
+# READS the shapes the org's manifests declare. TWO conditions gate that; the first
+# is discharged (so citing it as the reason is a stale claim — opencharly/.github#162
+# closed it), the second is the LIVE one.
+#
+#   1. THE RETIRED `version:` STAMP — DISCHARGED. An engine predating the
+#      schema-versioning removal demands the retired stamp and fails a stamp-less
+#      manifest with `schema 2026.261.1747 is required (found ""). Run: charly
+#      migrate`. MEASURED 2026-10-27, each release's OWN binary and plugins, the
+#      SAME stamp-less manifest: the knob's value before that issue
+#      (v2026.271.0950) fails with exactly that error (rc=1); the knob's value of
+#      that day (v2026.278.0912) accepts it (rc=0, "0 warnings, 0 errors"). This
+#      condition is MET — do not wait for it.
+#   2. THE ROUTING-ONLY `skill:` SHAPE — THE LIVE CONDITION. A routing-only `skill:`
+#      node — one that carries only its routing fields (name, family, owner,
+#      triggers) — is REJECTED by an engine whose plugin harness predates the
+#      spec#247 relaxation, with
+#      `node "debian-debootstrap-vm-skill": plugin kind:skill: plugin_input fails
+#      #SkillInput: #SkillInput.description: incomplete value !=""`. MEASURED
+#      2026-10-27 on a PRISTINE copy of a shipping manifest: the knob's value of
+#      that day (v2026.278.0912) fails it (rc=1), and a release carrying the
+#      relaxed harness (plugin-harness-kind v0.2026288.1214) accepts the SAME
+#      content (rc=0). THE KNOB MUST THEREFORE NAME A RELEASE WHOSE
+#      PLUGIN-HARNESS-KIND IS v0.2026288.1214 OR LATER.
+#
+# THE GATE IS DORMANT UNTIL A CALLER NAMES IT: the reusable has no caller, and the
+# org ruleset 23827016 requires only `validate / validate`, so nothing is red while
+# it waits — which is exactly why the precondition has to be TRUE before one is
+# added, and why it must name the LIVE condition (the routing-only shape) rather
+# than a discharged one.
+#
+# THE KNOB IS ONE, SO THE REMEDY IS ONE — and it is the OPERATOR's, never a
+# per-repo sweep:
+#   gh variable set CHARLY_VERSION --org opencharly \
+#     --body <a release whose plugin-harness-kind is v0.2026288.1214 or later> \
+#     --visibility all
+# `vars.CHARLY_VERSION` is ALSO the org PR-validator's engine pin (pr-validator.yml
+# welds it), so that one change moves the review engine for every repo as well: do
+# it deliberately, and read the next validator verdict against the new engine.
 #
 # SKIP CONTRACT. A repo with no `charly.yml` is not a candy/box project. The job
 # reports the skip and exits GREEN — never a false red on the ~repo corpus that

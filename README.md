@@ -57,9 +57,9 @@ copy inherits the files here — so a change lands **once**, not in every repo.
   `.github/workflows/deploy.yml` candy gates (298 frozen at `v2026.238.1242`), whose
   stale pins failed every schema-versioning-removal PR's OWN repo CI. The pin is
   mandatory (fail-loud; no bundled fallback). **Activation as a required gate is
-  deliberately deferred** until `vars.CHARLY_VERSION` names a release carrying the
-  schema-versioning removal: the pre-removal pin still *requires* the retired stamp,
-  so a required gate at the current pin would re-break the very PRs this replaces.
+  deliberately deferred** until `vars.CHARLY_VERSION` names a release that reads the
+  routing-only `skill:` shape the org's manifests now declare (see "Activation is
+  deliberately deferred" below).
 - **`scripts/retire-per-repo-candy-gates.sh`** +
   **`.github/workflows/retire-per-repo-candy-gates.yml`** — the one-shot org cutover
   that DELETES those stale hand-rolled stubs (the `retire-per-repo-dispatchers.sh`
@@ -154,17 +154,39 @@ $ gh workflow run retire-per-repo-candy-gates.yml   # delete the per-repo stubs
 ```
 
 **Activation is deliberately deferred.** The reusable is NOT yet named by the org ruleset
-as a required workflow. `vars.CHARLY_VERSION` currently names a release whose `box
-validate` still *requires* the retired `version:` stamp (measured against the live pin:
-`schema 2026.261.1747 is required (found ""). Run: charly migrate`), so making it
-required now would re-break the very PRs this replacement exists to unblock. Once the pin
-names a release carrying the schema-versioning removal (the host leg of that removal,
-whose first attempt `charly#716` was auto-closed and is being carried forward by its
-successor), the
-reusable may be named org-wide exactly as the validator is (a `workflows` ruleset rule
-pointing at a thin `candy-validate-required.yml` caller, or per-repo callers). Until then
-it is available for explicit opt-in and the retirement of the stale pins stands on its
-own (the deadlock is removed whether or not a new gate is required).
+as a required workflow, and it has no caller at all — so nothing is red while it waits.
+The precondition is ONE engine property: the knob must name a release that READS the
+routing-only `skill:` shape the org's manifests now declare (a `skill:` node carrying
+only its routing fields — name, family, owner, triggers). An engine whose plugin harness
+predates the spec#247 relaxation REJECTS that shape with `plugin kind:skill: plugin_input
+fails #SkillInput: #SkillInput.description: incomplete value !=""`, so a required gate at
+such a pin would redden every repo declaring it.
+
+Measured 2026-10-27, the knob's value of that day (`v2026.278.0912`) was such a pin:
+that release rejects a pristine shipping manifest declaring that shape, and a release
+carrying the relaxed harness (`plugin-harness-kind` v0.2026288.1214) accepts the same
+content. The knob must therefore name a release whose `plugin-harness-kind` is
+v0.2026288.1214 or later.
+
+The OTHER precondition — that the pin names a release carrying the schema-versioning
+removal, so the engine no longer demands the retired `version:` stamp — is DISCHARGED
+(measured 2026-10-27: a stamp-less manifest validates with "0 warnings, 0 errors"; the
+issue that carried it, `opencharly/.github#162`, is closed). Only the routing-only shape
+was outstanding at that reading, and the knob is one, so the remedy is one variable
+change:
+
+```console
+$ gh variable set CHARLY_VERSION --org opencharly \
+    --body <a release whose plugin-harness-kind is v0.2026288.1214 or later> \
+    --visibility all
+```
+
+`vars.CHARLY_VERSION` is also the org PR-validator's engine pin, so that one change moves
+the review engine for every repo as well — make it deliberately. Once the pin names such
+a release, the reusable may be named org-wide exactly as the validator is (a `workflows`
+ruleset rule pointing at a thin `candy-validate-required.yml` caller, or per-repo
+callers). Until then it is available for explicit opt-in and the retirement of the stale
+pins stands on its own (the deadlock is removed whether or not a new gate is required).
 
 Future org-wide defaults (issue templates, `CONTRIBUTING.md`, `SECURITY.md`) belong
 here too — one source, inherited everywhere.
