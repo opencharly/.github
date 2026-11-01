@@ -55,6 +55,15 @@ Canonical files:
   pin that moves only through a PR here. Its coverage is
   `scripts/retired-sweep-arm_test.sh`, which extracts the shipped step's text
   and runs THAT against fixtures.
+- The **`validate` job asserts the org rulebook is in force** before it reviews
+  anything. The engine replaces its generic prompt with the org variable
+  `AI_REVIEW_PROMPT`, so an EMPTY value does not fail — it silently falls back
+  to the generic prompt, which still returns a plausible verdict, so nothing
+  reddens and the drift stays invisible. The assert makes it loud; its coverage
+  is `scripts/assert-org-rulebook_test.sh`. A step that lives inside the
+  reusable is judged by EXTRACTING its shipped text and running THAT — the
+  extraction is the shared one in `scripts/lib-org.sh`, so the step-level tests
+  cannot drift apart in how they read the workflow.
 - `scripts/org-ruleset.sh verify` asserts the whole org end state.
 
 ## Modify this repo
@@ -68,6 +77,13 @@ Canonical files:
   `charly.yml`, which the runners check out. A governance change is reconciled across the
   validator rulebook, the umbrella `AGENTS.md`, `charly/AGENTS.md`, and the
   skill source + its projection in the same change.
+- That variable's **VISIBILITY is load-bearing**: GitHub exposes a `private`
+  organization variable only to private or internal repositories, and every
+  repository this gate covers is public — so a narrowed visibility silently
+  replaces the rulebook with the engine's generic prompt (measured 2026-11-01:
+  `system=2857` bytes instead of the rulebook's `35327`). The `validate` job
+  ASSERTS the rulebook is in force, which is what makes that drift loud instead
+  of invisible; keep the variable visible to ALL.
 - The gate, the ruleset, and the template are self-modifying-security surfaces:
   a change here gets heightened review and must strengthen or preserve the gate.
 

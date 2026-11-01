@@ -224,6 +224,46 @@ jobs:
             core.setOutput('base_ref', pr.base.ref);
             core.setOutput('node_id', pr.node_id);
 
+      # THE ORG RULEBOOK MUST BE IN FORCE — asserted here, never assumed.
+      #
+      # THE DEFECT THIS ASSERTS AGAINST (measured 2026-11-01, opencharly/.github#262
+      # round 1). The org variable AI_REVIEW_PROMPT carries the project's rulebook
+      # and REPLACES the engine's generic embedded prompt wholesale — the engine
+      # reads envStr("AI_REVIEW_PROMPT", embeddedPrompt), so an EMPTY value does
+      # not fail; it silently falls back to the generic prompt. On 2026-10-22 that
+      # variable's VISIBILITY was narrowed to `private` — the only one of the org's
+      # 24 variables that was — and GitHub exposes a `private` organization
+      # variable only to private or internal repositories. Every repository this
+      # gate covers is PUBLIC, so `vars.AI_REVIEW_PROMPT` resolved EMPTY and the
+      # review ran on the generic fallback. Measured on the same workflow:
+      # system=35327 bytes (the org rulebook) before that date, system=2857 bytes
+      # (the generic fallback) after it.
+      #
+      # WHY THE ASSERT, AND WHY IT IS NOT A WORKAROUND. A missing rulebook is
+      # SILENT: the generic prompt still returns a plausible PASS/BLOCK, so no
+      # check reddens and the drift stays invisible until a review misses a rule
+      # it was supposed to enforce — as the measured run did, applying the generic
+      # prompt's "if no designated maintainers are configured, treat NO comment as
+      # a sign-off" clause while the maintainer set WAS configured and forwarded.
+      # The assert fails the required check LOUDLY and names the cause, so the
+      # drift is caught by the gate that exists to catch it. It reads the
+      # variable; it never rewrites it — a variable is operator configuration.
+      - name: Assert the org rulebook is in force
+        env:
+          AI_REVIEW_PROMPT: ${{ vars.AI_REVIEW_PROMPT }}
+        run: |
+          if [ -z "$AI_REVIEW_PROMPT" ]; then
+            echo "::error::the org rulebook is NOT in force — vars.AI_REVIEW_PROMPT is EMPTY, so the review would run on the engine's GENERIC prompt instead of the project's. Check that variable's VISIBILITY: a 'private' organization variable is exposed only to private or internal repositories, and this repository is public — it must be visible to ALL."
+            exit 1
+          fi
+          case "$AI_REVIEW_PROMPT" in
+            *OpenCharly*) ;;
+            *)
+              echo "::error::the forwarded AI_REVIEW_PROMPT is not this project's rulebook (it does not name the project). The engine's generic fallback prompt names no project, so this means the wrong prompt is in force."
+              exit 1
+              ;;
+          esac
+
       # THE SWEEP — the org-wide reach for a WITHDRAWN NAME.
       #
       # WHY IT IS A STEP IN THIS JOB AND NOT A JOB OF ITS OWN. The required check
@@ -330,6 +370,17 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --records "$records"
 
+      # THE REVIEW'S CONFIG CHECKOUT — and what it does NOT touch. This step lands
+      # in `runner-config/`, its OWN directory, and `actions/checkout` cleans only
+      # the repository directory it manages: `git clean -ffdx` runs inside
+      # `runner-config/`, never in the workspace root. The sweep's three
+      # directories (`repo/`, `contract/`, `org-rules/`) are SIBLINGS of
+      # `runner-config/`, not children of it, so this checkout leaves them in
+      # place. And nothing downstream needs `repo/` anyway: the review assembles
+      # its context from the GitHub API (the PR body, every changed file's diff,
+      # the commits, every comment) and runs with `runner-config/` as its working
+      # directory, so the tree under judgement is read by the sweep and by
+      # nothing else.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7, node24
         with:
           repository: opencharly/action-review

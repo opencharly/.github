@@ -39,6 +39,11 @@
 # RED. A control that stayed green would mean the assertion it exercises is a
 # tautology, and a tautology is not coverage (R7).
 #
+# THIS TEST NEEDS THE NETWORK, and says so rather than claiming to be offline: it
+# clones the contract at the pinned tag from GitHub, because the executable under
+# test IS the contract's own Go command — the thing the arm runs is the thing this
+# runs. `--contract <dir>` points it at an already-provisioned checkout instead.
+#
 # usage: scripts/retired-sweep-arm_test.sh [--workflow <path>] [--contract <dir>]
 set -euo pipefail
 
@@ -64,19 +69,12 @@ done
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 # ---- the shipped text under test --------------------------------------------------
-awk '
-  function indent(s,   i) { for (i = 1; i <= length(s); i++) if (substr(s, i, 1) != " ") return i - 1; return length(s) }
-  /^ *- name: Sweep the tree for withdrawn identifiers$/ { in_step = 1; next }
-  in_step && !found_run && /^ *run: *\|/ { run_indent = indent($0); found_run = 1; next }
-  found_run {
-    if ($0 ~ /^[[:space:]]*$/) { print ""; next }
-    ind = indent($0)
-    if (ind <= run_indent) { exit }
-    if (content_indent == 0) content_indent = ind
-    if (ind < content_indent) { exit }
-    print substr($0, content_indent + 1)
-  }
-' "$WF" >"$STATE/step.sh"
+# The EXTRACTION is the shared one (lib-org.sh), so this test and the head-settle
+# test cannot drift apart in HOW they read the shipped step — only in WHICH step
+# they judge.
+# shellcheck source=scripts/lib-org.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib-org.sh"
+extract_step_run "$WF" '^ *- name: Sweep the tree for withdrawn identifiers$' "$STATE/step.sh"
 [[ -s "$STATE/step.sh" ]] \
   || fail "the shipped sweep step was not found in $WF"
 grep -q 'retired-sweep' "$STATE/step.sh" \
