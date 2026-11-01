@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# lib-org.sh — shared helpers for the org-wide cutover scripts
-# (org-ruleset.sh and retire-per-repo-dispatchers.sh). SOURCE this file; do not run.
+# lib-org.sh — the shared helpers of this repo's shell scripts: the org-wide cutover
+# scripts (org-ruleset.sh and retire-per-repo-dispatchers.sh), the other cutover and
+# reconciliation scripts, and the TESTS that judge a step shipped inside the reusable
+# validator (head-settle_test.sh, retired-sweep-arm_test.sh, assert-org-rulebook_test.sh).
+# SOURCE this file; do not run it.
 #
 # IMPORTANT — how discovery failures are surfaced. The discovery functions RETURN a
 # non-zero status on failure and print NOTHING; callers must invoke them via command
@@ -117,4 +120,53 @@ api_status() {
   # function under `set -e` — FAILS. Letting awk consume the whole input costs nothing
   # (it prints only line 1) and keeps the function SIGPIPE-safe for any body size.
   printf '%s\n' "$resp" | awk 'NR==1 { print $2 }'
+}
+
+# extract_step_run <workflow> <selector-regex> <outfile>
+# The `run:` block of ONE workflow step, dedented, verbatim.
+#
+# WHY THIS IS ONE FUNCTION AND NOT A COPY PER TEST (R2). The reusable validator's
+# steps live INSIDE .github/workflows/pr-validator.yml and run in the CALLER's
+# repository, so a script in this repo cannot be what the caller runs: a test must
+# EXTRACT the shipped step's text and run THAT, or the test judges a copy of the
+# step instead of the step. Two tests needed that extraction and each grew its own
+# awk — a byte-identical algorithm whose only difference was the step selector, so
+# a change to the extraction had to be made in two places and could be made in one
+# place only. The ALGORITHM lives here; the SELECTOR stays with each test, because
+# which step a test judges is that test's own business.
+#
+# <selector-regex> matches the line that identifies the step (its `- name:` or its
+# `id:`) — ANCHOR it, so a comment that merely mentions a step cannot match. The
+# step's FIRST `run: |` block is the one extracted; a step with no `run:` block
+# yields an empty outfile, and the caller decides what that means.
+extract_step_run() {
+  local wf="$1" selector="$2" out="$3"
+  awk -v sel="$selector" '
+    function indent(s,   i) { for (i = 1; i <= length(s); i++) if (substr(s, i, 1) != " ") return i - 1; return length(s) }
+    $0 ~ sel { in_step = 1; next }
+    in_step && !found_run && /^ *run: *\|/ { run_indent = indent($0); found_run = 1; next }
+    found_run {
+      if ($0 ~ /^[[:space:]]*$/) { print ""; next }
+      ind = indent($0)
+      if (ind <= run_indent) { exit }
+      if (content_indent == 0) content_indent = ind
+      if (ind < content_indent) { exit }
+      print substr($0, content_indent + 1)
+    }
+  ' "$wf" >"$out"
+}
+
+# extract_step_yaml <workflow> <selector-regex> <outfile>
+# The YAML BLOCK of ONE workflow step: the matching line and every line up to the
+# next step. Where extract_step_run returns the step's CODE, this returns the step's
+# DECLARATION — the env, the inputs, the timeout, the conditions around it.
+# Same R2 reason as extract_step_run: the algorithm is one, the selector is the
+# caller's.
+extract_step_yaml() {
+  local wf="$1" selector="$2" out="$3"
+  awk -v sel="$selector" '
+    $0 ~ sel { in_step = 1; print; next }
+    in_step && /^ *- name: / { exit }
+    in_step { print }
+  ' "$wf" >"$out"
 }

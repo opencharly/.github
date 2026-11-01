@@ -1,0 +1,74 @@
+{
+  "records": [
+    {
+      "repo": "opencharly/charly",
+      "file": "charly.yml",
+      "identifier": "engine.build",
+      "contains": "engine.build: no container engine found",
+      "why": "a comment quoting the diagnostic the parser printed BEFORE the rename — the record of the withdrawal, not a live key"
+    },
+    {
+      "repo": "opencharly/docs",
+      "file": "src/content/docs/recipes/build/build.md",
+      "identifier": "engine.build",
+      "contains": "There is no `engine.build`",
+      "why": "the recipe states the key does not exist: the prose IS the withdrawal"
+    },
+    {
+      "repo": "opencharly/marketplace",
+      "file": "build/skills/build/SKILL.md",
+      "identifier": "engine.build",
+      "contains": "There is no `engine.build`",
+      "why": "the corpus projection of the same denial"
+    },
+    {
+      "repo": "opencharly/marketplace",
+      "file": "candy/charly-marketplace/charly.yml",
+      "identifier": "engine.build",
+      "contains": "the retired `engine.build` key",
+      "why": "a comment recording the retirement in the marketplace's own bed"
+    },
+    {
+      "repo": "opencharly/plugin-box",
+      "file": ".agents/skills/build/SKILL.md",
+      "identifier": "engine.build",
+      "contains": "There is no `engine.build`",
+      "why": "the same denial, in the skill the plugin owns"
+    },
+    {
+      "repo": "opencharly/plugin-box",
+      "file": "charly.yml",
+      "identifier": "podman_jobs",
+      "contains": "podman_jobs must be >= 0, got -1",
+      "why": "a comment quoting the pre-rename validation error"
+    },
+    {
+      "repo": "opencharly/plugin-migrate",
+      "file": "candy/plugin-migrate/migrations.cue",
+      "identifier": "podman_jobs",
+      "contains": "declares `podman_jobs`",
+      "why": "the migration's own comment names the key it migrates away from"
+    },
+    {
+      "repo": "opencharly/plugin-migrate",
+      "file": "candy/plugin-migrate/migrations.cue",
+      "identifier": "podman_jobs_cap",
+      "contains": "matches `podman_jobs_cap`",
+      "why": "the migration's own comment names the key it matches"
+    },
+    {
+      "repo": "opencharly/plugin-settings",
+      "file": "candy/plugin-settings/config.go",
+      "identifier": "engine.build",
+      "contains": "Key: \"engine.build\"",
+      "why": "the plugin's OWN retirement registry: it answers the retired key BY NAME — the one place that answer lives"
+    },
+    {
+      "repo": "opencharly/plugin-settings",
+      "file": "charly.yml",
+      "identifier": "engine.build",
+      "contains": "the retirement of `engine.build`",
+      "why": "a comment naming the retirement the bed exercises"
+    }
+  ]
+}

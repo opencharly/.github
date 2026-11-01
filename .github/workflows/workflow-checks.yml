@@ -36,6 +36,40 @@ jobs:
       # guardrail is found in the org instead of here.
       - name: Run the head-settle gate test (offline, extracted step text)
         run: bash scripts/head-settle_test.sh
+      # The retired-sweep arm lives INSIDE the reusable workflow and runs in the
+      # CALLER's repository, so it cannot be a script here for the same reason the
+      # settle gate cannot: the coverage EXTRACTS the shipped step's `run:` text
+      # and runs THAT against fixtures. The sweep it runs is the CONTRACT's own Go
+      # command, so the harness needs a Go toolchain. The version is an EXACT
+      # patch, never 'stable' — the same rule and the same measurement as the
+      # `lint` job's setup-go (RCA 2026-10-09, opencharly/pod-github-runner#9),
+      # and 1.26.4 is the one already present in every runner's tool cache, so
+      # it costs no download. It is not read from the contract's go.mod because
+      # the contract is cloned INSIDE the test, after this step, and
+      # `go-version-file` cannot point at a file that does not exist yet. The
+      # module cache is off for the same reason: the dependency file it would key
+      # on is the contract's go.sum, which this repository does not have.
+      #
+      # THIS STEP NEEDS THE NETWORK, and it is labelled as such rather than
+      # "offline": the coverage clones the contract at the tag the shipped step
+      # pins, from GitHub, because the executable under test IS the contract's Go
+      # command — the thing the arm runs is the thing this runs. Every other
+      # step in this job is offline; this one reads a public repository, and a
+      # label that hid that would misstate what the job does.
+      - name: Set up Go (the retired-sweep arm's coverage is a Go command)
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0, node24
+        with:
+          go-version: '1.26.4'
+          cache: false
+      - name: "Run the retired-sweep arm test (network: the pinned contract is cloned; the step text is extracted)"
+        run: bash scripts/retired-sweep-arm_test.sh
+      # The org-rulebook assert lives INSIDE the reusable workflow too, so its
+      # coverage extracts the shipped step's text and runs THAT, the same way.
+      # This one is genuinely offline: the step reads the prompt it is HANDED, and
+      # the coverage hands it a fixture — the org variable is configuration, not
+      # content, and is never copied into the repo.
+      - name: Run the org-rulebook assert test (offline, extracted step text)
+        run: bash scripts/assert-org-rulebook_test.sh
       # The reconcile script's two dimensions and its repo allow-list. This test existed but
       # nothing ran it: a script whose own coverage is never executed is a script whose
       # regressions are found in the org instead of here.

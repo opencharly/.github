@@ -68,31 +68,20 @@ LEGACY_BUDGET_SECONDS=3600
 LEGACY_BACKSTOP_SECONDS=4200
 
 # ---- the shipped text under test --------------------------------------------------
-# The step's `run:` block, dedented, with the jq filter inside it untouched.
-awk '
-  function indent(s,   i) { for (i = 1; i <= length(s); i++) if (substr(s, i, 1) != " ") return i - 1; return length(s) }
-  /^ *id: head-checks$/ { in_step = 1; next }
-  in_step && !found_run && /^ *run: *\|/ { run_indent = indent($0); found_run = 1; next }
-  found_run {
-    if ($0 ~ /^[[:space:]]*$/) { print ""; next }
-    ind = indent($0)
-    if (ind <= run_indent) { exit }
-    if (content_indent == 0) content_indent = ind
-    if (ind < content_indent) { exit }
-    print substr($0, content_indent + 1)
-  }
-' "$WF" >"$STATE/step.sh"
+# The step's `run:` block, dedented, with the jq filter inside it untouched. The
+# EXTRACTION is the shared one (lib-org.sh), so this test and the arm's own test
+# cannot drift apart in HOW they read the shipped step — only in WHICH step they
+# judge.
+# shellcheck source=scripts/lib-org.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib-org.sh"
+extract_step_run "$WF" '^ *id: head-checks$' "$STATE/step.sh"
 [[ -s "$STATE/step.sh" ]] \
   || { echo "FAIL: the shipped head-settle step was not found in $WF" >&2; exit 1; }
 grep -q 'snapshot()' "$STATE/step.sh" \
   || { echo "FAIL: the extracted step has no snapshot() — the extraction drifted" >&2; exit 1; }
 
 # The step's own YAML block, for the backstop/budget invariants.
-awk '
-  /^ *- name: .*Head check-runs/ { in_step = 1; print; next }
-  in_step && /^ *- name: / { exit }
-  in_step { print }
-' "$WF" >"$STATE/step.yaml"
+extract_step_yaml "$WF" '^ *- name: .*Head check-runs' "$STATE/step.yaml"
 [[ -s "$STATE/step.yaml" ]] \
   || { echo "FAIL: the head-settle step's YAML block was not found in $WF" >&2; exit 1; }
 
