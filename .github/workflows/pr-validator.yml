@@ -1,13 +1,17 @@
 # ORG-WIDE PR VALIDATOR (reusable, called via workflow_call)
 #
-# THREE JOBS, and the split is the design: the REQUIRED check is the review and nothing else,
-# and everything that used to serialise behind it now runs beside it.
+# THREE JOBS, and the split is the design: the REQUIRED check is the review and the sweep
+# and nothing else, and everything that used to serialise behind it now runs beside it.
 #
-#   validate — the REVIEW VERDICT. The org's ONE required context (`validate / validate`, org
-#     ruleset 23827016), so it must be INDEPENDENT of every other job: no checkout, no lint,
-#     no check-run reads, no arming. It cannot wait on another job and cannot be reddened by
-#     one. A BLOCK, an ambiguous parse or an INCONCLUSIVE fails THIS job — hard, with
-#     `::error::` — because a red required check is exactly what must stop the merge.
+#   validate — the REVIEW VERDICT and the SWEEP. The org's ONE required context
+#     (`validate / validate`, org ruleset 23827016), so it must be INDEPENDENT of every other
+#     job: no lint, no check-run reads, no arming, and — the half that carries the weight —
+#     it never waits on another job and is never reddened by one. It DOES check out trees,
+#     and reads them: the tree under judgement, the pinned contract and the org's records
+#     table are INPUTS to this job, not another job's CI state. The sweep is a STEP of this
+#     job precisely so that a carrier FAILS this job — a red required check, which is
+#     exactly what must stop the merge. A BLOCK, an ambiguous parse or an INCONCLUSIVE fails
+#     it the same way, hard, with `::error::`.
 #
 #   lint — gate A, IN PARALLEL. Nothing in it depends on the verdict: it reads the PR head and
 #     the repo's DECLARED golangci-lint config. Running it here makes the merge gate's critical
@@ -175,9 +179,12 @@ permissions:
 jobs:
   validate:
     name: validate
-    # The VERDICT is this job's only product. Everything that depends on the rest
-    # of the repo's CI lives in the `arm` job, which is NOT a required check: this
-    # job must never wait on, or be reddened by, another job.
+    # The VERDICT and the SWEEP are this job's products. Everything that depends on the
+    # rest of the repo's CI lives in the `arm` job, which is NOT a required check: this
+    # job must never wait on, or be reddened by, another job. The sweep is HERE rather
+    # than in a job of its own for exactly that reason — a job of its own would be
+    # SKIPPED when it failed, GitHub reports a skipped job to the merge gate as a
+    # success, and the pull request would merge on a green required check.
     outputs:
       verdict: ${{ steps.parse.outputs.verdict }}
       head_sha: ${{ steps.pr.outputs.head_sha }}
@@ -194,6 +201,15 @@ jobs:
     # goes RED fast instead of hanging pending, and the gate is re-run
     # explicitly (gh workflow run pr-validator.yml -f pr-number=<N>), never
     # retried in-job (R3).
+    #
+    # THE SWEEP SHARE OF THIS CAP. The sweep shares the review's budget, and its
+    # measured cost is small: the contract clone is 1.1s/8.7 M, the org table
+    # clone 0.9s/2.5 M, the cold offline build of the contract's sweep is 2s, and
+    # the sweep itself reads 42 files in under 1s. The worst case is a cold Go
+    # toolchain download, about a minute. So the slowest observed review
+    # (13m19s) plus the arm's worst case still fits inside 20 with margin, and
+    # the cap stays as it is — a sweep that outgrew the budget would need a
+    # measured re-decision, not a silent raise.
     timeout-minutes: 20
     steps:
       - id: pr
@@ -207,6 +223,112 @@ jobs:
             core.setOutput('head_ref', pr.head.ref);
             core.setOutput('base_ref', pr.base.ref);
             core.setOutput('node_id', pr.node_id);
+
+      # THE SWEEP — the org-wide reach for a WITHDRAWN NAME.
+      #
+      # WHY IT IS A STEP IN THIS JOB AND NOT A JOB OF ITS OWN. The required check
+      # is `validate / validate` — this job's context — and GitHub reports a
+      # SKIPPED job to the merge gate as a SUCCESS. A sweep in a job of its own,
+      # with this job declared `needs: sweep`, would therefore be DEFEATABLE: the
+      # sweep's failure would skip this job, this job would report success, and
+      # the pull request would merge on a green required check. A step that FAILS
+      # this job cannot be defeated that way — the required context goes red and
+      # the merge gate stops. The sweep is a merge gate from its first run, with
+      # no ruleset change and no operator step between the merge and the gate.
+      #
+      # WHY IT RUNS FIRST. The sweep is mechanical and cheap (a tree walk); the
+      # review is an LLM pass over the diff and is the expensive one. A tree that
+      # still carries a withdrawn name is not worth reviewing, so the sweep
+      # decides first and the review never sees a carrier.
+      #
+      # THE SAME-REPO GUARD. The tree under judgement is checked out from the
+      # BASE repository at the head's SHA, and that SHA only exists there for a
+      # same-repository pull request: an external fork's head is not in this
+      # repository, and the org's gate does not act on one. This is the same
+      # guard the org-wide caller carries, and it makes the sweep inert (rather
+      # than broken) for a fork.
+      - name: Check out the tree under judgement
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7, node24
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ steps.pr.outputs.head_sha }}
+          path: repo
+          fetch-depth: 1
+          # The head token is used for the FETCH and is not written into the
+          # checked-out tree's git config — the tree under judgement is data
+          # this job reads, and a credential left inside it is a credential
+          # the tree could carry. The `lint` job's head checkout does the same.
+          persist-credentials: false
+
+      # THE CONTRACT, AT A PINNED TAG, FETCHED WITHOUT A CREDENTIAL. The names
+      # that are withdrawn are the CONTRACT's, published in its embedded registry,
+      # so the arm runs the CONTRACT's own sweep and never a second copy of the
+      # rules: two copies is how one rule drifts. The pin is the tag, and the pin
+      # is bumped by a PR in this repo — the arm's rules move only through review.
+      #
+      # WHY A PLAIN CLONE AND NOT actions/checkout. The contract is a PUBLIC
+      # repository, so reading it needs no credential — and reading it with the
+      # job's repo-scoped token would ask a question about token scope that the
+      # arm does not need to ask. A plain clone leaves no credential in the
+      # checkout at all, and it is the mechanism this repo's own
+      # `candy-validate.yml` already uses to read the pinned charly source. The
+      # coverage in `scripts/retired-sweep-arm_test.sh` clones the same tag the
+      # same way, so the thing under test and the thing that runs are one
+      # mechanism.
+      - name: Fetch the pinned contract
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        run: |
+          git clone --depth 1 --branch v0.2026305.1919 \
+            https://github.com/opencharly/spec.git contract
+
+      # THE ORG'S RECORDS TABLE. Every mention of a withdrawn name is classified
+      # BY HAND — history stays, a denial stays, an explanatory comment stays, a
+      # live claim is a carrier — so the table says which is which, and every
+      # entry says why. The table is the ORG's and it lives here, beside the gate
+      # that reads it. It is read from `main` — the MERGED table — because a
+      # table update is a change to the org's rules and takes effect when it
+      # lands. Read without a credential, for the same reason as the contract.
+      - name: Fetch the org's retired-records table
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        run: |
+          git clone --depth 1 --branch main \
+            https://github.com/opencharly/.github.git org-rules
+
+      - name: Set up Go (the contract's sweep is a Go command)
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0, node24
+        with:
+          go-version-file: contract/go.mod
+          cache-dependency-path: contract/go.sum
+
+      - name: Sweep the tree for withdrawn identifiers
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        working-directory: contract
+        run: |
+          # WHY THE ORG'S TABLE IS CHOSEN PER REPOSITORY. The org's records table
+          # lives in opencharly/.github (scripts/retired-records.json), and it is
+          # where the withdrawn NAMES are supposed to appear: it names them, and it
+          # says why each mention is a record rather than a live use. In
+          # opencharly/.github the table is therefore a file OF THE TREE, so the
+          # sweep reads the TREE's own copy — a table update is then judged by the
+          # table it updates, and the file that publishes the names is not itself
+          # judged as a surface. In every other repository the table is read from
+          # the org checkout, OUTSIDE the tree, and the tree is swept in full: a
+          # repository may not carry its own table.
+          records="../org-rules/scripts/retired-records.json"
+          if [ "$GITHUB_REPOSITORY" = "opencharly/.github" ]; then
+            records="../repo/scripts/retired-records.json"
+          fi
+
+          # THE PINNED CONTRACT, RUN FROM ITS OWN CHECKOUT. The executable and the
+          # names it judges come from ONE commit — the tag this step checked out —
+          # so the arm cannot judge a tree by one version of the rules and report
+          # it by another.
+          go run ./retired/cmd/retired-sweep \
+            --tree ../repo \
+            --repo "$GITHUB_REPOSITORY" \
+            --records "$records"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7, node24
         with:

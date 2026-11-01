@@ -36,6 +36,26 @@ jobs:
       # guardrail is found in the org instead of here.
       - name: Run the head-settle gate test (offline, extracted step text)
         run: bash scripts/head-settle_test.sh
+      # The retired-sweep arm lives INSIDE the reusable workflow and runs in the
+      # CALLER's repository, so it cannot be a script here for the same reason the
+      # settle gate cannot: the coverage EXTRACTS the shipped step's `run:` text
+      # and runs THAT against fixtures. The sweep it runs is the CONTRACT's own Go
+      # command, so the harness needs a Go toolchain. The version is an EXACT
+      # patch, never 'stable' — the same rule and the same measurement as the
+      # `lint` job's setup-go (RCA 2026-10-09, opencharly/pod-github-runner#9),
+      # and 1.26.4 is the one already present in every runner's tool cache, so
+      # it costs no download. It is not read from the contract's go.mod because
+      # the contract is cloned INSIDE the test, after this step, and
+      # `go-version-file` cannot point at a file that does not exist yet. The
+      # module cache is off for the same reason: the dependency file it would key
+      # on is the contract's go.sum, which this repository does not have.
+      - name: Set up Go (the retired-sweep arm's coverage is a Go command)
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0, node24
+        with:
+          go-version: '1.26.4'
+          cache: false
+      - name: Run the retired-sweep arm test (offline, extracted step text)
+        run: bash scripts/retired-sweep-arm_test.sh
       # The reconcile script's two dimensions and its repo allow-list. This test existed but
       # nothing ran it: a script whose own coverage is never executed is a script whose
       # regressions are found in the org instead of here.

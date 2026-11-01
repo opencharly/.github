@@ -24,6 +24,11 @@ Canonical files:
 - `scripts/org-ruleset.sh` — the SINGLE owner of the org ruleset (required check
   + branch rules) and the per-repo auto-merge settings; `scripts/*_test.sh` are
   its offline mock-`gh` tests.
+- `scripts/retired-records.json` — the ORG's table of the mentions of a
+  withdrawn name that are NOT carriers (history, a denial, an explanation), each
+  with its reason. The retired-sweep arm reads it; a record that covers no hit
+  is itself a finding, so the table is a live classification and not a list of
+  excuses.
 - `README.md` — user overview only; never agent guidance.
 
 ## Load these skills first (R0)
@@ -41,6 +46,15 @@ Canonical files:
   `pr-validator.yml` on the PR branch; no simulated review or service replaces it.
 - The merge gate is the **org-wide** `charly/pr-validator` (required check
   `validate / validate`); this repo is its own first consumer.
+- The **retired-sweep arm** — the org-wide reach for a withdrawn name — runs as
+  a STEP of the required `validate` job, in every repository, against the
+  `opencharly/spec` tag this repo pins. It is a step and not a job of its own
+  because GitHub reports a SKIPPED job to the merge gate as a success, so a
+  sweep in a job of its own could be defeated. The names and the sweep are the
+  CONTRACT's; this repo holds only the table that classifies a mention, and the
+  pin that moves only through a PR here. Its coverage is
+  `scripts/retired-sweep-arm_test.sh`, which extracts the shipped step's text
+  and runs THAT against fixtures.
 - `scripts/org-ruleset.sh verify` asserts the whole org end state.
 
 ## Modify this repo
