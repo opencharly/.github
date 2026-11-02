@@ -113,9 +113,13 @@ jobs:
           # while kernel.unprivileged_userns_clone=1 and `unshare -Ur` works. So the platform permits
           # a rootless builder and the runner simply lacks two packages; this establishes them the way
           # the engine is established, at a PINNED version. The preflight that follows proves it.
-          if ! command -v newuidmap >/dev/null 2>&1 || ! command -v newgidmap >/dev/null 2>&1; then
+          # uidmap gives rootlesskit its uid mapping; slirp4netns gives the BUILD its network.
+          # Both measured absent on this runner (opencharly/.github#271): without slirp4netns a
+          # RUN step has no egress and `pacman -Syu` exits 1 with nothing else to say.
+          if ! command -v newuidmap >/dev/null 2>&1 || ! command -v newgidmap >/dev/null 2>&1 \
+             || ! command -v slirp4netns >/dev/null 2>&1; then
             sudo apt-get update -qq
-            sudo apt-get install -y -qq uidmap
+            sudo apt-get install -y -qq uidmap slirp4netns
           fi
           if ! command -v buildkitd >/dev/null 2>&1; then
             tmp="$(mktemp -d)"
