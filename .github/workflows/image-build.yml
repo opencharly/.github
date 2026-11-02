@@ -196,6 +196,25 @@ jobs:
           if [ "${{ inputs.push }}" = "true" ]; then args+=(--push); fi
           /tmp/charly-src/bin/charly "${args[@]}"
 
+      - name: Daemon log (always)
+        if: always()
+        run: |
+          # sdk/buildkitdrive/daemon.go:123,130 writes the daemon's stdout+stderr to
+          # <stateRoot>/buildkitd.log — so when the readiness deadline expires the evidence EXISTS
+          # on disk and has simply never been read (opencharly/.github#271). Print it, whatever the
+          # build step decided.
+          found=0
+          for f in "$HOME/.cache/charly/buildkitd/buildkitd.log" "$HOME/.local/state/charly/buildkitd/buildkitd.log"; do
+            if [ -f "$f" ]; then
+              found=1
+              echo "=== $f ($(wc -c <"$f") bytes) ==="
+              tail -n 80 "$f"
+            fi
+          done
+          if [ "$found" -eq 0 ]; then
+            echo "no buildkitd.log under the charly state/cache roots — the daemon never wrote one"
+          fi
+
       - name: Verify the published digest
         if: inputs.push
         env:
