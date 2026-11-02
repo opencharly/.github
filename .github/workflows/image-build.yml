@@ -55,7 +55,7 @@ on:
         required: false
         default: false
       tag:
-        description: 'Image tag. Empty = derived from a v* tag (the v stripped); if no tag is derivable the job FAILS — never a clock CalVer.'
+        description: 'Image tag. Empty = derived from a v* tag (the v stripped). No derivable tag: a build-only run (push=false) uses a local ci-<sha> and publishes nothing; a PUBLISHING run (push=true) FAILS — never a clock CalVer.'
         type: string
         required: false
         default: ''
