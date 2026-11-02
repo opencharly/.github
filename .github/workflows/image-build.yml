@@ -137,6 +137,13 @@ jobs:
           done
           echo "kernel.unprivileged_userns_clone: $(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo n/a)"
           if unshare -Ur true 2>/dev/null; then echo "unshare -Ur: ok"; else echo "unshare -Ur: FAILED"; fi
+          # rootlesskit cannot map a uid range without a subuid/subgid entry for THIS user, and
+          # when it cannot, it dies without a message — which is the shape of the empty daemon log.
+          # Print the entries so the next failure names the cause instead of the symptom
+          # (opencharly/.github#271).
+          echo "user: $(id -un) uid=$(id -u)"
+          echo "/etc/subuid: $(grep "^$(id -un):" /etc/subuid 2>/dev/null || echo '<no entry for this user>')"
+          echo "/etc/subgid: $(grep "^$(id -un):" /etc/subgid 2>/dev/null || echo '<no entry for this user>')"
           if [ -n "$miss" ]; then
             echo "::error::the image build needs a rootless builder and this runner lacks: ${miss}- install buildkit + rootlesskit + uidmap, or run this workflow on a runner that ships them (opencharly/.github#271)"
             exit 1
