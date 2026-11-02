@@ -36,7 +36,10 @@
 #   * the sweep is HERMETIC against a workspace it does not own: a `go.work` left
 #     at the runner's workspace root by a sibling job cannot decide the verdict,
 #     which is opencharly/.github#264 — a green diff reported as a finding it
-#     never made.
+#     never made;
+#   * a RE-RUN can clone: the fetch step clears its own destination, so the
+#     previous attempt's `contract/` or `org-rules/` cannot make `git clone` exit
+#     128 and produce a red required check with no verdict — opencharly/.github#265.
 #
 # THE NEGATIVE CONTROLS AT THE END prove the coverage can FAIL: each one mutates
 # the shipped workflow in a copy, and the mutated workflow must turn this coverage
@@ -287,6 +290,45 @@ out="$(run_sweep "$FIXTURE_REPO")" && rc=0 || rc=$?
 grep -q 'PASS' <<<"$out" || fail "the sweep must still report a PASS verdict: $out"
 WS="$STATE/ws"
 
+# ---- case 7: a RE-RUN can clone over the previous attempt's checkout ------------------
+# `contract/` and `org-rules/` are siblings of `repo/`, and `actions/checkout` cleans
+# only the directory it manages — so the previous attempt's clone is still there when
+# the same job runs again on the same persistent runner. `git clone` then refuses a
+# non-empty destination and the required check dies with exit 128 and no verdict, which
+# is why a RETRY is what triggers opencharly/.github#265. The extracted FETCH step is run
+# over a pre-dirtied workspace, so the case decides whether the step cleared its own
+# destination rather than whether the runner happened to be clean.
+# EVERY fetch step that clones into the workspace root, not just the contract: the
+# failure is a property of the SHAPE (clone into a sibling of `repo/`), so a step that
+# keeps it would reintroduce the defect invisibly.
+for pair in \
+  "Fetch the pinned contract|contract|retired/cmd/retired-sweep/main.go" \
+  "Fetch the org.s retired-records table|org-rules|scripts/retired-records.json"
+do
+  step_name="${pair%%|*}"
+  rest="${pair#*|}"
+  dest="${rest%%|*}"
+  marker="${rest#*|}"
+
+  extract_step_run "$WF" "^ *- name: ${step_name}\$" "$STATE/fetch.sh"
+  [[ -s "$STATE/fetch.sh" ]] \
+    || fail "the shipped '$step_name' step was not found in $WF"
+  grep -q 'git clone' "$STATE/fetch.sh" \
+    || fail "the extracted '$step_name' step runs no clone — the extraction drifted"
+
+  rm -rf "$STATE/rerun/$dest"
+  mkdir -p "$STATE/rerun/$dest"
+  printf 'left behind by the previous attempt\n' >"$STATE/rerun/$dest/leftover"
+  if ! ( cd "$STATE/rerun" && bash "$STATE/fetch.sh" ) >"$STATE/rerun.log" 2>&1; then
+    cat "$STATE/rerun.log"
+    fail "a re-run must be able to clone over the previous attempt's $dest/: $(tail -1 "$STATE/rerun.log")"
+  fi
+  [[ -f "$STATE/rerun/$dest/$marker" ]] \
+    || fail "the re-run's '$step_name' clone produced no $marker"
+  [[ ! -f "$STATE/rerun/$dest/leftover" ]] \
+    || fail "the previous attempt's file survived in $dest/ — the destination was not cleared before the clone"
+done
+
 # ---- the NEGATIVE CONTROLS: the coverage must be able to FAIL ------------------------
 # Each control is the shipped workflow with ONE thing changed, in a copy. The
 # mutated workflow must turn this coverage RED — otherwise the assertion it
@@ -377,6 +419,37 @@ PY
   fi
   grep -q "must not decide the sweep" "$CONTROLS/foreign-workspace.log" \
     || { cat "$CONTROLS/foreign-workspace.log"; fail "the foreign-workspace control failed for the wrong reason"; }
+
+  # control 6: the fetch step no longer clears its destination, so a re-run dies on the
+  # previous attempt's directory — the opencharly/.github#265 mechanism.
+  python3 - "$WF" "$CONTROLS/rerun-clone.yml" <<'PY'
+import sys
+text = open(sys.argv[1], encoding="utf-8").read()
+needle = "          rm -rf contract\n"
+assert needle in text, "the shipped shape moved"
+open(sys.argv[2], "w", encoding="utf-8").write(text.replace(needle, "", 1))
+PY
+  if bash "$0" --workflow "$CONTROLS/rerun-clone.yml" --contract "$STATE/ws/contract" --no-controls >"$CONTROLS/rerun-clone.log" 2>&1; then
+    fail "NEGATIVE CONTROL: a fetch step that leaves the previous attempt's directory must fail this coverage, but it passed"
+  fi
+  grep -q "must be able to clone over the previous attempt" "$CONTROLS/rerun-clone.log" \
+    || { cat "$CONTROLS/rerun-clone.log"; fail "the rerun-clone control failed for the wrong reason"; }
+
+  # control 7: the SECOND fetch step (the org's records table) no longer clears its
+  # destination. Its own clear has to be load-bearing too, or the loop above would be
+  # covering a step that only passes because the runner happened to be clean.
+  python3 - "$WF" "$CONTROLS/rerun-clone-orgrules.yml" <<'PY'
+import sys
+text = open(sys.argv[1], encoding="utf-8").read()
+needle = "          rm -rf org-rules\n"
+assert needle in text, "the shipped shape moved"
+open(sys.argv[2], "w", encoding="utf-8").write(text.replace(needle, "", 1))
+PY
+  if bash "$0" --workflow "$CONTROLS/rerun-clone-orgrules.yml" --contract "$STATE/ws/contract" --no-controls >"$CONTROLS/rerun-clone-orgrules.log" 2>&1; then
+    fail "NEGATIVE CONTROL: the records-table fetch leaving the previous attempt's directory must fail this coverage, but it passed"
+  fi
+  grep -q "must be able to clone over the previous attempt's org-rules/" "$CONTROLS/rerun-clone-orgrules.log" \
+    || { cat "$CONTROLS/rerun-clone-orgrules.log"; fail "the rerun-clone-orgrules control failed for the wrong reason"; }
 fi
 
-echo "retired-sweep-arm_test: OK (clean tree passes; a carrier fails and is named; the table is read from the tree in opencharly/.github and from the org checkout everywhere else; a covered hit is a RECORD and a stale record fails; the sweep is a guarded step of the required validate job; a go.work the job does not own cannot decide the verdict)"
+echo "retired-sweep-arm_test: OK (clean tree passes; a carrier fails and is named; the table is read from the tree in opencharly/.github and from the org checkout everywhere else; a covered hit is a RECORD and a stale record fails; the sweep is a guarded step of the required validate job; a go.work the job does not own cannot decide the verdict; a re-run can clone over the previous attempt's checkout)"

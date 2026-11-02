@@ -319,6 +319,17 @@ jobs:
       - name: Fetch the pinned contract
         if: github.event.pull_request.head.repo.full_name == github.repository
         run: |
+          # A RE-RUN MUST BE ABLE TO CLONE. `contract/` is a SIBLING of `repo/`, and
+          # `actions/checkout` cleans only the directory it manages — so the previous
+          # attempt's clone is still here when the same job runs again on the same
+          # persistent runner, and `git clone` refuses a non-empty destination:
+          #   fatal: destination path 'contract' already exists and is not an empty
+          #   directory.   → exit 128, no verdict, every gate skipped
+          # (opencharly/.github#265, measured on two re-runs of an otherwise green head:
+          # charly#1101 job 125050184101 and charly#1100 job 125050180570). The clone
+          # target is this job's own, so clearing it is what makes the step a function
+          # of its inputs rather than of which runner picked the job.
+          rm -rf contract
           git clone --depth 1 --branch v0.2026305.1919 \
             https://github.com/opencharly/spec.git contract
 
@@ -332,6 +343,10 @@ jobs:
       - name: Fetch the org's retired-records table
         if: github.event.pull_request.head.repo.full_name == github.repository
         run: |
+          # Cleared for the same reason as `contract/` above: a sibling of `repo/`
+          # that the checkout action does not own, so a second attempt finds the
+          # first one's clone and `git clone` exits 128 (opencharly/.github#265).
+          rm -rf org-rules
           git clone --depth 1 --branch main \
             https://github.com/opencharly/.github.git org-rules
 
