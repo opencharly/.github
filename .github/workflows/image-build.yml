@@ -139,7 +139,11 @@ jobs:
           # tells the reader nothing (opencharly/.github#271). Name the cause BEFORE the build runs,
           # and fail with it, so a missing builder is never mistaken for a broken box recipe.
           miss=""
-          for t in buildkitd rootlesskit newuidmap newgidmap; do
+          # slirp4netns is how ROOTLESSKIT gives the build a network. Without it a build's RUN steps
+          # get no egress, and `pacman -Syu` fails with exit 1 and no further explanation — which is
+          # exactly the shape of the current failure (opencharly/.github#271). Probe it, and probe
+          # egress itself, so the answer is measured rather than inferred.
+          for t in buildkitd rootlesskit newuidmap newgidmap slirp4netns; do
             p="$(command -v "$t" 2>/dev/null || true)"
             if [ -n "$p" ]; then echo "present: $t -> $p"; else echo "ABSENT:  $t"; miss="$miss$t "; fi
           done
