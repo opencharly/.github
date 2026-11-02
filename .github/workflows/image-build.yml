@@ -108,6 +108,7 @@ jobs:
         id: tag
         env:
           INPUT_TAG: ${{ inputs.tag }}
+          PUSH_INPUT: ${{ inputs.push }}
           EVENT_NAME: ${{ github.event_name }}
           REF_NAME: ${{ github.ref_name }}
           REF: ${{ github.ref }}
@@ -121,7 +122,7 @@ jobs:
             # nothing, so it gets a tag that is obviously local and can never be mistaken for a
             # release — `ci-<sha>` — and the build proceeds, which is what the pull_request proof
             # depends on. A run that IS publishing and cannot name a tag is a hard failure.
-            if [ "${{ inputs.push }}" = "true" ]; then
+            if [ "${PUSH_INPUT}" = "true" ]; then
               echo "::error::no image tag derivable for a PUBLISHING run: no --tag input and this is not a v-tag push. Refusing to publish an unreferenced tag."
               exit 1
             fi
