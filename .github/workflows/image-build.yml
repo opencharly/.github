@@ -117,11 +117,16 @@ jobs:
             tag="${REF_NAME#v}"
           fi
           if [ -z "$tag" ]; then
-            # FAIL, never guess. A clock CalVer can never equal a git tag, so publishing under one
-            # would break the image-tag == git-tag invariant this workflow exists to protect — and it
-            # would do so silently, on an image no `import:` can name.
-            echo "::error::no image tag derivable: no --tag input and this is not a v-tag push. Refusing to publish an unreferenced tag."
-            exit 1
+            # The image-tag == git-tag invariant binds what is PUBLISHED. A build-only run publishes
+            # nothing, so it gets a tag that is obviously local and can never be mistaken for a
+            # release — `ci-<sha>` — and the build proceeds, which is what the pull_request proof
+            # depends on. A run that IS publishing and cannot name a tag is a hard failure.
+            if [ "${{ inputs.push }}" = "true" ]; then
+              echo "::error::no image tag derivable for a PUBLISHING run: no --tag input and this is not a v-tag push. Refusing to publish an unreferenced tag."
+              exit 1
+            fi
+            tag="ci-${GITHUB_SHA::12}"
+            echo "::notice::build-only run (push=false): using the non-publishing tag ${tag}"
           fi
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
           echo "image tag: ${tag}"
