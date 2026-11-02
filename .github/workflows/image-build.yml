@@ -117,8 +117,11 @@ jobs:
             tag="${REF_NAME#v}"
           fi
           if [ -z "$tag" ]; then
-            tag="$(date -u +%Y.%j.%H%M)"
-            echo "::warning::no --tag and not a v-tag push; falling back to a clock CalVer ${tag}"
+            # FAIL, never guess. A clock CalVer can never equal a git tag, so publishing under one
+            # would break the image-tag == git-tag invariant this workflow exists to protect — and it
+            # would do so silently, on an image no `import:` can name.
+            echo "::error::no image tag derivable: no --tag input and this is not a v-tag push. Refusing to publish an unreferenced tag."
+            exit 1
           fi
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
           echo "image tag: ${tag}"
