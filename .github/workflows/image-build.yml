@@ -104,6 +104,27 @@ jobs:
           ./scripts/bootstrap-charly.sh
           ./bin/charly version
 
+      - name: Ensure the builder
+        env:
+          BUILDKIT_VERSION: v0.34.1
+        run: |
+          # The runner ships rootlesskit but NEITHER buildkitd NOR the uid-map helpers — measured on
+          # 2026-11-02 (opencharly/.github#271): buildkitd ABSENT, newuidmap ABSENT, newgidmap ABSENT,
+          # while kernel.unprivileged_userns_clone=1 and `unshare -Ur` works. So the platform permits
+          # a rootless builder and the runner simply lacks two packages; this establishes them the way
+          # the engine is established, at a PINNED version. The preflight that follows proves it.
+          if ! command -v newuidmap >/dev/null 2>&1 || ! command -v newgidmap >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq uidmap
+          fi
+          if ! command -v buildkitd >/dev/null 2>&1; then
+            tmp="$(mktemp -d)"
+            curl -fsSL "https://github.com/moby/buildkit/releases/download/${BUILDKIT_VERSION}/buildkit-${BUILDKIT_VERSION}.linux-amd64.tar.gz" -o "$tmp/buildkit.tgz"
+            sudo tar -C /usr/local -xzf "$tmp/buildkit.tgz"
+            rm -rf "$tmp"
+          fi
+          buildkitd --version
+
       - name: Preflight the builder
         run: |
           # A build that dies "the daemon did not answer ... within 15s" with an EMPTY daemon log
