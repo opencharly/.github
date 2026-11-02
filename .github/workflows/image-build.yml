@@ -104,6 +104,23 @@ jobs:
           ./scripts/bootstrap-charly.sh
           ./bin/charly version
 
+      - name: Preflight the builder
+        run: |
+          # A build that dies "the daemon did not answer ... within 15s" with an EMPTY daemon log
+          # tells the reader nothing (opencharly/.github#271). Name the cause BEFORE the build runs,
+          # and fail with it, so a missing builder is never mistaken for a broken box recipe.
+          miss=""
+          for t in buildkitd rootlesskit newuidmap newgidmap; do
+            p="$(command -v "$t" 2>/dev/null || true)"
+            if [ -n "$p" ]; then echo "present: $t -> $p"; else echo "ABSENT:  $t"; miss="$miss$t "; fi
+          done
+          echo "kernel.unprivileged_userns_clone: $(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo n/a)"
+          if unshare -Ur true 2>/dev/null; then echo "unshare -Ur: ok"; else echo "unshare -Ur: FAILED"; fi
+          if [ -n "$miss" ]; then
+            echo "::error::the image build needs a rootless builder and this runner lacks: ${miss}- install buildkit + rootlesskit + uidmap, or run this workflow on a runner that ships them (opencharly/.github#271)"
+            exit 1
+          fi
+
       - name: Derive the image tag
         id: tag
         env:
