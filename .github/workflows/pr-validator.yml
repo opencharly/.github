@@ -365,7 +365,20 @@ jobs:
           # names it judges come from ONE commit — the tag this step checked out —
           # so the arm cannot judge a tree by one version of the rules and report
           # it by another.
-          go run ./retired/cmd/retired-sweep \
+          #
+          # `GOWORK=off` IS PART OF BEING PINNED. `go run` walks UP from this
+          # directory for a `go.work`, and the directory above it belongs to the
+          # RUNNER, not to this job: `actions/checkout` cleans only the directory
+          # it manages, so a sibling job that checked out at the workspace root
+          # leaves its own `go.work` one level up. When that residue declares a
+          # toolchain this job does not have, the sweep dies BEFORE it judges
+          # anything — `go: ../go.work requires go >= 1.26.8 (running go 1.26.0;
+          # GOTOOLCHAIN=local)` — and a PR whose diff is green reads as a finding
+          # it never made (opencharly/.github#264, measured on two heads). The
+          # contract ships its own `go.mod`, so workspace mode is off and the
+          # modules this arm runs are exactly the ones it pinned. The same reason
+          # the lint job below already sets it for charly's `tools/*` modules.
+          GOWORK=off go run ./retired/cmd/retired-sweep \
             --tree ../repo \
             --repo "$GITHUB_REPOSITORY" \
             --records "$records"
