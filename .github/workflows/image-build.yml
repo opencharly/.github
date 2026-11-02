@@ -124,6 +124,14 @@ jobs:
             rm -rf "$tmp"
           fi
           buildkitd --version
+          # buildkitd's trace controller does `mkdir /run/buildkit` BEFORE it serves, and in rootless
+          # mode it is not privileged to create that path: measured — `buildkitd: mkdir /run/buildkit:
+          # permission denied`, then `rootlesskit:parent error: child exited: exit status 1`, and the
+          # socket is never created so charly's readiness deadline simply expires
+          # (opencharly/.github#271). Give THIS user that one directory; never a blanket chown.
+          sudo mkdir -p /run/buildkit
+          sudo chown "$(id -u):$(id -g)" /run/buildkit
+          test -w /run/buildkit || { echo "::error::/run/buildkit is not writable by $(id -un); buildkitd cannot start"; exit 1; }
 
       - name: Preflight the builder
         run: |
