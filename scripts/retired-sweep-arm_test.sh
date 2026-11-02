@@ -32,7 +32,11 @@
 #   * the sweep is a STEP of the required `validate` job, and every step of it
 #     carries the same-repository guard: a sweep in a job of its own would be
 #     DEFEATABLE, because GitHub reports a SKIPPED job to the merge gate as a
-#     SUCCESS.
+#     SUCCESS;
+#   * the sweep is HERMETIC against a workspace it does not own: a `go.work` left
+#     at the runner's workspace root by a sibling job cannot decide the verdict,
+#     which is opencharly/.github#264 — a green diff reported as a finding it
+#     never made.
 #
 # THE NEGATIVE CONTROLS AT THE END prove the coverage can FAIL: each one mutates
 # the shipped workflow in a copy, and the mutated workflow must turn this coverage
@@ -170,15 +174,24 @@ plant() {
 mkdir -p "$STATE/ws/org-rules/scripts"
 cp "$TABLE" "$STATE/ws/org-rules/scripts/retired-records.json"
 
+# WS is the WORKSPACE ROOT the job builds (`repo/`, `contract/`, `org-rules/` as
+# siblings). It is a variable and not a literal because one case below builds a
+# SECOND workspace whose root carries a `go.work` the job does not own.
+WS="$STATE/ws"
+
 # reset_tree empties the tree under judgement.
 reset_tree() {
-  rm -rf "$STATE/ws/repo"
-  mkdir -p "$STATE/ws/repo/candy/plugin-x"
+  rm -rf "$WS/repo"
+  mkdir -p "$WS/repo/candy/plugin-x"
 }
 
 # run_sweep runs the SHIPPED text with the job's own working directory.
+# `GOTOOLCHAIN=local` is the job's own setting — `actions/setup-go` pins it so a
+# build never silently downloads a toolchain — and the fixture sets it for the
+# same reason, so a case can assert what the ARM decides and not what a download
+# decided for it.
 run_sweep() {
-  ( cd "$STATE/ws/contract" && GITHUB_REPOSITORY="$1" bash "$STATE/step.sh" ) 2>&1
+  ( cd "$WS/contract" && GOTOOLCHAIN=local GITHUB_REPOSITORY="$1" bash "$STATE/step.sh" ) 2>&1
 }
 
 # ---- case 1: a clean tree passes ---------------------------------------------------
@@ -251,6 +264,28 @@ printf 'defaults:\n  other: 1\n' >"$STATE/ws/repo/candy/plugin-x/charly.yml"
 out="$(run_sweep "$FIXTURE_REPO")" && rc=0 || rc=$?
 [[ "$rc" -eq 1 ]] || fail "a record that covers no hit must fail the arm, got exit $rc: $out"
 grep -q 'STALE' <<<"$out" || fail "the stale record must be named in the output: $out"
+
+# ---- case 6: a `go.work` the job does not OWN cannot decide the sweep ----------------
+# The workspace root above `contract/` belongs to the RUNNER, and `actions/checkout`
+# cleans only the directory it manages. A sibling job that checked out at that root
+# leaves its own `go.work` behind, Go walks UP into it, and when it names a toolchain
+# this job does not have the sweep dies before judging anything — which is exactly
+# opencharly/.github#264: a green PR reported as a finding it never made. The
+# contract pins its own modules, so the arm must be HERMETIC against a workspace it
+# does not own. `go 1.999.0` is a version no toolchain can satisfy, so this case
+# decides whether the workspace was read at all, not which Go happens to be installed.
+WS_FOREIGN="$STATE/ws-foreign"
+mkdir -p "$WS_FOREIGN/org-rules/scripts"
+cp -a "$STATE/ws/contract" "$WS_FOREIGN/contract"
+cp "$TABLE" "$WS_FOREIGN/org-rules/scripts/retired-records.json"
+printf 'go 1.999.0\n' >"$WS_FOREIGN/go.work"
+WS="$WS_FOREIGN"
+reset_tree
+out="$(run_sweep "$FIXTURE_REPO")" && rc=0 || rc=$?
+[[ "$rc" -eq 0 ]] \
+  || fail "an enclosing go.work the job does not own must not decide the sweep, got exit $rc: $out"
+grep -q 'PASS' <<<"$out" || fail "the sweep must still report a PASS verdict: $out"
+WS="$STATE/ws"
 
 # ---- the NEGATIVE CONTROLS: the coverage must be able to FAIL ------------------------
 # Each control is the shipped workflow with ONE thing changed, in a copy. The
@@ -325,6 +360,23 @@ PY
   fi
   grep -q "must not be judged as a surface" "$CONTROLS/no-own-table.log" \
     || { cat "$CONTROLS/no-own-table.log"; fail "the no-own-table control failed for the wrong reason"; }
+
+  # control 5: the sweep honours an enclosing `go.work` again, so a workspace the
+  # runner left behind decides the verdict. This is the opencharly/.github#264
+  # mechanism, and case 6 is only coverage if removing the guard turns this RED.
+  python3 - "$WF" "$CONTROLS/foreign-workspace.yml" <<'PY'
+import sys
+text = open(sys.argv[1], encoding="utf-8").read()
+needle = "          GOWORK=off go run ./retired/cmd/retired-sweep \\\n"
+assert needle in text, "the shipped shape moved"
+open(sys.argv[2], "w", encoding="utf-8").write(
+    text.replace(needle, "          go run ./retired/cmd/retired-sweep \\\n", 1))
+PY
+  if bash "$0" --workflow "$CONTROLS/foreign-workspace.yml" --contract "$STATE/ws/contract" --no-controls >"$CONTROLS/foreign-workspace.log" 2>&1; then
+    fail "NEGATIVE CONTROL: a sweep that honours an enclosing go.work must fail this coverage, but it passed"
+  fi
+  grep -q "must not decide the sweep" "$CONTROLS/foreign-workspace.log" \
+    || { cat "$CONTROLS/foreign-workspace.log"; fail "the foreign-workspace control failed for the wrong reason"; }
 fi
 
-echo "retired-sweep-arm_test: OK (clean tree passes; a carrier fails and is named; the table is read from the tree in opencharly/.github and from the org checkout everywhere else; a covered hit is a RECORD and a stale record fails; the sweep is a guarded step of the required validate job)"
+echo "retired-sweep-arm_test: OK (clean tree passes; a carrier fails and is named; the table is read from the tree in opencharly/.github and from the org checkout everywhere else; a covered hit is a RECORD and a stale record fails; the sweep is a guarded step of the required validate job; a go.work the job does not own cannot decide the verdict)"
