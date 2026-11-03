@@ -132,14 +132,25 @@ jobs:
             rm -rf "$tmp"
           fi
           buildkitd --version
-          # buildkitd's trace controller does `mkdir /run/buildkit` BEFORE it serves, and in rootless
-          # mode it is not privileged to create that path: measured — `buildkitd: mkdir /run/buildkit:
-          # permission denied`, then `rootlesskit:parent error: child exited: exit status 1`, and the
-          # socket is never created so charly's readiness deadline simply expires
-          # (opencharly/.github#271). Give THIS user that one directory; never a blanket chown.
-          sudo mkdir -p /run/buildkit
-          sudo chown "$(id -u):$(id -g)" /run/buildkit
-          test -w /run/buildkit || { echo "::error::/run/buildkit is not writable by $(id -un); buildkitd cannot start"; exit 1; }
+          # TWO host paths must be writable by THIS user, for ONE reason: rootlesskit maps this user
+          # to uid 0 inside its user namespace, so the daemon and its runc believe they are root and
+          # address ROOT-OWNED host paths. One predicate, one loop, so the two cannot drift.
+          #   /run/buildkit — buildkitd's trace controller does `mkdir /run/buildkit` BEFORE it
+          #     serves; measured `buildkitd: mkdir /run/buildkit: permission denied`, then
+          #     `rootlesskit:parent error: child exited: exit status 1`, socket never created, so
+          #     charly's readiness deadline simply expires (opencharly/.github#271).
+          #   /run/runc — runc chooses its state root from its EFFECTIVE uid, so it takes its
+          #     ROOTFUL default; measured on a caller build once the engine printed step output
+          #     (charly v2026.307.1020 carries `--progress plain`, opencharly/charly#1103):
+          #       #5 0.028 runc run failed: lstat /run/runc//<id>: permission denied
+          #     — 28 ms in, the recipe never reached, and every earlier run showed only
+          #     `did not complete successfully: exit code: 1` (opencharly/.github#263).
+          # Never a blanket chown: each path is created and owned individually.
+          for d in /run/buildkit /run/runc; do
+            sudo mkdir -p "$d"
+            sudo chown "$(id -u):$(id -g)" "$d"
+            test -w "$d" || { echo "::error::$d is not writable by $(id -un); the build cannot start"; exit 1; }
+          done
 
       - name: Preflight the builder
         run: |
