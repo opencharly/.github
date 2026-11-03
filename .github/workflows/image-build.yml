@@ -13,22 +13,62 @@
 # plugin-box's `dispatchBuild` takes `g.Tag` and only falls back to a clock CalVer when it is
 # empty), which is what makes the invariant enforceable rather than hoped for.
 #
-# INVOCATION. `on: workflow_call` only — it never self-runs. A repo opts in with a thin caller:
+# INVOCATION. `on: workflow_call` only — it never self-runs. A repo opts in with a thin caller, and
+# the caller MUST trigger on `workflow_run` completion of `tag-on-merge`, never on `push: tags`.
+#
+# WHY `push: tags` IS THE WRONG TRIGGER HERE, measured (opencharly/.github#277). `tag-on-merge`
+# mints the CalVer tag through the REST API (`git.createRef`), which emits NO push event, so a
+# `push: tags: ['v*']` listener can never see the tag this org actually creates. This was not a
+# hypothesis: `opencharly/pod-crabbox` merged and was tagged `v2026.307.1759` at `1b9a9c06`, the
+# caller declared `push: tags`, and ZERO image runs were created — every `image` run on record was
+# `pull_request`. The org's own `charly/.github/workflows/release-binary.yml` already documents the
+# remedy: chain off tag-on-merge COMPLETION, "the ONE trigger whose event delivery is proven".
+# `pod-crabbox` adopted exactly that shape and the publish then ran (`image | event=workflow_run |
+# completed/success`, and `ghcr.io/opencharly/pod-crabbox:2026.307.1828` exists).
+#
+# The canonical caller — copy this, do not invent a variant:
 #
 #   name: image
 #   on:
-#     push:
-#       tags: ['v*']
+#     workflow_run:
+#       workflows: ["tag-on-merge"]
+#       types: [completed]
 #     pull_request:
 #     workflow_dispatch:
 #   jobs:
+#     tag:
+#       runs-on: ${{ vars.CI_DOCKER_RUNNER_LABEL || 'ubuntu-latest' }}
+#       outputs:
+#         tag: ${{ steps.newest.outputs.tag }}
+#       steps:
+#         - id: newest
+#           env:
+#             EVENT: ${{ github.event_name }}
+#             CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+#             REPO: ${{ github.repository }}
+#           run: |
+#             set -euo pipefail
+#             if [ "${EVENT}" != "workflow_run" ] || [ "${CONCLUSION}" != "success" ]; then
+#               echo "tag=" >> "$GITHUB_OUTPUT"; exit 0
+#             fi
+#             tag="$(git ls-remote --tags --refs "https://github.com/${REPO}" 'v*' \
+#               | sed 's#.*refs/tags/##' | sort -V | tail -1)"
+#             [ -n "${tag}" ] || { echo "::error::no v* tag"; exit 1; }
+#             echo "tag=${tag#v}" >> "$GITHUB_OUTPUT"
 #     image:
+#       needs: tag
+#       if: github.event_name != 'workflow_run' || needs.tag.outputs.tag != ''
 #       uses: opencharly/.github/.github/workflows/image-build.yml@main
 #       with:
-#         push: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+#         tag: ${{ needs.tag.outputs.tag }}
+#         push: ${{ github.event_name == 'workflow_run' }}
 #       permissions:
 #         contents: read
 #         packages: write
+#
+# The newest tag is selected with `sort -V`, never `sort -u`: CalVer components are not zero-padded
+# to a fixed width, so a lexical sort picks the wrong one. `pull_request` / `workflow_dispatch` stay
+# build-only (`push: false`), which is the reusable's own build-only proof.
 #
 # `box:` defaults to the CALLING REPOSITORY'S NAME, which is the W5.2 convention (one repo per image,
 # the box named after the repo), so a caller that follows the convention passes nothing.
