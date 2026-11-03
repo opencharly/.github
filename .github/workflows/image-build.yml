@@ -149,8 +149,9 @@ jobs:
           miss=""
           # slirp4netns is how ROOTLESSKIT gives the build a network. Without it a build's RUN steps
           # get no egress, and `pacman -Syu` fails with exit 1 and no further explanation — which is
-          # exactly the shape of the current failure (opencharly/.github#271). Probe it, and probe
-          # egress itself, so the answer is measured rather than inferred.
+          # exactly the shape of the current failure (opencharly/.github#271). This step probes the
+          # TOOL only; egress itself is not probed here, and the comment must not claim otherwise
+          # (opencharly/.github#274 round 1, finding 3).
           for t in buildkitd rootlesskit newuidmap newgidmap slirp4netns; do
             p="$(command -v "$t" 2>/dev/null || true)"
             if [ -n "$p" ]; then echo "present: $t -> $p"; else echo "ABSENT:  $t"; miss="$miss$t "; fi
@@ -210,11 +211,17 @@ jobs:
           BOX: ${{ inputs.box }}
           REPO_NAME: ${{ github.event.repository.name }}
           IMAGE_TAG: ${{ steps.tag.outputs.tag }}
+          PUSH_INPUT: ${{ inputs.push }}
+          CHARLY_BIN: /tmp/charly-src/bin/charly
         run: |
+          # EVERY input is an environment variable, never a GitHub expression in the body: that is
+          # what lets scripts/image-build-tag_test.sh extract this step's SHIPPED text and drive it
+          # with a stub binary, so the publish arm is covered instead of assumed
+          # (opencharly/.github#274 round 1, finding 2).
           box="${BOX:-$REPO_NAME}"
           args=(box build "$box" --tag "$IMAGE_TAG")
-          if [ "${{ inputs.push }}" = "true" ]; then args+=(--push); fi
-          /tmp/charly-src/bin/charly "${args[@]}"
+          if [ "${PUSH_INPUT}" = "true" ]; then args+=(--push); fi
+          "$CHARLY_BIN" "${args[@]}"
 
       - name: Daemon log (always)
         if: always()
