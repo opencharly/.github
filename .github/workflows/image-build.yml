@@ -140,6 +140,21 @@ jobs:
           sudo mkdir -p /run/buildkit
           sudo chown "$(id -u):$(id -g)" /run/buildkit
           test -w /run/buildkit || { echo "::error::/run/buildkit is not writable by $(id -un); buildkitd cannot start"; exit 1; }
+          # runc's state root is chosen from its EFFECTIVE uid: rootlesskit maps this user to uid 0
+          # inside its user namespace, so runc believes it is root and picks its ROOTFUL default,
+          # /run/runc. On the runner that path exists, is root-owned, and is not traversable by this
+          # user — so the FIRST `RUN` dies before executing anything. Measured on a caller build once
+          # the engine began printing step output (charly v2026.307.1020 carries `--progress plain`):
+          #
+          #   #5 0.028 runc run failed: lstat /run/runc//4u7q9fyvlqri1tx69x2couqh7: permission denied
+          #
+          # — 28 ms in, the recipe never reached, and every earlier run showed only
+          # `did not complete successfully: exit code: 1` because the engine discarded the step's
+          # stderr (opencharly/.github#263, #271). Give THIS user that one directory, exactly as
+          # /run/buildkit is given above; never a blanket chown.
+          sudo mkdir -p /run/runc
+          sudo chown "$(id -u):$(id -g)" /run/runc
+          test -w /run/runc || { echo "::error::/run/runc is not writable by $(id -un); the build's first RUN cannot start"; exit 1; }
 
       - name: Preflight the builder
         run: |
