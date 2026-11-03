@@ -1,0 +1,279 @@
+# ORG IMAGE BUILD — the reusable single source for building and publishing a box image.
+#
+# WHY THIS EXISTS. W5 of the containerd/libkrun programme publishes twelve `pod-crabbox*` images,
+# and before this file the org had NO image-build workflow at all (`ls .github/workflows | grep -i
+# image` returned nothing), so every one of those repos would have grown its own hand-rolled build.
+# That is the class candy-validate.yml already retired for manifests: one gate, one source, the org
+# variable as the single knob.
+#
+# THE INVARIANT THIS FILE EXISTS TO PROTECT — **image tag == git tag, without the `v`.** A variant's
+# `charly.yml` imports its parent as `@github.com/opencharly/pod-crabbox:<tag>`, and the registry
+# path is `ghcr.io/opencharly/pod-crabbox:<tag>`; those two only name the same build if the image
+# tag and the git tag agree. `charly box build --tag <t>` uses a supplied tag VERBATIM (measured:
+# plugin-box's `dispatchBuild` takes `g.Tag` and only falls back to a clock CalVer when it is
+# empty), which is what makes the invariant enforceable rather than hoped for.
+#
+# INVOCATION. `on: workflow_call` only — it never self-runs. A repo opts in with a thin caller:
+#
+#   name: image
+#   on:
+#     push:
+#       tags: ['v*']
+#     pull_request:
+#     workflow_dispatch:
+#   jobs:
+#     image:
+#       uses: opencharly/.github/.github/workflows/image-build.yml@main
+#       with:
+#         push: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+#       permissions:
+#         contents: read
+#         packages: write
+#
+# `box:` defaults to the CALLING REPOSITORY'S NAME, which is the W5.2 convention (one repo per image,
+# the box named after the repo), so a caller that follows the convention passes nothing.
+#
+# WHY THE ENGINE PIN IS REFUSED RATHER THAN DEFAULTED. `vars.CHARLY_VERSION` is the org's single
+# engine pin (the same variable the PR validator and candy-validate read). An unset or
+# not-visible-to-this-repo value silently builds with whatever is on the runner — a gate that
+# drifts without reddening. This step fails loud instead, and it is the FIRST thing the job does
+# after checkout.
+
+name: image-build
+
+on:
+  workflow_call:
+    inputs:
+      box:
+        description: 'Box to build. Empty = the calling repository name (W5.2: one repo per image).'
+        type: string
+        required: false
+        default: ''
+      push:
+        description: 'Publish the built image to ghcr.io. False builds only (the pull_request proof).'
+        type: boolean
+        required: false
+        default: false
+      tag:
+        description: 'Image tag. Empty = derived from a v* tag (the v stripped). No derivable tag: a build-only run (push=false) uses a local ci-<sha> and publishes nothing; a PUBLISHING run (push=true) FAILS — never a clock CalVer.'
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ${{ vars.CI_DOCKER_RUNNER_LABEL || 'opencharly-ubuntu' }}
+    steps:
+      - name: Check out the tree under build
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7, node24
+        with:
+          # A box's `import:` paths are submodules; without them the project cannot load.
+          submodules: recursive
+
+      - name: Refuse an unpinned engine
+        env:
+          CHARLY_VERSION: ${{ vars.CHARLY_VERSION || '' }}
+        run: |
+          if [ -z "${CHARLY_VERSION:-}" ]; then
+            echo "::error::vars.CHARLY_VERSION is unset or not visible to this repo — refusing to build with an unpinned charly."
+            exit 1
+          fi
+          echo "engine pin: ${CHARLY_VERSION}"
+
+      - name: Fetch charly at the engine pin
+        env:
+          CHARLY_VERSION: ${{ vars.CHARLY_VERSION }}
+        run: |
+          rm -rf /tmp/charly-src
+          git clone --depth 1 --branch "${CHARLY_VERSION}" \
+            https://github.com/opencharly/charly.git /tmp/charly-src
+
+      - name: Set up Go (the engine is a Go build)
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0, node24
+        with:
+          go-version-file: /tmp/charly-src/charly/go.mod
+          cache-dependency-path: /tmp/charly-src/charly/go.sum
+
+      - name: Build the engine
+        run: |
+          cd /tmp/charly-src
+          ./scripts/bootstrap-charly.sh
+          ./bin/charly version
+
+      - name: Ensure the builder
+        env:
+          BUILDKIT_VERSION: v0.34.1
+        run: |
+          # The runner ships rootlesskit but NEITHER buildkitd NOR the uid-map helpers — measured on
+          # 2026-11-02 (opencharly/.github#271): buildkitd ABSENT, newuidmap ABSENT, newgidmap ABSENT,
+          # while kernel.unprivileged_userns_clone=1 and `unshare -Ur` works. So the platform permits
+          # a rootless builder and the runner simply lacks two packages; this establishes them the way
+          # the engine is established, at a PINNED version. The preflight that follows proves it.
+          # uidmap gives rootlesskit its uid mapping; slirp4netns gives the BUILD its network.
+          # Both measured absent on this runner (opencharly/.github#271): without slirp4netns a
+          # RUN step has no egress and `pacman -Syu` exits 1 with nothing else to say.
+          # skopeo is the digest verifier the publish path uses; it is established HERE for the
+          # same reason as the others — a step that calls a tool must not assume the runner has it
+          # (opencharly/.github#274 round 1).
+          if ! command -v newuidmap >/dev/null 2>&1 || ! command -v newgidmap >/dev/null 2>&1 \
+             || ! command -v slirp4netns >/dev/null 2>&1 \
+             || ! command -v skopeo >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq uidmap slirp4netns skopeo
+          fi
+          if ! command -v buildkitd >/dev/null 2>&1; then
+            tmp="$(mktemp -d)"
+            curl -fsSL "https://github.com/moby/buildkit/releases/download/${BUILDKIT_VERSION}/buildkit-${BUILDKIT_VERSION}.linux-amd64.tar.gz" -o "$tmp/buildkit.tgz"
+            sudo tar -C /usr/local -xzf "$tmp/buildkit.tgz"
+            rm -rf "$tmp"
+          fi
+          buildkitd --version
+          # buildkitd's trace controller does `mkdir /run/buildkit` BEFORE it serves, and in rootless
+          # mode it is not privileged to create that path: measured — `buildkitd: mkdir /run/buildkit:
+          # permission denied`, then `rootlesskit:parent error: child exited: exit status 1`, and the
+          # socket is never created so charly's readiness deadline simply expires
+          # (opencharly/.github#271). Give THIS user that one directory; never a blanket chown.
+          sudo mkdir -p /run/buildkit
+          sudo chown "$(id -u):$(id -g)" /run/buildkit
+          test -w /run/buildkit || { echo "::error::/run/buildkit is not writable by $(id -un); buildkitd cannot start"; exit 1; }
+
+      - name: Preflight the builder
+        run: |
+          # A build that dies "the daemon did not answer ... within 15s" with an EMPTY daemon log
+          # tells the reader nothing (opencharly/.github#271). Name the cause BEFORE the build runs,
+          # and fail with it, so a missing builder is never mistaken for a broken box recipe.
+          miss=""
+          # slirp4netns is how ROOTLESSKIT gives the build a network. Without it a build's RUN steps
+          # get no egress, and `pacman -Syu` fails with exit 1 and no further explanation — which is
+          # exactly the shape of the current failure (opencharly/.github#271). This step probes the
+          # TOOL only; egress itself is not probed here, and the comment must not claim otherwise
+          # (opencharly/.github#274 round 1, finding 3).
+          for t in buildkitd rootlesskit newuidmap newgidmap slirp4netns; do
+            p="$(command -v "$t" 2>/dev/null || true)"
+            if [ -n "$p" ]; then echo "present: $t -> $p"; else echo "ABSENT:  $t"; miss="$miss$t "; fi
+          done
+          echo "kernel.unprivileged_userns_clone: $(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo n/a)"
+          if unshare -Ur true 2>/dev/null; then echo "unshare -Ur: ok"; else echo "unshare -Ur: FAILED"; fi
+          # rootlesskit cannot map a uid range without a subuid/subgid entry for THIS user, and
+          # when it cannot, it dies without a message — which is the shape of the empty daemon log.
+          # Print the entries so the next failure names the cause instead of the symptom
+          # (opencharly/.github#271).
+          echo "user: $(id -un) uid=$(id -u)"
+          echo "/etc/subuid: $(grep "^$(id -un):" /etc/subuid 2>/dev/null || echo '<no entry for this user>')"
+          echo "/etc/subgid: $(grep "^$(id -un):" /etc/subgid 2>/dev/null || echo '<no entry for this user>')"
+          if [ -n "$miss" ]; then
+            echo "::error::the image build needs a rootless builder and this runner lacks: ${miss}- install buildkit + rootlesskit + uidmap, or run this workflow on a runner that ships them (opencharly/.github#271)"
+            exit 1
+          fi
+
+      - name: Derive the image tag
+        id: tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          PUSH_INPUT: ${{ inputs.push }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          REF: ${{ github.ref }}
+        run: |
+          tag="${INPUT_TAG:-}"
+          if [ -z "$tag" ] && [ "$EVENT_NAME" = "push" ] && [ "${REF#refs/tags/v}" != "$REF" ]; then
+            tag="${REF_NAME#v}"
+          fi
+          if [ -z "$tag" ]; then
+            # The image-tag == git-tag invariant binds what is PUBLISHED. A build-only run publishes
+            # nothing, so it gets a tag that is obviously local and can never be mistaken for a
+            # release — `ci-<sha>` — and the build proceeds, which is what the pull_request proof
+            # depends on. A run that IS publishing and cannot name a tag is a hard failure.
+            if [ "${PUSH_INPUT}" = "true" ]; then
+              echo "::error::no image tag derivable for a PUBLISHING run: no --tag input and this is not a v-tag push. Refusing to publish an unreferenced tag."
+              exit 1
+            fi
+            tag="ci-${GITHUB_SHA::12}"
+            echo "::notice::build-only run (push=false): using the non-publishing tag ${tag}"
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "image tag: ${tag}"
+
+      - name: Log in to ghcr.io (token on stdin, never argv)
+        if: inputs.push
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          printf '%s' "${GHCR_TOKEN}" | docker login ghcr.io -u "${ACTOR}" --password-stdin
+
+      - name: Build the image
+        env:
+          BOX: ${{ inputs.box }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          IMAGE_TAG: ${{ steps.tag.outputs.tag }}
+          PUSH_INPUT: ${{ inputs.push }}
+          CHARLY_BIN: /tmp/charly-src/bin/charly
+        run: |
+          # EVERY input is an environment variable, never a GitHub expression in the body: that is
+          # what lets scripts/image-build-tag_test.sh extract this step's SHIPPED text and drive it
+          # with a stub binary, so the publish arm is covered instead of assumed
+          # (opencharly/.github#274 round 1, finding 2).
+          box="${BOX:-$REPO_NAME}"
+          args=(box build "$box" --tag "$IMAGE_TAG")
+          if [ "${PUSH_INPUT}" = "true" ]; then args+=(--push); fi
+          "$CHARLY_BIN" "${args[@]}"
+
+      - name: Daemon log (always)
+        if: always()
+        run: |
+          # sdk/buildkitdrive/daemon.go:123,130 writes the daemon's stdout+stderr to
+          # <stateRoot>/buildkitd.log — so when the readiness deadline expires the evidence EXISTS
+          # on disk and has simply never been read (opencharly/.github#271). Print it, whatever the
+          # build step decided.
+          found=0
+          for f in "$HOME/.cache/charly/buildkitd/buildkitd.log" "$HOME/.local/state/charly/buildkitd/buildkitd.log"; do
+            if [ -f "$f" ]; then
+              found=1
+              echo "=== $f ($(wc -c <"$f") bytes) ==="
+              tail -n 80 "$f"
+            fi
+          done
+          if [ "$found" -eq 0 ]; then
+            echo "no buildkitd.log under the charly state/cache roots — the daemon never wrote one"
+          fi
+
+      - name: Verify the published digest
+        if: inputs.push
+        env:
+          BOX: ${{ inputs.box }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          IMAGE_TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          # The tag is only a real publication if the registry ANSWERS for it at the SAME tag the
+          # git tag names. A build that reported success and pushed nothing is caught here.
+          ref="docker://ghcr.io/opencharly/${BOX:-$REPO_NAME}:${IMAGE_TAG}"
+          digest="$(skopeo inspect "${ref}" --format '{{.Digest}}')"
+          if [ -z "$digest" ]; then
+            echo "::error::${ref} resolved to no digest after a push"
+            exit 1
+          fi
+          echo "published: ${ref}@${digest}"
+
+      - name: Summary
+        if: always()
+        env:
+          BOX: ${{ inputs.box }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          IMAGE_TAG: ${{ steps.tag.outputs.tag }}
+          PUSHED: ${{ inputs.push }}
+        run: |
+          {
+            echo "### image-build"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| box | \`${BOX:-$REPO_NAME}\` |"
+            echo "| image tag | \`${IMAGE_TAG:-<underived>}\` |"
+            echo "| pushed | \`${PUSHED}\` |"
+            echo "| engine | \`${{ vars.CHARLY_VERSION }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
