@@ -91,4 +91,32 @@ if ( export GITHUB_OUTPUT="$STATE/out2" GITHUB_SHA=0123456789abcdef0123456789abc
   fail "NEGATIVE CONTROL: with the build-only arm stripped, a build-only run must fail this coverage"
 fi
 
+# ---- case 5: the PUBLISH arm — --push is added only when publishing ----------------------
+# The build step's body carries no GitHub expression, so its SHIPPED text runs here against a
+# STUB binary; without this the publish arm ships unproven (opencharly/.github#274 finding 2).
+extract_step_run "$WF" '^ *- name: Build the image$' "$STATE/build.sh"
+[[ -s "$STATE/build.sh" ]] || fail "the 'Build the image' step was not found in $WF"
+if grep -q '[$]{{' "$STATE/build.sh"; then
+  fail "the build step carries a GitHub expression, so its publish arm cannot be executed here"
+fi
+mkdir -p "$STATE/bin"
+printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\\n" "$@" >"$STUB_ARGS_OUT"' >"$STATE/bin/stub-charly"
+chmod +x "$STATE/bin/stub-charly"
+
+run_build() {
+  : >"$STATE/args"
+  ( export STUB_ARGS_OUT="$STATE/args" BOX="pod-crabbox" REPO_NAME="pod-crabbox" \
+           IMAGE_TAG="ci-abc123" PUSH_INPUT="$1" CHARLY_BIN="$STATE/bin/stub-charly"
+    bash "$STATE/build.sh" ) >"$STATE/build.log" 2>&1
+}
+
+run_build false || fail "a build-only run must not fail: $(cat "$STATE/build.log")"
+grep -qx -- '--tag' "$STATE/args" || fail "the build argv must carry --tag; got: $(tr '\n' ' ' <"$STATE/args")"
+if grep -qx -- '--push' "$STATE/args"; then
+  fail "a build-only run must NOT pass --push; got: $(tr '\n' ' ' <"$STATE/args")"
+fi
+
+run_build true || fail "a publishing run must not fail: $(cat "$STATE/build.log")"
+grep -qx -- '--push' "$STATE/args" || fail "a publishing run MUST pass --push; got: $(tr '\n' ' ' <"$STATE/args")"
+
 echo "image-build-tag_test: OK (explicit tag verbatim; v-tag push strips the v; build-only derives ci-<sha> and announces it; a publishing run without a tag refuses by name; the build-only arm is load-bearing)"
