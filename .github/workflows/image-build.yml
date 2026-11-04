@@ -250,7 +250,13 @@ jobs:
           echo "image tag: ${tag}"
 
       - name: Log in to ghcr.io (token on stdin, never argv)
-        if: inputs.push
+        # ALWAYS, not only when publishing. A build-only run still PULLS: a variant's
+        # `base:` is an image in this registry, and without an explicit login the pull
+        # uses whatever credential the shared runner happens to carry — a stale or
+        # foreign `~/.docker/config.json` — which is denied even for a PUBLIC package
+        # (opencharly/.github#280, measured on pod-crabbox's code/browser/gpu arms).
+        # An authenticated read of a public package is always permitted, so logging in
+        # unconditionally is the deterministic form.
         env:
           GHCR_TOKEN: ${{ github.token }}
           ACTOR: ${{ github.actor }}
