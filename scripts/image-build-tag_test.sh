@@ -119,4 +119,35 @@ fi
 run_build true || fail "a publishing run must not fail: $(cat "$STATE/build.log")"
 grep -qx -- '--push' "$STATE/args" || fail "a publishing run MUST pass --push; got: $(tr '\n' ' ' <"$STATE/args")"
 
+# --- the login step must be UNCONDITIONAL (opencharly/.github#280) ---
+# A build-only run still PULLS: a variant's `base:` is an image in this registry. While the
+# login carried `if: inputs.push`, that pull fell back to the runner's stale credential and was
+# denied even for a PUBLIC package. The extraction test above drives the BUILD step, so it passed
+# identically with and without the `if:` -- exactly the "coverage that cannot fail" defect. This
+# block reads the SHIPPED login step and requires it to carry no `if:`.
+
+login_guard() {  # $1 = workflow path; prints an `if:` line if the login step is conditional
+  awk '
+    /- name: Log in to ghcr\.io/ { inlogin = 1; depth = 0 }
+    inlogin && /^[[:space:]]+if:/ { print; exit }
+    inlogin && /^[[:space:]]+- name:/ && !/Log in to ghcr/ { inlogin = 0 }
+  ' "$1"
+}
+
+guard="$(login_guard "$WF")"
+if [ -n "$guard" ]; then
+  fail "the ghcr.io login step is CONDITIONAL (${guard}); a build-only run would not authenticate and every variant's base pull would be denied (opencharly/.github#280)"
+fi
+
+# The control: restore the old `if: inputs.push` and require the block above to go RED.
+CTL2="$STATE/wf-login-conditional.yml"
+awk '
+  /- name: Log in to ghcr\.io/ { print; inlogin = 1; next }
+  inlogin && !done && /^[[:space:]]+env:/ { print "        if: inputs.push"; done = 1 }
+  { print }
+' "$WF" > "$CTL2"
+if [ -z "$(login_guard "$CTL2")" ]; then
+  fail "the login-coverage control did not go RED on a workflow whose login step is conditional -- the check above cannot fail"
+fi
+
 echo "image-build-tag_test: OK (explicit tag verbatim; v-tag push strips the v; build-only derives ci-<sha> and announces it; a publishing run without a tag refuses by name; the build-only arm is load-bearing)"
