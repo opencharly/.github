@@ -78,8 +78,12 @@ discover_excludes() {
 }
 
 # discover_membership — the active, non-fork repos as `<name>\t<default_branch>`,
-# the read org-ruleset.sh's membership arm needs. Same single discovery, so that
-# arm cannot diverge from (or independently flake behind) the target set.
+# the read org-ruleset.sh's membership arm needs. It issues its OWN paged,
+# count-checked fetch: a command substitution cannot memoise, so this read CAN
+# diverge from the target set (a repo created between the two lands in neither)
+# and CAN fail behind a successful targets read. Neither is silent — each read
+# refuses a truncated set and every call site aborts on failure — and putting all
+# three filters on ONE read per script is opencharly/.github#292.
 discover_membership() {
   discover_all | awk -F'\t' '$2 == "false" && $3 == "false" { print $1 "\t" $4 }'
 }

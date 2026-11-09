@@ -24,9 +24,9 @@ gh() {
   shift
   local raw="$*"
 
-  # DISCOVERY (opencharly/.github#290). ONE read now serves the target set, the exclude
-  # set AND the membership arm, because lib-org.sh pages REST and checks the org's own
-  # repo count. The fixture is synthesised from the knobs the cases already use:
+  # DISCOVERY (opencharly/.github#290). Each filter issues its OWN paged REST read, so
+  # the mock answers every call and the counter below can fail the SECOND one. The
+  # fixture is synthesised from the knobs the cases already use:
   #   alpha, beta            two clean targets (`main`, neither fork nor archived)
   #   MEMBERSHIP_LIST        `<name>\t<default>` rows, active and non-fork
   #   EXCLUDE_LIST           names served as ARCHIVED rows (real exclude content)
