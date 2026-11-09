@@ -85,7 +85,6 @@ run_ensure() {
     bash -e -o pipefail "$script" > "$TMP/$label.log" 2>&1 || rc=$?
   echo "\$ CHARLY_VERSION=$tag bash <$label>   -> exit=$rc"
   grep -E '::error::|::warning::on-PATH' "$TMP/$label.log" | sed "s|$TMP|\$RUNNER_TEMP|g" || true
-  return 0
   if [[ -s "$TMP/$label.out" ]]; then
     echo "--- GITHUB_OUTPUT ---"; cat "$TMP/$label.out"
   else
