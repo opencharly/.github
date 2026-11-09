@@ -24,20 +24,64 @@ readonly SOURCE_REPO=".github"
 readonly DISPATCHER_PATH=".github/workflows/pr-validator.yml"
 readonly SOURCE_DISPATCHER_PATH=".github/workflows/pr-validator-dispatcher.yml"
 
+# discovery page size — the ONE named literal (R3: no unnamed magic number).
+#
+# WHY REST PAGING AND NOT ONE `gh repo list --limit 1000` (opencharly/.github#290).
+# The org holds ~486 repos, so the single GraphQL listing was five requests, and its
+# later pages returned 502/504 intermittently while `--limit 100`/`--limit 200` and
+# REST paging answered on every attempt. Measured INTERLEAVED, so the variable was
+# the request, not the minute. Discovery is step zero of every org-wide script, so a
+# flake there aborts the whole report — which is what happened: four consecutive
+# attempts at the tag-on-merge caller rollout died at `FATAL: discover_repos failed`.
+readonly DISCOVERY_PAGE_SIZE="${DISCOVERY_PAGE_SIZE:-100}"
+
+# discover_all — every repo the listing can see, one row per repo, TAB-separated:
+#   <name>\t<archived>\t<fork>\t<default_branch>
+#
+# TWO CONTROLS, and they are different controls:
+#   1. `--paginate` returns non-zero if ANY page fails, so a page that 502s can
+#      never be mistaken for the end of the org.
+#   2. The COUNT is checked against the org's own total. A merely TRUNCATED
+#      successful response would still read as a smaller org to every caller — the
+#      same class as the `mapfile < <(fn)` trap described at the top of this file,
+#      where emptiness is not a failure signal on its own. One cheap request buys
+#      the invariant.
+# A repo created between the listing and the count makes this fail LOUD rather than
+# return a set nobody verified; the caller retries and gets a consistent pair.
+discover_all() {
+  local rows got want
+  if ! rows="$(gh api --paginate "orgs/${ORG}/repos?per_page=${DISCOVERY_PAGE_SIZE}" \
+      --jq '.[] | [.name, (.archived|tostring), (.fork|tostring), (.default_branch // "")] | @tsv')"; then
+    echo "discover_all: the org listing FAILED — refusing to return a partial repo set" >&2
+    return 1
+  fi
+  if ! want="$(gh api "orgs/${ORG}" --jq '(.public_repos // 0) + (.total_private_repos // 0)')"; then
+    echo "discover_all: the org repo COUNT could not be read — refusing to return an unverifiable repo set" >&2
+    return 1
+  fi
+  got="$(printf '%s\n' "$rows" | sed '/^$/d' | wc -l)"
+  if [ "$got" -ne "$want" ]; then
+    echo "discover_all: discovered ${got} repo(s) but the org reports ${want} — a page was TRUNCATED; refusing to understate the org" >&2
+    return 1
+  fi
+  printf '%s\n' "$rows"
+}
+
 # discover_repos — active, non-fork, `main`-default repos (the target set).
 discover_repos() {
-  gh repo list "$ORG" --limit 1000 \
-    --json name,isArchived,isFork,defaultBranchRef \
-    --jq '.[] | select(.isArchived == false and .isFork == false and .defaultBranchRef.name == "main") | .name' \
-    | sed '/^$/d' | sort
+  discover_all | awk -F'\t' '$2 == "false" && $3 == "false" && $4 == "main" { print $1 }' | sort
 }
 
 # discover_excludes — everything NOT in the target set (archived, fork, non-main).
 discover_excludes() {
-  gh repo list "$ORG" --limit 1000 \
-    --json name,isArchived,isFork,defaultBranchRef \
-    --jq '.[] | select((.isArchived == true) or (.isFork == true) or (.defaultBranchRef.name != "main")) | .name' \
-    | sed '/^$/d' | sort
+  discover_all | awk -F'\t' '$2 == "true" || $3 == "true" || $4 != "main" { print $1 }' | sort
+}
+
+# discover_membership — the active, non-fork repos as `<name>\t<default_branch>`,
+# the read org-ruleset.sh's membership arm needs. Same single discovery, so that
+# arm cannot diverge from (or independently flake behind) the target set.
+discover_membership() {
+  discover_all | awk -F'\t' '$2 == "false" && $3 == "false" { print $1 "\t" $4 }'
 }
 
 # declared_non_main_defaults — the active, non-fork repos whose default branch is
