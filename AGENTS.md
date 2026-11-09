@@ -97,6 +97,14 @@ Canonical files:
   of invisible; keep the variable visible to ALL.
 - The gate, the ruleset, and the template are self-modifying-security surfaces:
   a change here gets heightened review and must strengthen or preserve the gate.
+- **A change to `pr-validator.yml` is the gate ITSELF (T4): it needs a
+  MAINTAINER-ACCOUNT SIGN-OFF on the PR, and the sign-off goes up BEFORE the run that
+  is expected to produce a verdict** — the posting ACCOUNT is the gate
+  (`atrawog`/`aitrawog`), the sign-off names the head, and an agent may post it only at
+  the operator's explicit direction and saying so. Without it the review BLOCKs on T4
+  alone, whatever the diff proves (`opencharly/.github#196` was first BLOCKed on exactly
+  this; `#287` repeats the shape). Raise it when you START the change, not after the
+  first BLOCK: the gate cannot merge a promise of a future sign-off.
 
 ## Landing
 

@@ -35,12 +35,21 @@
 # tag), the outputs, and the gate step — is the shipped text verbatim.
 #
 # usage: bash proof-engine-pin.sh [<tag-that-answers> [<second-tag>]]
-#   defaults: v2026.313.0209 (the current release), v2026.308.2259 (the tag #285 named).
+#   defaults: derived at RUN TIME — the tag the org pin names today, and the release
+#   before it. No tag is written into this file: a literal here would be exactly the
+#   rot-prone value the harness exists to expose.
 #   Needs `gh` (the API classification and its token) and python3 (the replay endpoints).
 set -euo pipefail
 
-GOOD_TAG="${1:-v2026.313.0209}"
-OTHER_TAG="${2:-v2026.308.2259}"
+# THE TAGS ARE RESOLVED, NEVER CARRIED. A literal tag here is the very defect this harness
+# exists to make visible — a value that rots and is then read as if it were live. So the
+# default pair is derived at run time: the tag the org PIN names today, and the release
+# BEFORE it (the one a report is most likely to have blamed). Pass two tags to override.
+GOOD_TAG="${1:-$(gh variable get CHARLY_VERSION --org opencharly)}"
+OTHER_TAG="${2:-$(gh release list -R opencharly/charly --exclude-drafts --limit 2 \
+                    --json tagName --jq '.[1].tagName')}"
+[[ -n "$GOOD_TAG" && -n "$OTHER_TAG" ]] \
+  || { echo "FATAL: could not resolve the tag pair — pass them: proof-engine-pin.sh <good> <other>" >&2; exit 1; }
 WF="${WF:-.github/workflows/pr-validator.yml}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TMP="$(mktemp -d)"
