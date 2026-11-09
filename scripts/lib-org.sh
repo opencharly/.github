@@ -47,7 +47,8 @@ readonly DISCOVERY_PAGE_SIZE="${DISCOVERY_PAGE_SIZE:-100}"
 #      where emptiness is not a failure signal on its own. One cheap request buys
 #      the invariant.
 # A repo created between the listing and the count makes this fail LOUD rather than
-# return a set nobody verified; the caller retries and gets a consistent pair.
+# return a set nobody verified. Nothing retries it (R3): every call site ABORTS on a
+# non-zero status, and a re-run yields a consistent pair.
 discover_all() {
   local rows got want
   if ! rows="$(gh api --paginate "orgs/${ORG}/repos?per_page=${DISCOVERY_PAGE_SIZE}" \

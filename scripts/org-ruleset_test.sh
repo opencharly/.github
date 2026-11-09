@@ -270,9 +270,9 @@ grep -q 'fresh: no default branch yet (empty repo)' "$STATE/mem2.out" \
 [[ -s "$STATE/mem2.err" ]] && { echo "FAIL: an undeclared failure must not appear for a declared/empty population: $(cat "$STATE/mem2.err")" >&2; exit 1; }
 
 # A failed MEMBERSHIP read must ABORT the verify — a failed read can never read as a
-# clean membership. It shares lib-org.sh's ONE discovery with the target and exclude
-# sets now, so the knob is FORCE_DISCOVERY_FAIL; the arm still fails independently at
-# THIS call site (verify), which is what the case asserts.
+# clean membership. Each filter issues its OWN read, so the knob is FORCE_DISCOVERY_FAIL:
+# every discovery in the run fails, and the arm must abort at THIS call site (verify)
+# rather than report a clean membership — which is what the case asserts.
 if FORCE_DISCOVERY_FAIL=1 OPENCHARLY_ORG=test "$root/scripts/org-ruleset.sh" verify >/dev/null 2>&1; then
   echo "FAIL: verify must refuse a clean membership from a failed read" >&2; exit 1
 fi
