@@ -363,6 +363,20 @@ gh variable set CHARLY_VERSION --org opencharly --body <tag> --visibility all
 
 Bump it deliberately per release.
 
+A pin that IS set can still be unobtainable, so the gate measures the fetch and names the
+class it got instead of guessing at one. `asset unreachable — <url> answered HTTP <status>`
+means GitHub's download path failed to serve the asset: the pin and the release are both
+intact, so the remedy is a **re-run**, and moving the pin cannot help. `asset absent` means
+the published release does not serve the asset (re-upload it, or move the pin). A tag with
+no published release keeps the older `engine pin unresolvable` class. Measured 2026-11-09:
+the download path answers **504** with a 92-byte gateway page for individual assets while
+the release API reports every asset `uploaded` at its full size — so the API cannot see the
+condition at all, and only a real fetch can. The same bytes answer over the API asset route
+(`GET /repos/opencharly/charly/releases/assets/<id>` with `Accept: application/octet-stream`);
+the gate deliberately does NOT fall back to that route, because a silent second fetch would
+hide the class instead of naming it (R3). It is the operator's diagnostic when the path is
+down.
+
 ## Scope & evidence baseline (honest capability statement)
 
 This gate is a **static diff + thread review** run by a fresh independent validator

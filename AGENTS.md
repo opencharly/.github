@@ -64,6 +64,17 @@ Canonical files:
   reusable is judged by EXTRACTING its shipped text and running THAT — the
   extraction is the shared one in `scripts/lib-org.sh`, so the step-level tests
   cannot drift apart in how they read the workflow.
+- The **engine-pin ASSET PROBE** in `Ensure charly` decides whether the pinned release's
+  assets are actually FETCHABLE before a review is attempted, and NAMES the class when
+  they are not: a 5xx / transport failure / a body that is not the asset is the DOWNLOAD
+  PATH failing (the pin and the release are both fine — the remedy is a RE-RUN), a 4xx is
+  the release not serving the asset (re-upload), and a dead tag is the pin itself. It
+  exists because the gate called every one of those "a partial upload" and sent the
+  operator to move a pin that was already correct (opencharly/.github#285). Its coverage
+  is `scripts/engine-pin-asset_test.sh` — it extracts the shipped step and runs THAT
+  against a stubbed `curl`, because the live endpoint is intermittent and a live-driven
+  discrimination could not be deterministic — and `scripts/proof-engine-pin.sh` runs the
+  same shipped text live for the measurement.
 - `scripts/org-ruleset.sh verify` asserts the whole org end state.
 
 ## Modify this repo

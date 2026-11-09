@@ -72,6 +72,17 @@ jobs:
       # content, and is never copied into the repo.
       - name: Run the org-rulebook assert test (offline, extracted step text)
         run: bash scripts/assert-org-rulebook_test.sh
+      # The engine-pin ASSET PROBE lives INSIDE the reusable workflow too: it decides
+      # whether the pinned release's binary is actually FETCHABLE before a review is
+      # attempted, and it names the class when it is not (opencharly/.github#285). Its
+      # coverage extracts the shipped step's text and runs THAT against a stubbed
+      # `curl`, because the real endpoint is INTERMITTENT — measured 2026-11-09, one
+      # asset answered 200 while another answered 504 within the same minute, so a
+      # discrimination driven by the live network could not be deterministic. The
+      # harness runs the shipped steps end to end, the gate's posted comment body
+      # included, and three negative controls prove it can fail.
+      - name: Run the engine-pin asset-probe test (offline, extracted step text)
+        run: bash scripts/engine-pin-asset_test.sh
       # The reconcile script's two dimensions and its repo allow-list. This test existed but
       # nothing ran it: a script whose own coverage is never executed is a script whose
       # regressions are found in the org instead of here.

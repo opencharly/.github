@@ -156,3 +156,9 @@ stall_shapes	detector workflow	dotgithub/.github/workflows/stalled-automerge-det
 # measured on opencharly/sdk#317). The class lives in the one workflow that can produce it; this
 # row keeps its name from drifting out of that path.
 unresolvable_pin_infra	validator workflow	dotgithub/.github/workflows/pr-validator.yml	require	engine pin unresolvable
+# opencharly/.github#285: the engine-pin fetch must MEASURE the asset's OWN HTTP status and
+# name the class it produced, and the retired single-valued output must not come back. The
+# 'require' row also ANCHORS the path (opencharly/.github#250), which is what lets the
+# 'forbid' row below be read as a rule rather than as a vacuous absence.
+engine_pin_asset_probe	validator workflow	dotgithub/.github/workflows/pr-validator.yml	require	asset unreachable
+engine_pin_asset_probe_retired_output	validator workflow	dotgithub/.github/workflows/pr-validator.yml	forbid	pin_class
