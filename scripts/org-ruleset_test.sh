@@ -35,6 +35,15 @@ gh() {
   #   FORCE_DISCOVERY_FAIL=1 the listing itself fails
   if [[ "$raw" == *"/repos?per_page="* ]]; then
     [[ "${FORCE_DISCOVERY_FAIL:-}" == 1 ]] && return 1
+    # Each filter issues its OWN read (lib-org.sh does not memoise), so a failure can
+    # land on the SECOND one after the first succeeded. FORCE_SECOND_DISCOVERY_FAIL
+    # exercises exactly that: the targets read passes and the excludes read does not,
+    # which is the only way to reach org-ruleset.sh's excludes abort.
+    local calls=0
+    [[ -f "$STATE/discovery_calls" ]] && calls="$(cat "$STATE/discovery_calls")"
+    calls=$((calls + 1))
+    printf '%s\n' "$calls" >"$STATE/discovery_calls"
+    [[ "${FORCE_SECOND_DISCOVERY_FAIL:-}" == 1 && "$calls" -ge 2 ]] && return 1
     local rows
     rows=$'alpha\tfalse\tfalse\tmain\nbeta\tfalse\tfalse\tmain'
     if [[ -n "${MEMBERSHIP_LIST:-}" ]]; then
@@ -283,13 +292,22 @@ if FORCE_LEGACY_API_FAIL=1 OPENCHARLY_ORG=test "$root/scripts/org-ruleset.sh" ap
   echo "FAIL: apply must abort on a non-404 legacy-protection probe failure" >&2; exit 1
 fi
 
-# A failed DISCOVERY must ABORT apply at the targets call site. The exclude set is
-# served by the SAME read, so it no longer has a failure case of its own: it cannot
-# fail independently, and a case claiming it could would be a dead assertion. What
-# protects the exclude set is the TRUNCATED case above.
+# A failed DISCOVERY must ABORT apply at the targets call site.
 if FORCE_DISCOVERY_FAIL=1 OPENCHARLY_ORG=test "$root/scripts/org-ruleset.sh" apply >/dev/null 2>&1; then
   echo "FAIL: apply must abort when the targets read fails" >&2; exit 1
 fi
+
+# The EXCLUDES read is its OWN discovery, so it can fail AFTER the targets read
+# succeeded — and then `exclude` would be `[]`, applying the ruleset to forks and
+# archived repos too. This case fails only the second discovery; without the abort at
+# that call site, apply would proceed on a partial picture. (It is a separate case, not
+# a variant of the one above: the knob makes the FIRST call pass, so only the excludes
+# path is exercised.)
+rm -f "$STATE/discovery_calls"
+if FORCE_SECOND_DISCOVERY_FAIL=1 OPENCHARLY_ORG=test "$root/scripts/org-ruleset.sh" apply >/dev/null 2>&1; then
+  echo "FAIL: apply must abort when the EXCLUDES read fails after a successful targets read" >&2; exit 1
+fi
+rm -f "$STATE/discovery_calls"
 
 # exclude_json with REAL content: a non-empty exclude set must round-trip verbatim.
 rm -f "$STATE/legacy_alpha"; rm -f "$STATE/disp_alpha"; rm -f "$STATE/org_ruleset_id"
