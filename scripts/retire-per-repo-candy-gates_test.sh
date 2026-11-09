@@ -17,7 +17,16 @@ printf 'name: candy\nrun: echo hello\n' >"$STATE/deploy_delta"
 : >"$STATE/transcript"
 
 gh() {
-  if [[ "$1 $2" == "repo list" ]]; then printf 'alpha\nbeta\ngamma\ndelta\n'; return; fi
+  # opencharly/.github#290: discovery is ONE paged REST read plus the org's own
+  # count, so the mock serves that shape instead of `repo list`. A row is
+  # `<name>\t<archived>\t<fork>\t<default_branch>`; the count must MATCH the rows,
+  # or lib-org.sh's truncation guard would (correctly) refuse the set.
+  if [[ "$1" == api ]]; then
+    case "$*" in
+      *"/repos?per_page="*) printf 'alpha\tfalse\tfalse\tmain\nbeta\tfalse\tfalse\tmain\ngamma\tfalse\tfalse\tmain\ndelta\tfalse\tfalse\tmain\n'; return 0 ;;
+      *"orgs/"*) printf '4\n'; return 0 ;;
+    esac
+  fi
   [[ "$1" == api ]] || return 90
   shift
   local method=GET include=0 jqexpr="" path=""

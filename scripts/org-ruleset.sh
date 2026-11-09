@@ -80,7 +80,7 @@ APP_ID="$(app_id)"
 # per-repo ruleset owner applied to. Discovered, never hand-listed. The discovery
 # status is checked at the CALL SITE (a `mapfile ... < <(fn)` guard would be dead —
 # see lib-org.sh).
-repos_out="$(discover_repos)" || { echo "FATAL: gh repo list (targets) failed" >&2; exit 1; }
+repos_out="$(discover_repos)" || { echo "FATAL: repo discovery (targets) failed" >&2; exit 1; }
 [[ -n "$repos_out" ]] || { echo "no active repositories discovered for $ORG" >&2; exit 1; }
 mapfile -t repos <<<"$repos_out"
 
@@ -90,7 +90,7 @@ mapfile -t repos <<<"$repos_out"
 # API failure here (an empty result is legitimate, so emptiness is NOT the signal) is
 # fatal — otherwise `exclude` would be `[]` and the ruleset would target forks and
 # archived repos too.
-excludes_out="$(discover_excludes)" || { echo "FATAL: gh repo list (excludes) failed" >&2; exit 1; }
+excludes_out="$(discover_excludes)" || { echo "FATAL: repo discovery (excludes) failed" >&2; exit 1; }
 # An empty exclude set is LEGITIMATE (no forks/archived repos), so it must produce an
 # EMPTY array — not `mapfile <<<"$empty"`, which yields one empty element and would
 # emit `[""]` (targeting a repo named "") instead of `[]`.
@@ -304,13 +304,17 @@ case "$mode" in
     # A fork or an archived repo is excluded BY DESIGN (computed, never declared); a
     # non-`main` default is a defect UNLESS it is declared with a reason in
     # lib-org.sh's declared_non_main_defaults(). The read is STATUS-CHECKED before the
-    # loop: under `set -e` a failed `gh repo list` behind a process substitution feeds the
+    # loop: under `set -e` a failed discovery behind a process substitution feeds the
     # loop nothing and would read as a clean membership — the silent pass this arm exists
     # to prevent.
-    if ! membership="$(gh repo list "$ORG" --limit 1000 \
-        --json name,isFork,isArchived,defaultBranchRef \
-        --jq '.[] | select(.isFork == false and .isArchived == false) | "\(.name)\t\(.defaultBranchRef.name)"' 2>/dev/null)"; then
-      echo "org membership: repo listing FAILED — refusing to report a clean membership from a failed read" >&2
+    #
+    # It goes through lib-org.sh's discover_membership, i.e. the SAME paged, count-checked
+    # discovery the target set uses (opencharly/.github#290). It used its own
+    # `gh repo list --limit 1000`, which was the listing that 502s at this org's size — so
+    # this arm could fail on its own while the rest of the run succeeded, and the two
+    # reads could disagree about which repos exist.
+    if ! membership="$(discover_membership)"; then
+      echo "org membership: the repo listing FAILED — refusing to report a clean membership from a failed read" >&2
       fail=1
     else
       declared="$(declared_non_main_defaults | awk -F'\t' '!/^#/ && NF {print $1}')"
