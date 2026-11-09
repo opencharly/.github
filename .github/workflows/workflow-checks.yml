@@ -77,6 +77,13 @@ jobs:
       # regressions are found in the org instead of here.
       - name: Run the tag-on-merge caller-reconcile script test (offline)
         run: bash scripts/reconcile-tag-on-merge-callers_test.sh
+      # The DETECTOR that makes an untagged merge loud (opencharly/.github#286).
+      # Offline and extracted: the step's shipped `run:` text is run against a mock
+      # `gh`, and the RED arms are the point — a detector that cannot fail is not a
+      # detector. The structural arm asserts `if: always()`: without it the detector
+      # is skipped exactly when the tagging step died.
+      - name: Run the tag-on-merge untagged-merge detector test (offline, extracted step text)
+        run: bash scripts/tag-on-merge-assert_test.sh
       - name: Check action runtime pins
         run: python3 scripts/check-action-runtimes.py
       - name: Prove the action runtime checker rejects Node 20
