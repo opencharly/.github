@@ -20,7 +20,8 @@
 # call site, under `set -o pipefail`.
 
 readonly ORG="${OPENCHARLY_ORG:-opencharly}"
-readonly SOURCE_REPO=".github"
+# Overridable so a test can exercise the source-repo guard without inventing a repo.
+readonly SOURCE_REPO="${SOURCE_REPO:-.github}"
 readonly DISPATCHER_PATH=".github/workflows/pr-validator.yml"
 readonly SOURCE_DISPATCHER_PATH=".github/workflows/pr-validator-dispatcher.yml"
 
@@ -224,4 +225,24 @@ extract_step_yaml() {
     in_step && /^ *- name: / { exit }
     in_step { print }
   ' "$wf" >"$out"
+}
+
+# calver_at <org> <repo> <commit-sha> — the CalVer tag this org mints at a release,
+# derived from the commit's OWN committer date, in the same v<YYYY>.<DDD>.<HHMM> shape
+# tag-on-merge uses. It exists because a write that bypasses the merge path bypasses the
+# tag: the commit the reconcile PUTs lands on main untagged, so the tree is left with a
+# head that is neither at a tag nor explicable as the CHANGELOG commit above one, and
+# every pin that advances to it fails design-pintag (opencharly/.github#294).
+calver_at() {
+  local org="$1" repo="$2" sha="$3" iso
+  iso="$(gh api "repos/$org/$repo/commits/$sha" --jq '.commit.committer.date')" || return 1
+  # THE FORM IS PER-REPO, exactly as the reusable's tag-on-merge derives it: a root Go
+  # module consumed through the proxy (sdk, spec, plugin-gh) is tagged in Go's form
+  # v0.<y><doy>.<hhmm>, because a plain v<major>.<doy>.<hhmm> tag would need a /vN
+  # module-path suffix and no consumer could name it. Every other repo gets the plain
+  # CalVer. A single fixed form here would mint an unusable tag on those three.
+  case "$repo" in
+    sdk|spec|plugin-gh) date -u -d "$iso" +'v0.%Y%j.%-H%M' ;;
+    *)                  date -u -d "$iso" +'v%Y.%j.%H%M' ;;
+  esac
 }
