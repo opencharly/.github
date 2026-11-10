@@ -48,7 +48,20 @@ case "$all" in
     if [ -f "$state/tags_sha" ]; then cat "$state/tags_sha"; fi
     exit 0 ;;
   "api --method POST "*"/git/refs"*)
-    printf '%s\n' "$all" >>"$state/created"; printf '%s\n' "$head_sha" >"$state/tags_sha"; printf '{}\n'; exit 0 ;;
+    printf '%s\n' "$all" >>"$state/created"
+    # post_422 models the lost create: the pre-check's LISTING lagged, so the ref already
+    # exists and the API refuses with 422. The run must then ask the POINT read which
+    # commit it holds, not treat "the POST failed" as "the tag is missing".
+    if [ -f "$state/post_422" ]; then echo "gh: Reference already exists (HTTP 422)" >&2; exit 1; fi
+    printf '%s\n' "$head_sha" >"$state/ref_sha"
+    # listing_lag models what the first pilot measured: the ref exists and is readable
+    # while the paginated LISTING has not caught up. Only the point read can see it.
+    [ -f "$state/listing_lag" ] || printf '%s\n' "$head_sha" >"$state/tags_sha"
+    printf '{}\n'; exit 0 ;;
+  "api "*"/git/ref/tags/"*)
+    # A POINT read of one ref.
+    if [ -f "$state/ref_sha" ]; then cat "$state/ref_sha"; exit 0; fi
+    echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;
   "api "*"/git/ref/heads/main"*) printf '%s\n' "$head_sha"; exit 0 ;;
   "api "*"/commits/"*)
     # The two callers ask for different fields: the CalVer derivation wants the committer
@@ -69,7 +82,7 @@ exit 97
 MOCK
 chmod +x "$STATE/bin/gh"
 
-reset() { rm -f "$STATE/tags_sha" "$STATE/changelog" "$STATE/no_caller"; : >"$STATE/created"; printf '%s\n' "${1:-fixture}" >"$STATE/repos"; }
+reset() { rm -f "$STATE/tags_sha" "$STATE/changelog" "$STATE/no_caller" "$STATE/ref_sha" "$STATE/listing_lag" "$STATE/post_422"; : >"$STATE/created"; printf '%s\n' "${1:-fixture}" >"$STATE/repos"; }
 run()   { PATH="$STATE/bin:$PATH" OPENCHARLY_ORG=fixture RECONCILE_REPOS="${1:-}" BF_STATE="$STATE" BF_HEAD="$HEAD_SHA" BF_DATE="$DATE" \
             bash "$STATE/repo/scripts/backfill-missing-tags.sh" ${2:-} >"$STATE/out" 2>&1; }
 
@@ -120,4 +133,31 @@ grep -q "ref=refs/tags/v2026.314.0800" "$STATE/created" \
 grep -q 'UNTAGGED parent' "$STATE/out" || fail "the run must say the parent is untagged"
 echo "ok   a CHANGELOG tip with an untagged parent is tagged"
 
-echo "PASS: the backfill tags only what is untagged and unexplained, in the right form (7 properties)"
+# 8. a created tag is verified by a POINT READ, so a LAGGING LISTING cannot turn a
+#    successful create into a reported failure (opencharly/.github#298 — measured on the
+#    first live pilot: the tag existed, the listing did not show it yet, and the run
+#    counted a failure for a tag it had just created).
+reset fixture; touch "$STATE/listing_lag"
+run fixture --apply || { cat "$STATE/out" >&2; fail "a lagging listing must not fail a successful create"; }
+grep -q 'tagged v2026.314.0800: fixture' "$STATE/out" || { cat "$STATE/out" >&2; fail "the create must be reported as tagged"; }
+grep -q 'failures           : 0' "$STATE/out" || { cat "$STATE/out" >&2; fail "the run must report zero failures"; }
+echo "ok   a successful create is verified by the ref, not by the listing"
+
+# 9. a create that LOSES to an existing ref (HTTP 422, the listing lagged the PRE-check) is
+#    verified the same way and is NOT a failure — the question is which commit the ref
+#    holds, never whether the POST returned 0.
+reset fixture; touch "$STATE/post_422"; printf '%s\n' "$HEAD_SHA" >"$STATE/ref_sha"
+run fixture --apply || { cat "$STATE/out" >&2; fail "an already-present ref at the head must not fail"; }
+grep -q 'already present at the head (v2026.314.0800): fixture' "$STATE/out" || { cat "$STATE/out" >&2; fail "the run must say the ref was already present"; }
+grep -q 'failures           : 0' "$STATE/out" || { cat "$STATE/out" >&2; fail "an already-present ref is not a failure"; }
+echo "ok   a lost create is verified by the ref, not by the POST's exit status"
+
+# 10. … and a ref that exists at a DIFFERENT commit is a real failure, never accepted —
+#     otherwise a tag on the wrong commit would be reported as success (R7: this arm is
+#     what makes arms 8 and 9 safe rather than permissive).
+reset fixture; touch "$STATE/post_422"; printf 'aaaa0000bbbb1111cccc2222dddd3333eeee4444\n' >"$STATE/ref_sha"
+if run fixture --apply; then cat "$STATE/out" >&2; fail "a ref at a DIFFERENT commit must fail the run"; fi
+grep -q 'REF EXISTS AT A DIFFERENT COMMIT (v2026.314.0800): fixture' "$STATE/out" || { cat "$STATE/out" >&2; fail "the run must name the mismatched ref"; }
+echo "ok   a ref at a different commit is a failure"
+
+echo "PASS: the backfill tags only what is untagged and unexplained, in the right form, and verifies every create by the ref itself (10 properties)"

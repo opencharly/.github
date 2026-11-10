@@ -56,6 +56,18 @@ api_absent() {
   return 1
 }
 
+# ref_points_at <org> <repo> <tag> <sha> — a POINT read of the ref just created.
+# A create must be verified by identity, not by scanning a LISTING: the tags listing
+# lags a create (measured on the first pilot — the tag existed and the listing did not
+# show it yet), so a listing-based read-back reports a successful tag as a failure.
+ref_points_at() {
+  local org="$1" repo="$2" tag="$3" sha="$4" got rc
+  got="$(api_absent "repos/$org/$repo/git/ref/tags/$tag" --jq '.object.sha')"; rc=$?
+  [[ $rc -eq 3 ]] && return 1
+  [[ $rc -eq 0 ]] || { echo "  REF UNREADABLE ($tag): $repo" >&2; exit 1; }
+  [[ "$got" = "$sha" ]]
+}
+
 # head_tag <org> <repo> <sha> — true when a tag points at <sha>; false when none does;
 # and the whole run ABORTS when the tags cannot be read at all.
 head_tag() {
@@ -109,14 +121,26 @@ for repo in "${REPOS[@]}"; do
     echo "  needs $tag: $repo  [$subject]"; needs=$((needs+1)); L_NEEDS+=("$repo")
     continue
   fi
-  # ADD-ONLY: create at the head only. A 422 means the ref exists — never overwrite it.
-  if gh api --method POST "repos/$ORG/$repo/git/refs" -f ref="refs/tags/$tag" -f sha="$head" >/dev/null 2>&1; then
-    if head_tag "$ORG" "$repo" "$head"; then
+  # ADD-ONLY: create at the head only. A ref that already exists is never overwritten —
+  # and when the create loses to one (the pre-check's listing lagged), the point read says
+  # whether it is the ref we wanted, which is the only question that matters here.
+  create_err="$(mktemp)"
+  if gh api --method POST "repos/$ORG/$repo/git/refs" -f ref="refs/tags/$tag" -f sha="$head" >/dev/null 2>"$create_err"; then
+    rm -f "$create_err"
+    if ref_points_at "$ORG" "$repo" "$tag" "$head"; then
       echo "  tagged $tag: $repo"; created=$((created+1))
     else
       echo "  READ-BACK FAILED ($tag): $repo" >&2; failed=$((failed+1))
     fi
+  elif grep -q 'HTTP 422' "$create_err"; then
+    rm -f "$create_err"
+    if ref_points_at "$ORG" "$repo" "$tag" "$head"; then
+      echo "  already present at the head ($tag): $repo"; tagged=$((tagged+1))
+    else
+      echo "  REF EXISTS AT A DIFFERENT COMMIT ($tag): $repo" >&2; failed=$((failed+1))
+    fi
   else
+    cat "$create_err" >&2; rm -f "$create_err"
     echo "  TAG CREATE FAILED ($tag): $repo" >&2; failed=$((failed+1))
   fi
 done
