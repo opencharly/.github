@@ -45,10 +45,10 @@ case "$all" in
     while IFS= read -r n; do [ -n "$n" ] && printf '%s\tfalse\tfalse\tmain\n' "$n"; done <"$state/repos"; exit 0 ;;
   "api orgs/fixture"*) wc -l <"$state/repos" | tr -d ' '; exit 0 ;;
   "api --paginate "*"/tags"*)
-    if [ -f "$state/present" ]; then printf '%s\n' "$head_sha"; fi
+    if [ -f "$state/tags_sha" ]; then cat "$state/tags_sha"; fi
     exit 0 ;;
   "api --method POST "*"/git/refs"*)
-    printf '%s\n' "$all" >>"$state/created"; : >"$state/present"; printf '{}\n'; exit 0 ;;
+    printf '%s\n' "$all" >>"$state/created"; printf '%s\n' "$head_sha" >"$state/tags_sha"; printf '{}\n'; exit 0 ;;
   "api "*"/git/ref/heads/main"*) printf '%s\n' "$head_sha"; exit 0 ;;
   "api "*"/commits/"*)
     # The two callers ask for different fields: the CalVer derivation wants the committer
@@ -56,6 +56,7 @@ case "$all" in
     # own --jq names, exactly as the real API would.
     case "$all" in
       *committer.date*) printf '%s\n' "$date"; exit 0 ;;
+      *parents*) printf 'parent-sha\n'; exit 0 ;;
     esac
     if [ -f "$state/changelog" ]; then printf 'docs: add CHANGELOG 2026.314.0800 for PR #1\n'; else printf 'ci: reconcile the tag-on-merge caller with the canonical template\n'; fi
     exit 0 ;;
@@ -68,7 +69,7 @@ exit 97
 MOCK
 chmod +x "$STATE/bin/gh"
 
-reset() { rm -f "$STATE/present" "$STATE/changelog" "$STATE/no_caller"; : >"$STATE/created"; printf '%s\n' "${1:-fixture}" >"$STATE/repos"; }
+reset() { rm -f "$STATE/tags_sha" "$STATE/changelog" "$STATE/no_caller"; : >"$STATE/created"; printf '%s\n' "${1:-fixture}" >"$STATE/repos"; }
 run()   { PATH="$STATE/bin:$PATH" OPENCHARLY_ORG=fixture RECONCILE_REPOS="${1:-}" BF_STATE="$STATE" BF_HEAD="$HEAD_SHA" BF_DATE="$DATE" \
             bash "$STATE/repo/scripts/backfill-missing-tags.sh" ${2:-} >"$STATE/out" 2>&1; }
 
@@ -79,10 +80,10 @@ grep -q "sha=$HEAD_SHA" "$STATE/created" || fail "expected the tag at the head c
 echo "ok   an unexplained head is tagged at that head"
 
 # 2. an EXPLAINED head is skipped
-reset fixture; touch "$STATE/changelog"
+reset fixture; touch "$STATE/changelog"; printf 'parent-sha\n' >"$STATE/tags_sha"
 run fixture --apply || { cat "$STATE/out" >&2; fail "apply run failed on an explained head"; }
 [ -s "$STATE/created" ] && { cat "$STATE/created" >&2; fail "an EXPLAINED (CHANGELOG-tip) head must not be tagged"; }
-grep -q 'explained (CHANGELOG tip)' "$STATE/out" || fail "the run must say why it skipped"
+grep -q 'explained (CHANGELOG tip)' "$STATE/out" || { cat "$STATE/out" >&2; fail "the run must say why it skipped"; }
 echo "ok   an explained head is skipped"
 
 # 3. a module repo gets Go's form
@@ -91,7 +92,7 @@ grep -q "ref=refs/tags/v0.2026314.800" "$STATE/created" || { cat "$STATE/created
 echo "ok   a proxy-consumed root module gets Go's tag form"
 
 # 4. an existing tag at the head means no action
-reset fixture; touch "$STATE/present"
+reset fixture; printf '%s\n' "$HEAD_SHA" >"$STATE/tags_sha"
 run fixture --apply || { cat "$STATE/out" >&2; fail "apply run failed with an existing tag"; }
 [ -s "$STATE/created" ] && { cat "$STATE/created" >&2; fail "an existing tag must not be re-created (add-only, idempotent)"; }
 echo "ok   an existing tag means no action"

@@ -41,22 +41,29 @@ case "${1:-}" in
   *) echo "usage: $0 [check|--apply]" >&2; exit 2 ;;
 esac
 
-# calver_for_head <org> <repo> <commit-sha> — the tag the reusable WOULD mint at this
-# commit, derived from the commit's own committer date and in the repo's own form.
-calver_for_head() {
-  local org="$1" repo="$2" sha="$3" iso
-  iso="$(gh api "repos/$org/$repo/commits/$sha" --jq '.commit.committer.date')" || return 1
-  case "$repo" in
-    sdk|spec|plugin-gh) date -u -d "$iso" +'v0.%Y%j.%-H%M' ;;
-    *)                  date -u -d "$iso" +'v%Y.%j.%H%M' ;;
-  esac
+
+# api_absent <args...> — run `gh api`; return 0 on success, 3 ONLY when the API says the
+# thing does not exist, and the FAILURE CODE (1) for anything else. Without this an auth
+# error, a rate limit or a network blip reads as "no tag exists", which in `--apply` would
+# create a SECOND tag at an already-tagged head — the exact thing "add-only" forbids.
+api_absent() {
+  local err out rc
+  err="$(mktemp)"
+  out="$(gh api "$@" 2>"$err")"; rc=$?
+  if [[ $rc -eq 0 ]]; then rm -f "$err"; printf '%s' "$out"; return 0; fi
+  if grep -q 'HTTP 404' "$err"; then rm -f "$err"; return 3; fi
+  cat "$err" >&2; rm -f "$err"
+  return 1
 }
 
-# head_tag <org> <repo> <sha> — prints the tag pointing at <sha>, or nothing.
+# head_tag <org> <repo> <sha> — true when a tag points at <sha>; false when none does;
+# and the whole run ABORTS when the tags cannot be read at all.
 head_tag() {
-  local org="$1" repo="$2" sha="$3"
-  gh api --paginate "repos/$org/$repo/tags?per_page=100" --jq '.[].commit.sha' 2>/dev/null \
-    | grep -qxF "$sha"
+  local org="$1" repo="$2" sha="$3" out
+  out="$(api_absent --paginate "repos/$org/$repo/tags?per_page=100" --jq '.[].commit.sha')"; local rc=$?
+  if [[ $rc -eq 3 ]]; then return 1; fi          # genuine 404: the repo has no tags
+  [[ $rc -eq 0 ]] || { echo "  TAGS UNREADABLE: $repo" >&2; exit 1; }
+  printf '%s\n' "$out" | grep -qxF "$sha"
 }
 
 if ! repos_raw="$(discover_repos)"; then echo "FATAL: discover_repos failed" >&2; exit 1; fi
@@ -71,9 +78,11 @@ for repo in "${REPOS[@]}"; do
     echo "  skipped (the source repo's releases come from its own merges): $repo"; skipped=$((skipped+1)); continue
   fi
   # A repo with no caller mints no releases; tagging it would invent one.
-  if ! gh api "repos/$ORG/$repo/contents/$CALLER_PATH?ref=main" >/dev/null 2>&1; then
+  caller_out="$(api_absent "repos/$ORG/$repo/contents/$CALLER_PATH?ref=main")"; caller_rc=$?
+  if [[ $caller_rc -eq 3 ]]; then
     echo "  skipped (no tag-on-merge caller — this repo mints no releases): $repo"; skipped=$((skipped+1)); continue
   fi
+  [[ $caller_rc -eq 0 ]] || { echo "  CALLER UNREADABLE: $repo" >&2; failed=$((failed+1)); continue; }
   head="$(gh api "repos/$ORG/$repo/git/ref/heads/main" --jq '.object.sha' 2>/dev/null)" || { echo "  UNREADABLE head: $repo" >&2; failed=$((failed+1)); continue; }
   if head_tag "$ORG" "$repo" "$head"; then
     tagged=$((tagged+1)); continue
@@ -82,11 +91,20 @@ for repo in "${REPOS[@]}"; do
   # `docs: add CHANGELOG …` commit sitting one above a tag — that is the ordinary shape
   # every merge produces — so tagging it would invent a second release for a commit the
   # control already excuses.
-  subject="$(gh api "repos/$ORG/$repo/commits/$head" --jq '.commit.message|split("\n")[0]' 2>/dev/null)"
+  subject="$(gh api "repos/$ORG/$repo/commits/$head" --jq '.commit.message|split("\n")[0]')" \
+    || { echo "  SUBJECT UNREADABLE: $repo" >&2; failed=$((failed+1)); continue; }
   case "$subject" in
-    "docs: add CHANGELOG"*) echo "  explained (CHANGELOG tip): $repo"; skipped=$((skipped+1)); continue ;;
+    "docs: add CHANGELOG"*)
+      # The excuse is the CHANGELOG commit ABOVE A TAG, not any CHANGELOG commit: a tip
+      # whose parent is untagged is still failing the control, so it needs a tag itself.
+      parent="$(gh api "repos/$ORG/$repo/commits/$head" --jq '.parents[0].sha')" \
+        || { echo "  PARENT UNREADABLE: $repo" >&2; failed=$((failed+1)); continue; }
+      if head_tag "$ORG" "$repo" "$parent"; then
+        echo "  explained (CHANGELOG tip above a tag): $repo"; skipped=$((skipped+1)); continue
+      fi
+      echo "  CHANGELOG tip with an UNTAGGED parent — it needs a tag: $repo" ;;
   esac
-  tag="$(calver_for_head "$ORG" "$repo" "$head")" || { echo "  CANNOT DERIVE A CALVER: $repo" >&2; failed=$((failed+1)); continue; }
+  tag="$(calver_at "$ORG" "$repo" "$head")" || { echo "  CANNOT DERIVE A CALVER: $repo" >&2; failed=$((failed+1)); continue; }
   if [[ "$MODE" == "check" ]]; then
     echo "  needs $tag: $repo  [$subject]"; needs=$((needs+1)); L_NEEDS+=("$repo")
     continue
