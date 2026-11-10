@@ -119,12 +119,12 @@ for repo in "${REPOS[@]}"; do
     echo "  skipped (no tag-on-merge caller — this repo mints no releases): $repo"; skipped=$((skipped+1)); continue
   fi
   [[ $caller_rc -eq 0 ]] || { echo "  CALLER UNREADABLE: $repo" >&2; failed=$((failed+1)); continue; }
-  head_err="$(mktemp)"
-  if ! head="$(gh api "repos/$ORG/$repo/git/ref/heads/main" --jq '.object.sha' 2>"$head_err")"; then
-    if grep -qi 'API rate limit exceeded' "$head_err"; then rm -f "$head_err"; unevaluated "$repo"; continue; fi
-    rm -f "$head_err"; echo "  UNREADABLE head: $repo" >&2; failed=$((failed+1)); continue
-  fi
-  rm -f "$head_err"
+  # THROUGH THE ONE CLASSIFIER, never a second predicate: `api_absent` is the only place
+  # that knows what an exhausted quota looks like, so a refusal here is the same answer it
+  # gives everywhere else.
+  head="$(api_absent "repos/$ORG/$repo/git/ref/heads/main" --jq '.object.sha')"; head_rc=$?
+  if [[ $head_rc -eq 4 ]]; then unevaluated "$repo"; continue; fi
+  if [[ $head_rc -ne 0 ]]; then echo "  UNREADABLE head: $repo" >&2; failed=$((failed+1)); continue; fi
   if head_tag "$ORG" "$repo" "$head"; then
     tagged=$((tagged+1)); continue
   fi

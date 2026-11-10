@@ -62,7 +62,13 @@ case "$all" in
     # A POINT read of one ref.
     if [ -f "$state/ref_sha" ]; then cat "$state/ref_sha"; exit 0; fi
     echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;
-  "api "*"/git/ref/heads/main"*) printf '%s\n' "$head_sha"; exit 0 ;;
+  "api "*"/git/ref/heads/main"*)
+    # A refusal AT THE HEAD FETCH, reachable only after a caller read that succeeded — the
+    # path a caller-only rate limit never exercises.
+    if [ -f "$state/rate_limit_head" ]; then
+      echo '{"message":"API rate limit exceeded for user ID 265000000.","status":"403"}' >&2; exit 1
+    fi
+    printf '%s\n' "$head_sha"; exit 0 ;;
   "api "*"/commits/"*)
     # The two callers ask for different fields: the CalVer derivation wants the committer
     # DATE, the explained-check wants the SUBJECT. The mock answers the field the call's
@@ -88,7 +94,7 @@ exit 97
 MOCK
 chmod +x "$STATE/bin/gh"
 
-reset() { rm -f "$STATE/tags_sha" "$STATE/changelog" "$STATE/no_caller" "$STATE/ref_sha" "$STATE/listing_lag" "$STATE/post_422" "$STATE/rate_limit" "$STATE/unevaluated.txt"; : >"$STATE/created"; : >"$STATE/calls"; printf '%s\n' "${1:-fixture}" >"$STATE/repos"; }
+reset() { rm -f "$STATE/tags_sha" "$STATE/changelog" "$STATE/no_caller" "$STATE/ref_sha" "$STATE/listing_lag" "$STATE/post_422" "$STATE/rate_limit" "$STATE/rate_limit_head" "$STATE/unevaluated.txt"; : >"$STATE/created"; : >"$STATE/calls"; printf '%s\n' "${1:-fixture}" >"$STATE/repos"; }
 run()   { PATH="$STATE/bin:$PATH" OPENCHARLY_ORG=fixture RECONCILE_REPOS="${1:-}" BF_STATE="$STATE" BF_HEAD="$HEAD_SHA" BF_DATE="$DATE" \
             bash "$STATE/repo/scripts/backfill-missing-tags.sh" ${2:-} >"$STATE/out" 2>&1; }
 
@@ -184,4 +190,19 @@ grep -q 'retry with' "$STATE/out" || fail "the summary must hand back the retry 
   || { cat "$STATE/calls" >&2; fail "only the FIRST repo may reach the API once the quota refuses it — the rest must not pay another call"; }
 echo "ok   an exhausted quota is one named class, once, and the run stops paying for it"
 
-echo "PASS: the backfill tags only what is untagged and unexplained, in the right form, verifies every create by the ref itself, and names an exhausted quota once (11 properties)"
+# 12. a refusal AT THE HEAD FETCH is the same class — the branch a caller-only rate limit
+#     never reaches, and the one the first version of this fix left untested.
+reset fixture; touch "$STATE/rate_limit_head"
+export BF_UNEVALUATED_FILE="$STATE/unevaluated.txt"
+if run fixture --apply; then cat "$STATE/out" >&2; fail "a refused head read must exit non-zero"; fi
+[ -s "$STATE/created" ] && { cat "$STATE/created" >&2; fail "no tag may be created when the head cannot be read"; }
+grep -q 'API RATE LIMITED   : 1 repo(s) NOT evaluated' "$STATE/out" \
+  || { cat "$STATE/out" >&2; fail "the summary must count the head-refused repo"; }
+[ "$(wc -l <"$STATE/unevaluated.txt")" -eq 1 ] || fail "the set must name the head-refused repo"
+[ "$(wc -l <"$STATE/calls")" -eq 1 ] \
+  || { cat "$STATE/calls" >&2; fail "the caller read must have happened FIRST, so the refusal is at the HEAD fetch and not earlier"; }
+grep -q 'retry with         : RECONCILE_REPOS="fixture" .* --apply' "$STATE/out" \
+  || { cat "$STATE/out" >&2; fail "the retry line must be a runnable command with the set and the mode"; }
+echo "ok   a quota refusal at the head fetch is the same one named class, with a runnable retry line"
+
+echo "PASS: the backfill tags only what is untagged and unexplained, in the right form, verifies every create by the ref itself, and names an exhausted quota once at either read (12 properties)"
