@@ -81,8 +81,7 @@ ref_points_at() {
   esac
 }
 
-# head_tag <org> <repo> <sha> — true when a tag points at <sha>; false when none does;
-# and the whole run ABORTS when the tags cannot be read at all.
+# head_tag <org> <repo> <sha>
 # Same contract as ref_points_at: 0 = a tag points at <sha>, 10 = none does (a 404 means the
 # repo has no tags at all, which is also "none"), 4 = the API refused the read, 2 = the tags
 # could not be read for another reason.
