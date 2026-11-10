@@ -236,5 +236,13 @@ extract_step_yaml() {
 calver_at() {
   local org="$1" repo="$2" sha="$3" iso
   iso="$(gh api "repos/$org/$repo/commits/$sha" --jq '.commit.committer.date')" || return 1
-  date -u -d "$iso" +'v%Y.%j.%H%M'
+  # THE FORM IS PER-REPO, exactly as the reusable's tag-on-merge derives it: a root Go
+  # module consumed through the proxy (sdk, spec, plugin-gh) is tagged in Go's form
+  # v0.<y><doy>.<hhmm>, because a plain v<major>.<doy>.<hhmm> tag would need a /vN
+  # module-path suffix and no consumer could name it. Every other repo gets the plain
+  # CalVer. A single fixed form here would mint an unusable tag on those three.
+  case "$repo" in
+    sdk|spec|plugin-gh) date -u -d "$iso" +'v0.%Y%j.%-H%M' ;;
+    *)                  date -u -d "$iso" +'v%Y.%j.%H%M' ;;
+  esac
 }

@@ -13,7 +13,9 @@
 #   2. the reconciled line names that tag;
 #   3. no commit sha in the PUT response is a loud failure, not a silent skip;
 #   4. the SOURCE repo is skipped — never written, never tagged;
-#   5. an EXISTING tag is left alone: the create-if-absent branch does not re-POST.
+#   5. an EXISTING tag is left alone: the create-if-absent branch does not re-POST;
+#   6. a proxy-consumed ROOT MODULE (sdk, spec, plugin-gh) gets Go's tag form, not the
+#      plain CalVer — a plain v<major> tag there would need a /vN module path.
 #
 # It runs the SHIPPED script against a mock `gh`, so the code under test is the code.
 set -euo pipefail
@@ -43,7 +45,7 @@ set -euo pipefail
 state="$STATE"
 all="\$*"
 case "\$all" in
-  "repo list"*) if [ -f "\$state/srcmode" ]; then printf '.github\n'; else printf 'fixture\n'; fi; exit 0 ;;
+  "repo list"*) if [ -f "\$state/reponame" ]; then cat "\$state/reponame"; else printf 'fixture\n'; fi; exit 0 ;;
   "api orgs/fixture"*) printf '1\n'; exit 0 ;;
   "api --paginate "*"/repos?per_page"*) printf 'fixture\tfalse\tfalse\tmain\n'; exit 0 ;;
   "api --method PUT "*"/contents/"*)
@@ -117,4 +119,26 @@ grep -q 'reconciled (pin=' "$STATE/out5" || { cat "$STATE/out5" >&2; fail "the r
 [ -s "$STATE/tags" ] && { cat "$STATE/tags" >&2; fail "an EXISTING tag must not be re-created"; }
 echo "ok   an existing tag is left alone"
 
-echo "PASS: the reconcile tags every write it makes, guards the source repo, and does not re-tag (5 properties)"
+# 6. calver_at is PER-REPO: a proxy-consumed root module gets Go's form, everything else
+# gets the plain CalVer. `lib-org.sh` is sourceable, so this arm calls the function the
+# reconcile calls — no discovery mock needed for a pure form question.
+cat >"$STATE/bin/gh-calver" <<'CAL'
+#!/usr/bin/env bash
+printf '2026-11-10T08:00:00Z\n'
+CAL
+chmod +x "$STATE/bin/gh-calver"
+calver_of() {
+  PATH="$STATE/bin:$PATH" bash -c '
+    set -eu
+    gh() { printf "2026-11-10T08:00:00Z\n"; }
+    export -f gh
+    . "$1"
+    calver_at org "$2" deadbeef
+  ' _ "$STATE/repo/scripts/lib-org.sh" "$1"
+}
+mod="$(calver_of sdk)"; plain="$(calver_of fixture)"
+[ "$mod" = "v0.2026314.800" ] || fail "a root module must get Go's form, got: $mod"
+[ "$plain" = "v2026.314.0800" ] || fail "a normal repo must get the plain CalVer, got: $plain"
+echo "ok   calver_at is per-repo: module=$mod plain=$plain"
+
+echo "PASS: the reconcile tags every write it makes, guards the source repo, does not re-tag, and uses Go's form for module repos (6 properties)"
