@@ -61,7 +61,7 @@ case "$all" in
     if [ -f "$state/changelog" ]; then printf 'docs: add CHANGELOG 2026.314.0800 for PR #1\n'; else printf 'ci: reconcile the tag-on-merge caller with the canonical template\n'; fi
     exit 0 ;;
   "api "*"/contents/"*)
-    if [ -f "$state/no_caller" ]; then echo "gh: Not Found" >&2; exit 1; fi
+    if [ -f "$state/no_caller" ]; then echo "gh: Not Found (HTTP 404)" >&2; exit 1; fi
     printf '{}\n'; exit 0 ;;
 esac
 echo "mock gh: unhandled: $all" >&2
@@ -83,7 +83,7 @@ echo "ok   an unexplained head is tagged at that head"
 reset fixture; touch "$STATE/changelog"; printf 'parent-sha\n' >"$STATE/tags_sha"
 run fixture --apply || { cat "$STATE/out" >&2; fail "apply run failed on an explained head"; }
 [ -s "$STATE/created" ] && { cat "$STATE/created" >&2; fail "an EXPLAINED (CHANGELOG-tip) head must not be tagged"; }
-grep -q 'explained (CHANGELOG tip)' "$STATE/out" || { cat "$STATE/out" >&2; fail "the run must say why it skipped"; }
+grep -q 'explained (CHANGELOG tip above a tag)' "$STATE/out" || { cat "$STATE/out" >&2; fail "the run must say why it skipped"; }
 echo "ok   an explained head is skipped"
 
 # 3. a module repo gets Go's form
@@ -110,4 +110,14 @@ reset fixture; run fixture "" || { cat "$STATE/out" >&2; fail "check run failed"
 grep -q 'NEED a tag' "$STATE/out" || fail "check mode must report what it would tag"
 echo "ok   check mode writes nothing"
 
-echo "PASS: the backfill tags only what is untagged and unexplained, in the right form (6 properties)"
+# 7. a CHANGELOG tip whose PARENT is untagged still needs a tag — the control excuses a
+# CHANGELOG commit ABOVE A TAG, not any CHANGELOG commit
+reset fixture; touch "$STATE/changelog"          # subject is the CHANGELOG line …
+                                                # … but tags_sha is unset: the parent has no tag
+run fixture --apply || { cat "$STATE/out" >&2; fail "apply run failed on an untagged-parent CHANGELOG tip"; }
+grep -q "ref=refs/tags/v2026.314.0800" "$STATE/created" \
+  || { cat "$STATE/out" >&2; cat "$STATE/created" >&2; fail "a CHANGELOG tip with an UNTAGGED parent must be tagged"; }
+grep -q 'UNTAGGED parent' "$STATE/out" || fail "the run must say the parent is untagged"
+echo "ok   a CHANGELOG tip with an untagged parent is tagged"
+
+echo "PASS: the backfill tags only what is untagged and unexplained, in the right form (7 properties)"
