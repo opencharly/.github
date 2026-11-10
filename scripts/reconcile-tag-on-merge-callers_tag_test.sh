@@ -29,7 +29,6 @@ cp "$root/scripts/reconcile-tag-on-merge-callers.sh" "$STATE/repo/scripts/"
 cp "$root/scripts/lib-org.sh" "$STATE/repo/scripts/"
 
 # The canonical content the script will PUT, and a caller that differs from it.
-canonical="$(cat "$STATE/repo/.github/workflows/tag-on-merge-dispatcher.yml")"
 printf 'name: stale\n' >"$STATE/caller.yml"
 cp "$STATE/repo/.github/workflows/tag-on-merge-dispatcher.yml" "$STATE/canonical.yml"
 
@@ -94,4 +93,4 @@ grep -q 'NEVER touch the SOURCE repo' "$STATE/repo/scripts/reconcile-tag-on-merg
   || fail "the source-repo guard is missing from the shipped script"
 echo "ok   the source-repo guard is present"
 
-echo "PASS: the reconcile tags every write it makes, and guards the source repo (4 properties)"echo "PASS: the reconcile tags every write it makes, and never touches the source repo (4 properties)"
+echo "PASS: the reconcile tags every write it makes, and guards the source repo (4 properties)"

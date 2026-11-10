@@ -225,3 +225,15 @@ extract_step_yaml() {
     in_step { print }
   ' "$wf" >"$out"
 }
+
+# calver_at <org> <repo> <commit-sha> — the CalVer tag this org mints at a release,
+# derived from the commit's OWN committer date, in the same v<YYYY>.<DDD>.<HHMM> shape
+# tag-on-merge uses. It exists because a write that bypasses the merge path bypasses the
+# tag: the commit the reconcile PUTs lands on main untagged, so the tree is left with a
+# head that is neither at a tag nor explicable as the CHANGELOG commit above one, and
+# every pin that advances to it fails design-pintag (opencharly/.github#294).
+calver_at() {
+  local org="$1" repo="$2" sha="$3" iso
+  iso="$(gh api "repos/$org/$repo/commits/$sha" --jq '.commit.committer.date')" || return 1
+  date -u -d "$iso" +'v%Y.%j.%H%M'
+}

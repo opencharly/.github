@@ -35,18 +35,6 @@ SHA_RE='@[0-9a-f]{40}'
 # comment in the canonical form), so the prose comparison is about PROSE.
 norm() { printf '%s\n' "$1" | sed -E "s#$USES_RE#  - uses: PIN#"; }
 
-# calver_at <org> <repo> <commit-sha> — the CalVer tag this org mints at a release,
-# derived from the commit's OWN committer date, in the same v<YYYY>.<DDD>.<HHMM> shape
-# tag-on-merge uses. It exists because a write that bypasses the merge path bypasses the
-# tag: the commit the reconcile PUTs lands on main untagged, so the tree is left with a
-# head that is neither at a tag nor explicable as the CHANGELOG commit above one, and
-# every pin that advances to it fails design-pintag (opencharly/.github#294).
-calver_at() {
-  local org="$1" repo="$2" sha="$3" iso
-  iso="$(gh api "repos/$org/$repo/commits/$sha" --jq '.commit.committer.date')" || return 1
-  date -u -d "$iso" +'v%Y.%j.%H%M'
-}
-
 # pin_state — PURE. mutable | pinned | no-uses | absent
 pin_state() {
   local c="$1" pin
@@ -127,6 +115,7 @@ main() {
     [[ "$pin" == pinned  && "$prose" == identical ]] && neither=$((neither+1))
     if [[ "$mode" == "--apply" && "$content" != "$canonical" && -n "$content" ]]; then
       local sha; sha="$(gh api "repos/$ORG/$repo/contents/$CALLER_PATH?ref=main" --jq .sha)"
+      local resp commit_sha tag
       resp="$(gh api --method PUT "repos/$ORG/$repo/contents/$CALLER_PATH" \
         -f message="ci: reconcile the tag-on-merge caller with the canonical template (opencharly/.github#192)" \
         -f content="$(printf '%s' "$canonical" | base64 -w0)" -f sha="$sha")"
