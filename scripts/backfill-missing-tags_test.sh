@@ -326,4 +326,15 @@ grep -q 'REF EXISTS AT A DIFFERENT COMMIT' "$STATE/out" && fail "an unreadable r
 grep -q 'failures           : 1' "$STATE/out" || { cat "$STATE/out" >&2; fail "exactly one failure must be counted"; }
 echo "ok   a generic unreadable ref read is named as unreadable and counted, never mislabelled"
 
-echo "PASS: the backfill tags only what is untagged and unexplained, in the right form, verifies every create by the ref itself, names an exhausted quota at EVERY read (both tags reads and the create) and every unreadable one, and continues past it (21 properties)"
+# 22. the SUCCESS-create read-back with a generic unreadable ref read (rp=2): the create
+#     happened, the confirmation did not, and the run must count ONE failure and NOT claim
+#     the tag — pre-change this aborted inside ref_points_at.
+reset fixture; touch "$STATE/ref_error"
+if run fixture --apply; then cat "$STATE/out" >&2; fail "an unconfirmed create must fail the run"; fi
+[ -s "$STATE/created" ] || fail "the create must have been ATTEMPTED"
+grep -q 'READ-BACK FAILED (v2026.314.0800): fixture' "$STATE/out" || { cat "$STATE/out" >&2; fail "the unconfirmed create must be reported as a read-back failure"; }
+grep -q 'tagged now         : 0' "$STATE/out" || { cat "$STATE/out" >&2; fail "an unconfirmed create must never be counted as tagged"; }
+grep -q 'failures           : 1' "$STATE/out" || { cat "$STATE/out" >&2; fail "exactly one failure must be counted"; }
+echo "ok   a generic unreadable read-back after a successful create counts one failure"
+
+echo "PASS: the backfill tags only what is untagged and unexplained, in the right form, verifies every create by the ref itself, names an exhausted quota at EVERY read (both tags reads and the create) and every unreadable one at EVERY ref read, and continues past it (22 properties)"
