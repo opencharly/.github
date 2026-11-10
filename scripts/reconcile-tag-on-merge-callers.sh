@@ -35,6 +35,18 @@ SHA_RE='@[0-9a-f]{40}'
 # comment in the canonical form), so the prose comparison is about PROSE.
 norm() { printf '%s\n' "$1" | sed -E "s#$USES_RE#  - uses: PIN#"; }
 
+# calver_at <org> <repo> <commit-sha> — the CalVer tag this org mints at a release,
+# derived from the commit's OWN committer date, in the same v<YYYY>.<DDD>.<HHMM> shape
+# tag-on-merge uses. It exists because a write that bypasses the merge path bypasses the
+# tag: the commit the reconcile PUTs lands on main untagged, so the tree is left with a
+# head that is neither at a tag nor explicable as the CHANGELOG commit above one, and
+# every pin that advances to it fails design-pintag (opencharly/.github#294).
+calver_at() {
+  local org="$1" repo="$2" sha="$3" iso
+  iso="$(gh api "repos/$org/$repo/commits/$sha" --jq '.commit.committer.date')" || return 1
+  date -u -d "$iso" +'v%Y.%j.%H%M'
+}
+
 # pin_state — PURE. mutable | pinned | no-uses | absent
 pin_state() {
   local c="$1" pin
@@ -99,6 +111,14 @@ main() {
   local repo pin prose content
   for repo in "${REPOS[@]}"; do
     [[ -z "$repo" ]] && continue
+    # NEVER touch the SOURCE repo. Its `.github/workflows/tag-on-merge.yml` is the
+    # REUSABLE workflow every caller invokes, not a copy of the caller template; writing
+    # the template there replaces the reusable with a caller and breaks every
+    # `uses: opencharly/.github/...@main` in the org (measured: opencharly/.github#294).
+    if [[ "$repo" == "${SOURCE_REPO:-.github}" ]]; then
+      echo "  skipped (the source repo holds the REUSABLE, not a caller): $repo"
+      continue
+    fi
     content="$(fetch_caller "$repo")"
     pin="$(pin_state "$content")"; prose="$(prose_state "$canonical" "$content")"
     case "$pin"  in mutable) m_pin=$((m_pin+1)); L_MUT+=("$repo") ;; pinned) p_pin=$((p_pin+1)) ;; no-uses) n_pin=$((n_pin+1)) ;; absent) a_caller=$((a_caller+1)); L_ABSENT+=("$repo") ;; esac
@@ -107,11 +127,21 @@ main() {
     [[ "$pin" == pinned  && "$prose" == identical ]] && neither=$((neither+1))
     if [[ "$mode" == "--apply" && "$content" != "$canonical" && -n "$content" ]]; then
       local sha; sha="$(gh api "repos/$ORG/$repo/contents/$CALLER_PATH?ref=main" --jq .sha)"
-      gh api --method PUT "repos/$ORG/$repo/contents/$CALLER_PATH" \
+      resp="$(gh api --method PUT "repos/$ORG/$repo/contents/$CALLER_PATH" \
         -f message="ci: reconcile the tag-on-merge caller with the canonical template (opencharly/.github#192)" \
-        -f content="$(printf '%s' "$canonical" | base64 -w0)" -f sha="$sha" >/dev/null
+        -f content="$(printf '%s' "$canonical" | base64 -w0)" -f sha="$sha")"
+      commit_sha="$(printf '%s' "$resp" | jq -r '.commit.sha // empty')"
+      [[ -n "$commit_sha" ]] || { echo "  NO COMMIT SHA RETURNED — cannot tag it: $repo" >&2; exit 1; }
       [[ "$(fetch_caller "$repo")" == "$canonical" ]] || { echo "  READ-BACK FAILED: $repo" >&2; exit 1; }
-      echo "  reconciled (pin=$pin prose=$prose): $repo"
+      # TAG THE WRITE. Without this the commit lands untagged and every pin that advances
+      # to it is 'untagged' to design-pintag, which forbids raising its census.
+      tag="$(calver_at "$ORG" "$repo" "$commit_sha")" || { echo "  CANNOT DERIVE A CALVER: $repo" >&2; exit 1; }
+      if ! gh api "repos/$ORG/$repo/git/ref/tags/$tag" >/dev/null 2>&1; then
+        gh api --method POST "repos/$ORG/$repo/git/refs" \
+          -f ref="refs/tags/$tag" -f sha="$commit_sha" >/dev/null \
+          || { echo "  TAG CREATE FAILED ($tag): $repo" >&2; exit 1; }
+      fi
+      echo "  reconciled (pin=$pin prose=$prose) at $tag: $repo"
     fi
   done
 
