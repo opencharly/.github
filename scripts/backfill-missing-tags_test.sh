@@ -49,6 +49,11 @@ case "$all" in
     if [ -f "$state/rate_limit_tags" ]; then
       echo '{"message":"API rate limit exceeded for user ID 265000000.","status":"403"}' >&2; exit 1
     fi
+    # A GENERIC unreadable answer: not a 404, not a quota. Single-shot, so the NEXT repo
+    # proves the run continued instead of aborting.
+    if [ -f "$state/server_error" ]; then
+      rm -f "$state/server_error"; echo '{"message":"Server Error","status":"500"}' >&2; exit 1
+    fi
     if [ -f "$state/tags_sha" ]; then cat "$state/tags_sha"; fi
     exit 0 ;;
   "api --method POST "*"/git/refs"*)
@@ -101,7 +106,7 @@ exit 97
 MOCK
 chmod +x "$STATE/bin/gh"
 
-reset() { rm -f "$STATE/tags_sha" "$STATE/changelog" "$STATE/no_caller" "$STATE/ref_sha" "$STATE/listing_lag" "$STATE/post_422" "$STATE/rate_limit" "$STATE/rate_limit_head" "$STATE/rate_limit_tags" "$STATE/rate_limit_ref" "$STATE/unevaluated.txt"; : >"$STATE/created"; : >"$STATE/calls"; printf '%s\n' "${1:-fixture}" >"$STATE/repos"; }
+reset() { rm -f "$STATE/tags_sha" "$STATE/changelog" "$STATE/no_caller" "$STATE/ref_sha" "$STATE/listing_lag" "$STATE/post_422" "$STATE/rate_limit" "$STATE/rate_limit_head" "$STATE/rate_limit_tags" "$STATE/rate_limit_ref" "$STATE/server_error" "$STATE/unevaluated.txt"; : >"$STATE/created"; : >"$STATE/calls"; printf '%s\n' "${1:-fixture}" >"$STATE/repos"; }
 run()   { PATH="$STATE/bin:$PATH" OPENCHARLY_ORG=fixture RECONCILE_REPOS="${1:-}" BF_STATE="$STATE" BF_HEAD="$HEAD_SHA" BF_DATE="$DATE" \
             bash "$STATE/repo/scripts/backfill-missing-tags.sh" ${2:-} >"$STATE/out" 2>&1; }
 
@@ -232,4 +237,15 @@ grep -q 'API RATE LIMITED   : 1 repo(s) NOT evaluated' "$STATE/out" || fail "the
 grep -q 'tagged now         : 0' "$STATE/out" || fail "an unconfirmed create must never be counted as tagged"
 echo "ok   a quota refusal at the confirming ref read is reported, never counted as tagged"
 
-echo "PASS: the backfill tags only what is untagged and unexplained, in the right form, verifies every create by the ref itself, and names an exhausted quota once at ANY read (14 properties)"
+# 15. a GENERIC unreadable read (not a 404, not a quota) COUNTS a failure and the run
+#     CONTINUES. That is a behaviour change this change introduces — the old code aborted —
+#     so it needs its own arm: the second repo must still be reached and tagged.
+reset fixture; printf 'a\nb\n' >"$STATE/repos"; touch "$STATE/server_error"
+if run "a b" --apply; then cat "$STATE/out" >&2; fail "an unreadable repo must still fail the run"; fi
+grep -q 'TAGS UNREADABLE: a' "$STATE/out" || { cat "$STATE/out" >&2; fail "the unreadable repo must be named"; }
+grep -q 'failures           : 1' "$STATE/out" || { cat "$STATE/out" >&2; fail "exactly one failure must be counted"; }
+grep -q 'tagged v2026.314.0800: b' "$STATE/out" || { cat "$STATE/out" >&2; fail "the run must CONTINUE past an unreadable repo and tag the next one"; }
+grep -q 'tagged now         : 1' "$STATE/out" || fail "the continued run must report the tag it made"
+echo "ok   a generic unreadable read counts one failure and the run continues to the next repo"
+
+echo "PASS: the backfill tags only what is untagged and unexplained, in the right form, verifies every create by the ref itself, names an exhausted quota once at ANY read, and continues past an unreadable one (15 properties)"

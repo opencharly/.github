@@ -52,15 +52,24 @@ esac
 # renders as N repo names when it is folded into the generic failure: measured on the fleet
 # pass, 60 lines read `CALLER UNREADABLE: <repo>` and every one was the same 403. Naming the
 # class lets the caller stop paying for calls that cannot succeed and say the cause ONCE.
+# classify_api_error <stderr-file> — THE one classifier, shared by every read and by the
+# create, so the predicate that recognises an absent thing or a spent quota exists once:
+# 3 = the thing does not exist (HTTP 404), 4 = the API refused us (the quota), 1 = a failure.
+classify_api_error() {
+  if grep -q 'HTTP 404' "$1"; then return 3; fi
+  if grep -qi 'API rate limit exceeded' "$1"; then return 4; fi
+  return 1
+}
+
 api_absent() {
-  local err out rc
+  local err out rc cls
   err="$(mktemp)"
   out="$(gh api "$@" 2>"$err")"; rc=$?
   if [[ $rc -eq 0 ]]; then rm -f "$err"; printf '%s' "$out"; return 0; fi
-  if grep -q 'HTTP 404' "$err"; then rm -f "$err"; return 3; fi
-  if grep -qi 'API rate limit exceeded' "$err"; then rm -f "$err"; return 4; fi
-  cat "$err" >&2; rm -f "$err"
-  return 1
+  classify_api_error "$err"; cls=$?
+  [[ $cls -eq 1 ]] && cat "$err" >&2
+  rm -f "$err"
+  return $cls
 }
 
 # ref_points_at <org> <repo> <tag> <sha> — a POINT read of the ref just created.
@@ -142,14 +151,16 @@ for repo in "${REPOS[@]}"; do
   # `docs: add CHANGELOG …` commit sitting one above a tag — that is the ordinary shape
   # every merge produces — so tagging it would invent a second release for a commit the
   # control already excuses.
-  subject="$(gh api "repos/$ORG/$repo/commits/$head" --jq '.commit.message|split("\n")[0]')" \
-    || { echo "  SUBJECT UNREADABLE: $repo" >&2; failed=$((failed+1)); continue; }
+  subject="$(api_absent "repos/$ORG/$repo/commits/$head" --jq '.commit.message|split("\n")[0]')"; src=$?
+  if [[ $src -eq 4 ]]; then unevaluated "$repo"; continue; fi
+  if [[ $src -ne 0 ]]; then echo "  SUBJECT UNREADABLE: $repo" >&2; failed=$((failed+1)); continue; fi
   case "$subject" in
     "docs: add CHANGELOG"*)
       # The excuse is the CHANGELOG commit ABOVE A TAG, not any CHANGELOG commit: a tip
       # whose parent is untagged is still failing the control, so it needs a tag itself.
-      parent="$(gh api "repos/$ORG/$repo/commits/$head" --jq '.parents[0].sha')" \
-        || { echo "  PARENT UNREADABLE: $repo" >&2; failed=$((failed+1)); continue; }
+      parent="$(api_absent "repos/$ORG/$repo/commits/$head" --jq '.parents[0].sha')"; prc=$?
+      if [[ $prc -eq 4 ]]; then unevaluated "$repo"; continue; fi
+      if [[ $prc -ne 0 ]]; then echo "  PARENT UNREADABLE: $repo" >&2; failed=$((failed+1)); continue; fi
       head_tag "$ORG" "$repo" "$parent"; ptr=$?
       if [[ $ptr -eq 4 ]]; then unevaluated "$repo"; continue; fi
       if [[ $ptr -eq 2 ]]; then echo "  TAGS UNREADABLE: $repo" >&2; failed=$((failed+1)); continue; fi
@@ -167,7 +178,11 @@ for repo in "${REPOS[@]}"; do
   # and when the create loses to one (the pre-check's listing lagged), the point read says
   # whether it is the ref we wanted, which is the only question that matters here.
   create_err="$(mktemp)"
-  if gh api --method POST "repos/$ORG/$repo/git/refs" -f ref="refs/tags/$tag" -f sha="$head" >/dev/null 2>"$create_err"; then
+  create_rc=0
+  gh api --method POST "repos/$ORG/$repo/git/refs" -f ref="refs/tags/$tag" -f sha="$head" >/dev/null 2>"$create_err" || create_rc=$?
+  classify_api_error "$create_err"; crc=$?
+  if [[ $crc -eq 4 ]]; then rm -f "$create_err"; unevaluated "$repo"; continue; fi
+  if [[ $create_rc -eq 0 ]]; then
     rm -f "$create_err"
     ref_points_at "$ORG" "$repo" "$tag" "$head"; rp=$?
     if [[ $rp -eq 4 ]]; then unevaluated "$repo"; continue; fi
