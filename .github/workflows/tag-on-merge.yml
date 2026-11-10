@@ -1,318 +1,108 @@
-# ORG-WIDE TAG-ON-MERGE (reusable via workflow_call)
-#
-# For every merged PR without a CalVer tag:
-#   1. Creates a CalVer tag at the merge commit.
-#   2. Creates CHANGELOG/<calver>.md from the PR body (the body IS the changelog).
-#
-# Triggered by pull_request:closed (merged) or scheduled sweep.
+# ORG-WIDE TAG-ON-MERGE DISPATCHER — installed in every opencharly repo.
 name: tag-on-merge
 
+# Event-driven PRIMARY with a coarse cron BACKSTOP (RCA of all previous trigger
+# designs, measured in this repo across 8 merges and 17 schedule runs):
+#
+# 1. `on: push` / `on: pull_request: [closed]` CANNOT see auto-merge merges.
+#    Native-auto-merge squash merges (actor `app/github-actions`) fire their
+#    webhook events — they are visible in the public event stream, e.g.
+#    `21:35:01Z sha=e222762 by=github-actions[bot]` for PR #8 — but GitHub
+#    Actions creates ZERO workflow runs for them (API-confirmed: no run for
+#    any merge commit, and 0 `pull_request`-event runs in the workflow's
+#    whole history). This is platform-level run suppression for auto-merge
+#    commits; no trigger selection can observe them. (Human merges and
+#    bot contents-API commits DO create runs — hence `push` is kept as a
+#    secondary trigger for those paths.)
+# 2. `schedule` cron: GitHub cron delivery is best-effort with no SLA, so it is
+#    NOT a primary trigger — measured 21-44 min gaps (never the configured 15),
+#    PR #3's tag 4+ hours late, PR #7's tag still missing 30 min after merge.
+#    It is kept at a deliberately coarse cadence as a BACKSTOP only: when the
+#    primary path below misses a merge, the recovery must not wait for the next
+#    validator completion in that repo, which on a quiet repo can be days.
+# 3. `workflow_run` on `charly/pr-validator`: the ONE trigger whose event
+#    delivery is proven (the 12:12-12:51Z 8/22 runs all received the event;
+#    they died at startup on a workflow-file issue, not on delivery).
+#
+# The pr-validator run is the last actor before the merge (its final step
+# arms native auto-merge). Firing on its completion and waiting (bounded) for
+# the squash to land makes the MERGE the effective gate for tagging. The org
+# reusable sweep is idempotent and scans the last 24h of merged PRs.
+#
+# ⚑ THE BOUND IS SIZED TO THE MEASURED AUTO-MERGE LATENCY, and that is an RCA
+# rather than a guess. A 5-minute bound with a single-shot sweep missed
+# charly-registry#12, whose PASS completed at 20:54:18Z and whose merge landed
+# at 21:01:59Z — 7m41s, one minute past the bound — so the run fell through,
+# swept before the merge existed, and reported SUCCESS while doing nothing;
+# #10's gap was 3m03s and it tagged. A green run that silently tagged nothing
+# is the worst shape of this defect, so the bound now carries margin over the
+# slowest observed case, and the backstop above recovers what it still misses.
 on:
-  workflow_call:
+  workflow_run:
+    workflows: ["charly/pr-validator"]
+    types: [completed]
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "*/30 * * * *"
+
+
+permissions:
+  contents: write
+  pull-requests: read
 
 jobs:
-  tag-and-changelog:
-    runs-on: ${{ vars.CI_RUNNER_LABEL || 'opencharly' }}
-    permissions:
-      contents: write
-      pull-requests: read
-    env:
-      # ONE literal for the sweep window, read by BOTH the sweep (which decides
-      # which merges to tag) and the detector below (which decides which merges
-      # MUST carry a tag). Two literals would let the two windows drift apart and
-      # the detector would then judge a different population than the sweep acted
-      # on — a green detector over merges the sweep never looked at.
-      SWEEP_WINDOW_HOURS: "24"
+  wait-for-merge:
+    if: >
+      github.event_name == 'push' ||
+      github.event_name == 'schedule' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ${{ vars.CI_RUNNER_LABEL || 'ubuntu-latest' }}
     steps:
-      # Bot token for the protected-main CHANGELOG write. GITHUB_TOKEN
-      # cannot write to branch-protected main (required checks apply), so
-      # use the GitHub App token (preferred) with PAT fallback — the same
-      # pattern the org-wide pr-validator uses for its bot pushes.
-      - name: Create bot token (GitHub App)
-        id: bot-token-app
-        continue-on-error: true
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0, node24
-        with:
-          app-id: ${{ secrets.CHARLY_AUTO_MERGE_APP_ID }}
-          private-key: ${{ secrets.CHARLY_AUTO_MERGE_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-
-      - name: Use PAT bot token
-        id: bot-token-pat
-        run: echo "token=${{ secrets.CHARLY_BOT_TOKEN }}" >> "$GITHUB_OUTPUT"
-
-      - name: Require bot token
-        env:
-          APP_TOKEN: ${{ steps.bot-token-app.outputs.token }}
-          PAT_TOKEN: ${{ steps.bot-token-pat.outputs.token }}
-        run: |
-          if [ -z "$APP_TOKEN" ] && [ -z "$PAT_TOKEN" ]; then
-            echo "::error::No bot token configured: set org secrets CHARLY_AUTO_MERGE_APP_ID + CHARLY_AUTO_MERGE_PRIVATE_KEY (GitHub App) or CHARLY_BOT_TOKEN (PAT)."
-            exit 2
-          fi
-
-      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0, node24
-        env:
-          BOT_TOKEN: ${{ steps.bot-token-app.outputs.token || steps.bot-token-pat.outputs.token }}
+      - name: Wait for triggering PR to merge (bounded readiness probe)
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0, node24
         with:
           script: |
-            const repo = { ...context.repo };
-
-            async function processMergedPr(pr) {
-              if (!pr.merged_at || !pr.merge_commit_sha) return;
-
-              // Compute CalVer from merge commit time
-              const { data: commit } = await github.rest.git.getCommit({
-                ...repo, commit_sha: pr.merge_commit_sha,
-              });
-              const d = new Date(commit.committer.date);
-              const y = d.getUTCFullYear();
-              const doy = String(Math.floor((d - new Date(y, 0, 0)) / 86400000)).padStart(3, '0');
-              const hh = String(d.getUTCHours()).padStart(2, '0');
-              const mm = String(d.getUTCMinutes()).padStart(2, '0');
-              // The ROOT Go-module repos that are CONSUMED VIA THE MODULE PROXY
-              // are tagged in Go's form; everything else gets the plain repo
-              // CalVer. A consumer's go.mod pins them at `v0.<YYYYDDD>.<HHMM>`
-              // exactly, so a plain `v<YYYY>.<DDD>.<HHMM>` tag (major >= 2, which
-              // would need a /vN module-path suffix) is unusable as a module
-              // version. The criterion is "root module with an external Go-module
-              // consumer", NOT merely "has a root go.mod": charly-streamer is a
-              // root module (a binary) nobody imports via the proxy and keeps the
-              // plain CalVer.
-              //
-              // spec was missing from this list, so its Go-module releases stopped
-              // at v0.2026232.520 while its repo tags kept advancing: every spec
-              // change after that day merged but was UNCONSUMABLE, because no
-              // consumer could name a version containing it. plugin-gh (a
-              // root-module plugin repo consumed by plugin-review/plugin-pipeline)
-              // was the same trap. ADD A NEW PROXY-CONSUMED ROOT-MODULE REPO HERE.
-              // Candy repos are unaffected — they are tagged separately below in
-              // `candy/<repo>/v0.…` form.
-              const goModuleRepos = ['sdk', 'spec', 'plugin-gh'];
-              const isGoModuleRepo = goModuleRepos.includes(repo.repo);
-              const tag = isGoModuleRepo
-                ? `v0.${y}${doy}.${parseInt(hh + mm)}`
-                : `v${y}.${doy}.${hh}${mm}`;
-              const calver = tag.replace(/^v/, '');
-
-              // Tag: create if missing (idempotent — independent of CHANGELOG)
-              try {
-                await github.rest.git.getRef({ ...repo, ref: `tags/${tag}` });
-              } catch {
-                await github.rest.git.createRef({
-                  ...repo, ref: `refs/tags/${tag}`, sha: pr.merge_commit_sha,
-                });
-                core.info(`Tagged ${tag} at ${pr.merge_commit_sha} (PR #${pr.number})`);
-              }
-
-              // Subdir MODULE tag for compiled-plugin repos (github.com/opencharly/<repo>/
-              // candy/<repo>, the standalone module convention): the go.mod pin must be a
-              // clean CalVer tag, and the module path is subdir-prefixed (candy/<repo>/), so
-              // a ROOT-only tag leaves the pin as a proxy PSEUDO-VERSION that no git ref
-              // resolves — which breaks pluginsgen's fetch (TestPluginsGenReproducible).
-              // The module tag mirrors the root CalVer in SDK form: v0.<y><doy>.<hhmm>
-              // with the leading zero stripped from hhmm (semver patch must not start 0).
-              //
-              // `!isGoModuleRepo` guards the exception: plugin-gh is a `plugin-*` repo whose
-              // module is at the ROOT (consumed via a ROOT tag), so a name-prefix rule would
-              // mint a bogus `candy/plugin-gh/v0.…` tag resolving to nothing. Every genuine
-              // subdir-module plugin repo has no root go.mod, so this preserves their tags.
-              if (repo.repo.startsWith('plugin-') && !isGoModuleRepo) {
-                const moduleTag = `candy/${repo.repo}/v0.${y}${doy}.${parseInt(hh + mm)}`;
-                try {
-                  await github.rest.git.getRef({ ...repo, ref: `tags/${moduleTag}` });
-                } catch {
-                  await github.rest.git.createRef({
-                    ...repo, ref: `refs/tags/${moduleTag}`, sha: pr.merge_commit_sha,
-                  });
-                  core.info(`Tagged module ${moduleTag} at ${pr.merge_commit_sha} (PR #${pr.number})`);
-                }
-              }
-
-              // CHANGELOG content = the PR body itself (title + body). The
-              // PR body IS the changelog; no separate section required.
-              const body = (pr.body || '').trim();
-              if (!body) {
-                core.info(`PR #${pr.number} has no body — skipping CHANGELOG creation`);
-                return;
-              }
-
-              const changelogPath = `CHANGELOG/${calver}.md`;
-
-              // CHANGELOG: create if missing (idempotent — independent of tag)
-              try {
-                await github.rest.repos.getContent({
-                  ...repo, path: changelogPath, ref: 'main',
-                });
-                core.info(`${changelogPath} already exists — skipping`);
-                return;
-              } catch (e) {
-                if (e.status !== 404) {
-                  core.warning(`CHANGELOG existence check failed: ${e.message}`);
-                  return;
-                }
-              }
-
-              const header = `# ${calver} — ${pr.title}\n\n`;
-              const fullContent = header + body;
-              const b64 = Buffer.from(fullContent).toString('base64');
-
-              try {
-                // Raw fetch with the bot token: octokit's auth override is
-                // unreliable in github-script (the client is pre-authed with
-                // GITHUB_TOKEN), and the write must carry the App/PAT
-                // identity that IS the ruleset bypass actor for main.
-                const api = `https://api.github.com/repos/${repo.owner}/${repo.repo}/contents/${changelogPath}`;
-                const res = await fetch(api, {
-                  method: 'PUT',
-                  headers: {
-                    authorization: `Bearer ${process.env.BOT_TOKEN}`,
-                    'content-type': 'application/json',
-                    'accept': 'application/vnd.github+json',
-                    'x-github-api-version': '2022-11-28',
-                  },
-                  body: JSON.stringify({
-                    message: `docs: add CHANGELOG ${calver} for PR #${pr.number}`,
-                    content: b64,
-                    branch: 'main',
-                  }),
-                });
-                if (!res.ok) {
-                  const body = await res.text();
-                  throw new Error(`${res.status} ${body.slice(0, 200)}`);
-                }
-                core.info(`Created ${changelogPath}`);
-              } catch (e) {
-                core.warning(`Failed to create CHANGELOG: ${e.message}`);
-              }
-            }
-
-            // Single-PR mode: triggered by pull_request:closed
-            if (context.eventName === 'pull_request' && context.payload.pull_request) {
-              const pr = context.payload.pull_request;
-              if (pr.merged) {
-                await processMergedPr(pr);
-              }
+            // Push events: the merged PR is already on main — no wait needed.
+            // A scheduled backstop run carries no triggering PR either: it exists
+            // precisely to sweep for merges the primary path missed.
+            if (context.eventName !== 'workflow_run') {
+              core.info(`${context.eventName} event — merged PRs are in the sweep window`);
               return;
             }
-
-            // Sweep mode: scan recently merged PRs. The window is the job's ONE
-            // SWEEP_WINDOW_HOURS literal, shared with the detector step below.
-            // A missing or non-numeric value FAILS the run rather than defaulting:
-            // a silently empty window would report "nothing to tag" forever.
-            const windowHours = Number(process.env.SWEEP_WINDOW_HOURS);
-            if (!Number.isFinite(windowHours) || windowHours <= 0) {
-              core.setFailed(`SWEEP_WINDOW_HOURS is not a positive number: ${JSON.stringify(process.env.SWEEP_WINDOW_HOURS)}`);
+            const run = context.payload.workflow_run;
+            const { data: prs } = await github.rest.pulls.list({
+              ...context.repo,
+              state: 'open',
+              head: `${context.repo.owner}:${run.head_branch}`,
+            });
+            if (!prs.length) {
+              core.info('No open PR for head branch — sweep covers already-merged PRs');
               return;
             }
-            const since = new Date(Date.now() - windowHours * 3600 * 1000);
-            let page = 1, done = false;
-            while (!done) {
-              const { data: prs } = await github.rest.pulls.list({
-                ...repo, state: 'closed', sort: 'updated', direction: 'desc',
-                per_page: 100, page,
+            const pr = prs[0];
+            // Sized to the measured auto-merge latency (see the header): the
+            // worst observed PASS->merge gap was 7m41s, against a 5-minute bound
+            // that missed it and reported success having tagged nothing.
+            const deadline = Date.now() + 20 * 60 * 1000;
+            while (Date.now() < deadline) {
+              const { data: p } = await github.rest.pulls.get({
+                ...context.repo, pull_number: pr.number,
               });
-              if (!prs.length) break;
-              for (const p of prs) {
-                if (new Date(p.updated_at) < since) { done = true; break; }
-                try {
-                  await processMergedPr(p);
-                } catch (e) {
-                  core.warning(`PR #${p.number}: ${e.message} — continuing`);
-                }
+              if (p.merged_at) {
+                core.info(`PR #${pr.number} merged at ${p.merged_at} — proceeding to tag`);
+                return;
               }
-              if (done || prs.length < 100) break;
-              page++;
+              await new Promise((r) => setTimeout(r, 20 * 1000));
             }
-            core.info('Sweep complete');
+            core.info(`PR #${pr.number} not merged within 20m — sweep still runs; the scheduled backstop and the next validator completion both recover it`);
 
-      # THE DETECTOR — opencharly/.github#286, opencharly/crabbox#40.
-      #
-      # WHY A SEPARATE STEP, AND WHY `if: ${{ !cancelled() }}`. The sweep can leave a
-      # merged PR untagged in two ways, and both used to be invisible:
-      #
-      #   * SILENT — in sweep mode every per-PR failure is caught and downgraded to
-      #     `core.warning('… — continuing')`, so the step exits 0 with the merge
-      #     untagged. A GREEN sweep therefore does NOT mean "every merge is tagged";
-      #     it means "no error escaped", which is a different sentence.
-      #   * FATAL — a transient 5xx or socket reset aborts the step before any tag
-      #     is written. That is #286's own failure (`HttpError: other side closed`
-      #     inside the listing read). Without this step's non-cancelled condition
-      #     it would be SKIPPED, so the untagged merge would stay unnamed even
-      #     though the run is red.
-      #
-      # `!cancelled()` makes this step the post-condition of BOTH paths — it runs
-      # after a FAILED step, and skips only when the run was CANCELLED (a
-      # superseded run must stay cancelled, not turn red on a merge it never
-      # tried to tag). Its failure NAMES the PR instead of leaving that to
-      # inference.
-      #
-      # It derives NO CalVer. It asks only whether each merged PR's merge commit
-      # carries ANY tag, so it cannot drift from the naming rules the step above
-      # uses (root CalVer, the Go-module form, the subdir module tag). An annotated
-      # tag is dereferenced to its commit: comparing against the tag OBJECT would be
-      # a false negative for every annotated tag.
-      - name: Assert every merge in the sweep window carries a tag at its merge commit
-        if: ${{ !cancelled() }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          window_hours="${SWEEP_WINDOW_HOURS}"
-          since="$(date -u -d "-${window_hours} hours" +%Y-%m-%dT%H:%M:%SZ)"
-          repo="${GITHUB_REPOSITORY}"
-
-          # Merged PRs, as {number, merged_at, sha}. `gh api --paginate --jq` emits
-          # ONE document per page, so `jq -s add` folds the pages into one array.
-          merged="$(
-            gh api --paginate \
-              "repos/${repo}/pulls?state=closed&sort=updated&direction=desc&per_page=100" \
-              --jq '[.[] | select(.merged_at != null and .merge_commit_sha != null)
-                           | {number, merged_at, sha: .merge_commit_sha}]' \
-              | jq -s 'add // []'
-          )"
-
-          # Every tag ref, as {ref, sha, type}.
-          refs="$(
-            gh api --paginate "repos/${repo}/git/matching-refs/tags" \
-              --jq '[.[] | {ref: .ref, sha: .object.sha, type: .object.type}]' \
-              | jq -s 'add // []'
-          )"
-
-          # The COMMIT each tag points at. A lightweight tag's object IS the commit;
-          # an annotated tag's object is a tag object, dereferenced once. The org's
-          # own mint (createRef at the merge commit) is lightweight, so the loop is
-          # normally empty; it exists for the annotated tags a fork carries.
-          targets="${RUNNER_TEMP:-/tmp}/charly-tag-targets-$$"
-          {
-            echo "$refs" | jq -r '.[] | select(.type != "tag") | "\(.ref)\t\(.sha)"'
-            echo "$refs" | jq -r '.[] | select(.type == "tag") | "\(.ref)\t\(.sha)"' \
-              | while IFS=$'\t' read -r ref sha; do
-                  [ -n "$ref" ] || continue
-                  printf '%s\t%s\n' "$ref" "$(gh api "repos/${repo}/git/tags/${sha}" --jq '.object.sha')"
-                done
-          } >"$targets"
-          tagged_commits="$(cut -f2 "$targets" | sed '/^$/d' | sort -u)"
-          rm -f "$targets"
-
-          untagged=""
-          while IFS=$'\t' read -r number sha merged_at; do
-            [ -n "$number" ] || continue
-            # Both timestamps are ISO-8601 UTC (`…Z`), so the string order IS the
-            # time order. An `if`, not `[ … ] && continue`: under `set -e` that
-            # compound would EXIT the step on the first PR outside the window.
-            if [[ "$merged_at" < "$since" ]]; then continue; fi
-            if ! printf '%s\n' "$tagged_commits" | grep -qxF "$sha"; then
-              untagged="${untagged}PR #${number} — merge ${sha} (merged ${merged_at}) has no tag"$'\n'
-            fi
-          done < <(echo "$merged" | jq -r '.[] | "\(.number)\t\(.sha)\t\(.merged_at)"')
-
-          if [ -n "$untagged" ]; then
-            echo "::error::merged PR(s) in the ${window_hours}h sweep window carry NO tag at their merge commit."
-            printf '%s' "$untagged"
-            echo "A green sweep does not prove every merge was tagged (opencharly/.github#286)."
-            echo "Add-only remedy: re-run this workflow (the sweep is idempotent), or tag the merge commit."
-            echo "NEVER move an existing tag."
-            exit 1
-          fi
-          echo "${window_hours}h sweep window: every merged PR carries a tag at its merge commit."
+  tag:
+    if: >
+      github.event_name == 'push' ||
+      github.event_name == 'schedule' ||
+      github.event.workflow_run.conclusion == 'success'
+    needs: wait-for-merge
+    uses: opencharly/.github/.github/workflows/tag-on-merge.yml@main
+    secrets: inherit
