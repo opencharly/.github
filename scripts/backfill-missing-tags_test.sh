@@ -58,6 +58,11 @@ case "$all" in
     exit 0 ;;
   "api --method POST "*"/git/refs"*)
     printf '%s\n' "$all" >>"$state/created"
+    # A refusal AT THE CREATE — the branch that decides whether a doomed write is reported as
+    # "not evaluated" rather than as a generic failure.
+    if [ -f "$state/rate_limit_post" ]; then
+      echo '{"message":"API rate limit exceeded for user ID 265000000.","status":"403"}' >&2; exit 1
+    fi
     # post_422 models the lost create: the pre-check's LISTING lagged, so the ref already
     # exists and the API refuses with 422. The run must then ask the POINT read which
     # commit it holds, not treat "the POST failed" as "the tag is missing".
@@ -113,7 +118,7 @@ exit 97
 MOCK
 chmod +x "$STATE/bin/gh"
 
-reset() { rm -f "$STATE/tags_sha" "$STATE/changelog" "$STATE/no_caller" "$STATE/ref_sha" "$STATE/listing_lag" "$STATE/post_422" "$STATE/rate_limit" "$STATE/rate_limit_head" "$STATE/rate_limit_tags" "$STATE/rate_limit_ref" "$STATE/server_error" "$STATE/rate_limit_subject" "$STATE/rate_limit_parent" "$STATE/unevaluated.txt"; : >"$STATE/created"; : >"$STATE/calls"; printf '%s\n' "${1:-fixture}" >"$STATE/repos"; }
+reset() { rm -f "$STATE/tags_sha" "$STATE/changelog" "$STATE/no_caller" "$STATE/ref_sha" "$STATE/listing_lag" "$STATE/post_422" "$STATE/rate_limit" "$STATE/rate_limit_head" "$STATE/rate_limit_tags" "$STATE/rate_limit_ref" "$STATE/server_error" "$STATE/rate_limit_subject" "$STATE/rate_limit_parent" "$STATE/rate_limit_post" "$STATE/unevaluated.txt"; : >"$STATE/created"; : >"$STATE/calls"; printf '%s\n' "${1:-fixture}" >"$STATE/repos"; }
 run()   { PATH="$STATE/bin:$PATH" OPENCHARLY_ORG=fixture RECONCILE_REPOS="${1:-}" BF_STATE="$STATE" BF_HEAD="$HEAD_SHA" BF_DATE="$DATE" \
             bash "$STATE/repo/scripts/backfill-missing-tags.sh" ${2:-} >"$STATE/out" 2>&1; }
 
@@ -274,4 +279,15 @@ grep -q 'API RATE LIMITED   : 1 repo(s) NOT evaluated' "$STATE/out" || fail "the
 [ "$(wc -l <"$STATE/unevaluated.txt")" -eq 1 ] || fail "the set must name the parent-refused repo"
 echo "ok   a quota refusal at the parent read is the same one named class"
 
-echo "PASS: the backfill tags only what is untagged and unexplained, in the right form, verifies every create by the ref itself, names an exhausted quota once at EVERY read, and continues past an unreadable one (17 properties)"
+# 18. … and at the CREATE POST itself, which is the branch that decides whether a write the
+#     API refused is reported as NOT EVALUATED instead of as a generic failure.
+reset fixture; touch "$STATE/rate_limit_post"
+export BF_UNEVALUATED_FILE="$STATE/unevaluated.txt"
+if run fixture --apply; then cat "$STATE/out" >&2; fail "a refused create must exit non-zero"; fi
+[ -s "$STATE/created" ] || fail "the create must have been ATTEMPTED, so the refusal is at the write"
+grep -q 'API RATE LIMITED   : 1 repo(s) NOT evaluated' "$STATE/out" || { cat "$STATE/out" >&2; fail "the summary must count the create-refused repo"; }
+[ "$(wc -l <"$STATE/unevaluated.txt")" -eq 1 ] || fail "the set must name the create-refused repo"
+grep -q 'TAG CREATE FAILED' "$STATE/out" && fail "a quota refusal at the create must not be reported as a generic create failure"
+echo "ok   a quota refusal at the create POST is reported as NOT EVALUATED, not as a create failure"
+
+echo "PASS: the backfill tags only what is untagged and unexplained, in the right form, verifies every create by the ref itself, names an exhausted quota once at EVERY read AND at the create, and continues past an unreadable one (18 properties)"
