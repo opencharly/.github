@@ -41,7 +41,7 @@ readonly DISCOVERY_PAGE_SIZE="${DISCOVERY_PAGE_SIZE:-100}"
 # TWO CONTROLS, and they are different controls:
 #   1. `--paginate` returns non-zero if ANY page fails, so a page that 502s can
 #      never be mistaken for the end of the org.
-#   2. The COUNT is checked against the org's own total. A merely TRUNCATED
+#   2. The COUNT is a LOWER BOUND on what the org reports. A merely TRUNCATED
 #      successful response would still read as a smaller org to every caller — the
 #      same class as the `mapfile < <(fn)` trap described at the top of this file,
 #      where emptiness is not a failure signal on its own. One cheap request buys
@@ -61,7 +61,13 @@ discover_all() {
     return 1
   fi
   got="$(printf '%s\n' "$rows" | sed '/^$/d' | wc -l)"
-  if [ "$got" -ne "$want" ]; then
+  # A LOWER BOUND, not an equality. Truncation removes repos, so `got < want` is the
+  # failure this catches. `got > want` is NOT a failure and must not be treated as one:
+  # measured on a runner (opencharly/.github run 42770802075) the listing returned 486
+  # while `public_repos + total_private_repos` reported 485 — the count is not an exact
+  # census of what the listing serves, and an equality test turned that off-by-one into
+  # `FATAL: discover_repos failed`, blocking every org-wide script.
+  if [ "$got" -lt "$want" ]; then
     echo "discover_all: discovered ${got} repo(s) but the org reports ${want} — a page was TRUNCATED; refusing to understate the org" >&2
     return 1
   fi

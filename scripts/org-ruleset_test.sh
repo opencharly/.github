@@ -54,6 +54,9 @@ gh() {
     fi
     local n; n="$(printf '%s\n' "$rows" | sed '/^$/d' | wc -l)"
     [[ "${DISCOVERY_TRUNCATE:-}" == 1 ]] && n=$((n + 1))
+    # The opposite direction, measured on a runner: the org COUNT lagged the listing by
+    # one. That is not truncation and must not fail — the invariant is a lower bound.
+    [[ "${DISCOVERY_OVERCOUNT:-}" == 1 ]] && n=$((n - 1))
     printf '%s\n' "$n" >"$STATE/orgcount"
     printf '%s\n' "$rows" | sed '/^$/d'
     return 0
@@ -196,6 +199,13 @@ jq -e '.conditions.repository_name.include == ["~ALL"]' "$STATE/payload.json" >/
 # verify passes on the fully-migrated state.
 OPENCHARLY_ORG=test "$root/scripts/org-ruleset.sh" verify >/dev/null
 
+
+# The OTHER direction must NOT abort: a listing that returns one MORE repo than the org
+# count is not truncation. Measured on a runner, where 486 listed against 485 reported
+# turned an equality test into `FATAL: discover_repos failed` for every org-wide script.
+if ! DISCOVERY_OVERCOUNT=1 OPENCHARLY_ORG=test "$root/scripts/org-ruleset.sh" verify >/dev/null 2>&1; then
+  echo "FAIL: verify must TOLERATE an org count that lags the listing by one (got > want)" >&2; exit 1
+fi
 # A real API failure on the dispatcher probe must ABORT verify (never read as
 # "absent" — that would hide a surviving duplicate producer).
 if FORCE_API_FAIL=1 OPENCHARLY_ORG=test "$root/scripts/org-ruleset.sh" verify >/dev/null 2>&1; then
@@ -284,6 +294,7 @@ fi
 if DISCOVERY_TRUNCATE=1 OPENCHARLY_ORG=test "$root/scripts/org-ruleset.sh" apply >/dev/null 2>&1; then
   echo "FAIL: apply must abort when the discovery is TRUNCATED, not understate the org" >&2; exit 1
 fi
+
 
 # A non-404 legacy-protection probe failure must ABORT (a transient error must never
 # read as "absent" and silently skip the removal).
