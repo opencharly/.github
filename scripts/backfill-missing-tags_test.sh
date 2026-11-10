@@ -38,6 +38,7 @@ cat >"$STATE/bin/gh" <<'MOCK'
 set -euo pipefail
 state="${BF_STATE:?BF_STATE unset}"
 head_sha="${BF_HEAD:?BF_HEAD unset}"
+date="${BF_DATE:?BF_DATE unset}"
 all="$*"
 case "$all" in
   "api --paginate "*"/repos?per_page="*)
@@ -47,9 +48,15 @@ case "$all" in
     if [ -f "$state/present" ]; then printf '%s\n' "$head_sha"; fi
     exit 0 ;;
   "api --method POST "*"/git/refs"*)
-    printf '%s\n' "$all" >>"$state/created"; printf '{}\n'; exit 0 ;;
+    printf '%s\n' "$all" >>"$state/created"; : >"$state/present"; printf '{}\n'; exit 0 ;;
   "api "*"/git/ref/heads/main"*) printf '%s\n' "$head_sha"; exit 0 ;;
   "api "*"/commits/"*)
+    # The two callers ask for different fields: the CalVer derivation wants the committer
+    # DATE, the explained-check wants the SUBJECT. The mock answers the field the call's
+    # own --jq names, exactly as the real API would.
+    case "$all" in
+      *committer.date*) printf '%s\n' "$date"; exit 0 ;;
+    esac
     if [ -f "$state/changelog" ]; then printf 'docs: add CHANGELOG 2026.314.0800 for PR #1\n'; else printf 'ci: reconcile the tag-on-merge caller with the canonical template\n'; fi
     exit 0 ;;
   "api "*"/contents/"*)
@@ -61,8 +68,8 @@ exit 97
 MOCK
 chmod +x "$STATE/bin/gh"
 
-reset() { rm -f "$STATE/present" "$STATE/changelog" "$STATE/no_caller"; : >"$STATE/created"; printf '%s\\n' "${1:-fixture}" >"$STATE/repos"; }
-run()   { PATH="$STATE/bin:$PATH" OPENCHARLY_ORG=fixture RECONCILE_REPOS="${1:-}" BF_STATE="$STATE" BF_HEAD="$HEAD_SHA" \
+reset() { rm -f "$STATE/present" "$STATE/changelog" "$STATE/no_caller"; : >"$STATE/created"; printf '%s\n' "${1:-fixture}" >"$STATE/repos"; }
+run()   { PATH="$STATE/bin:$PATH" OPENCHARLY_ORG=fixture RECONCILE_REPOS="${1:-}" BF_STATE="$STATE" BF_HEAD="$HEAD_SHA" BF_DATE="$DATE" \
             bash "$STATE/repo/scripts/backfill-missing-tags.sh" ${2:-} >"$STATE/out" 2>&1; }
 
 # 1. an unexplained head is tagged at that head
