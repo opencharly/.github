@@ -74,6 +74,12 @@ case "$all" in
     if [ -f "$state/changelog" ]; then printf 'docs: add CHANGELOG 2026.314.0800 for PR #1\n'; else printf 'ci: reconcile the tag-on-merge caller with the canonical template\n'; fi
     exit 0 ;;
   "api "*"/contents/"*)
+    # CALLS counts how many repos reached the API, so an arm can prove the run STOPS paying
+    # once the quota has refused one call.
+    printf 'call\n' >>"$state/calls"
+    if [ -f "$state/rate_limit" ]; then
+      echo '{"message":"API rate limit exceeded for user ID 265000000.","status":"403"}' >&2; exit 1
+    fi
     if [ -f "$state/no_caller" ]; then echo "gh: Not Found (HTTP 404)" >&2; exit 1; fi
     printf '{}\n'; exit 0 ;;
 esac
@@ -82,7 +88,7 @@ exit 97
 MOCK
 chmod +x "$STATE/bin/gh"
 
-reset() { rm -f "$STATE/tags_sha" "$STATE/changelog" "$STATE/no_caller" "$STATE/ref_sha" "$STATE/listing_lag" "$STATE/post_422"; : >"$STATE/created"; printf '%s\n' "${1:-fixture}" >"$STATE/repos"; }
+reset() { rm -f "$STATE/tags_sha" "$STATE/changelog" "$STATE/no_caller" "$STATE/ref_sha" "$STATE/listing_lag" "$STATE/post_422" "$STATE/rate_limit" "$STATE/unevaluated.txt"; : >"$STATE/created"; : >"$STATE/calls"; printf '%s\n' "${1:-fixture}" >"$STATE/repos"; }
 run()   { PATH="$STATE/bin:$PATH" OPENCHARLY_ORG=fixture RECONCILE_REPOS="${1:-}" BF_STATE="$STATE" BF_HEAD="$HEAD_SHA" BF_DATE="$DATE" \
             bash "$STATE/repo/scripts/backfill-missing-tags.sh" ${2:-} >"$STATE/out" 2>&1; }
 
@@ -160,4 +166,22 @@ if run fixture --apply; then cat "$STATE/out" >&2; fail "a ref at a DIFFERENT co
 grep -q 'REF EXISTS AT A DIFFERENT COMMIT (v2026.314.0800): fixture' "$STATE/out" || { cat "$STATE/out" >&2; fail "the run must name the mismatched ref"; }
 echo "ok   a ref at a different commit is a failure"
 
-echo "PASS: the backfill tags only what is untagged and unexplained, in the right form, and verifies every create by the ref itself (10 properties)"
+# 11. an exhausted quota is ONE class, said ONCE, with the not-evaluated set written out —
+#     and it stops paying for calls that cannot succeed (opencharly/.github#300). Measured
+#     on the fleet pass: 60 repos reported as individual failures, all one 403.
+reset fixture; printf 'a\nb\nc\n' >"$STATE/repos"; touch "$STATE/rate_limit"
+export BF_UNEVALUATED_FILE="$STATE/unevaluated.txt"
+if run "a b c" --apply; then cat "$STATE/out" >&2; fail "a rate-limited run must exit non-zero — nothing is known about those repos"; fi
+[ -s "$STATE/created" ] && { cat "$STATE/created" >&2; fail "no tag may be created when the API refuses the read"; }
+[ "$(grep -c 'API RATE LIMITED (the quota is exhausted)' "$STATE/out")" -eq 1 ] \
+  || { cat "$STATE/out" >&2; fail "the cause must be named exactly once, not once per repo"; }
+grep -q 'API RATE LIMITED   : 3 repo(s) NOT evaluated' "$STATE/out" \
+  || { cat "$STATE/out" >&2; fail "the summary must count the repos that were not evaluated"; }
+grep -q 'retry with' "$STATE/out" || fail "the summary must hand back the retry allow-list"
+[ "$(wc -l <"$STATE/unevaluated.txt")" -eq 3 ] \
+  || { cat "$STATE/unevaluated.txt" >&2; fail "the not-evaluated set must be written as a file"; }
+[ "$(wc -l <"$STATE/calls")" -eq 1 ] \
+  || { cat "$STATE/calls" >&2; fail "only the FIRST repo may reach the API once the quota refuses it — the rest must not pay another call"; }
+echo "ok   an exhausted quota is one named class, once, and the run stops paying for it"
+
+echo "PASS: the backfill tags only what is untagged and unexplained, in the right form, verifies every create by the ref itself, and names an exhausted quota once (11 properties)"

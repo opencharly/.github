@@ -43,15 +43,22 @@ esac
 
 
 # api_absent <args...> — run `gh api`; return 0 on success, 3 ONLY when the API says the
-# thing does not exist, and the FAILURE CODE (1) for anything else. Without this an auth
-# error, a rate limit or a network blip reads as "no tag exists", which in `--apply` would
-# create a SECOND tag at an already-tagged head — the exact thing "add-only" forbids.
+# thing does not exist, 4 when the API REFUSED us (the quota is exhausted), and the
+# FAILURE CODE (1) for anything else. Without this an auth error, a rate limit or a network
+# blip reads as "no tag exists", which in `--apply` would create a SECOND tag at an
+# already-tagged head — the exact thing "add-only" forbids.
+#
+# WHY 4 IS ITS OWN CLASS (opencharly/.github#300). An exhausted quota is ONE cause, and it
+# renders as N repo names when it is folded into the generic failure: measured on the fleet
+# pass, 60 lines read `CALLER UNREADABLE: <repo>` and every one was the same 403. Naming the
+# class lets the caller stop paying for calls that cannot succeed and say the cause ONCE.
 api_absent() {
   local err out rc
   err="$(mktemp)"
   out="$(gh api "$@" 2>"$err")"; rc=$?
   if [[ $rc -eq 0 ]]; then rm -f "$err"; printf '%s' "$out"; return 0; fi
   if grep -q 'HTTP 404' "$err"; then rm -f "$err"; return 3; fi
+  if grep -qi 'API rate limit exceeded' "$err"; then rm -f "$err"; return 4; fi
   cat "$err" >&2; rm -f "$err"
   return 1
 }
@@ -64,6 +71,7 @@ ref_points_at() {
   local org="$1" repo="$2" tag="$3" sha="$4" got rc
   got="$(api_absent "repos/$org/$repo/git/ref/tags/$tag" --jq '.object.sha')"; rc=$?
   [[ $rc -eq 3 ]] && return 1
+  [[ $rc -eq 4 ]] && { echo "  API RATE LIMITED — the ref cannot be read: $repo" >&2; exit 1; }
   [[ $rc -eq 0 ]] || { echo "  REF UNREADABLE ($tag): $repo" >&2; exit 1; }
   [[ "$got" = "$sha" ]]
 }
@@ -74,6 +82,7 @@ head_tag() {
   local org="$1" repo="$2" sha="$3" out
   out="$(api_absent --paginate "repos/$org/$repo/tags?per_page=100" --jq '.[].commit.sha')"; local rc=$?
   if [[ $rc -eq 3 ]]; then return 1; fi          # genuine 404: the repo has no tags
+  [[ $rc -eq 4 ]] && { echo "  API RATE LIMITED — the tags cannot be read: $repo" >&2; exit 1; }
   [[ $rc -eq 0 ]] || { echo "  TAGS UNREADABLE: $repo" >&2; exit 1; }
   printf '%s\n' "$out" | grep -qxF "$sha"
 }
@@ -84,18 +93,38 @@ mapfile -t REPOS <<<"$repos_raw"
 
 tagged=0 needs=0 skipped=0 created=0 failed=0
 L_NEEDS=()
+L_UNEVALUATED=()
+RATE_LIMITED=0
+# unevaluated <repo> — this repo was NOT looked at, and the run says so ONCE rather than
+# paying for a call the quota has already refused.
+unevaluated() {
+  L_UNEVALUATED+=("$1")
+  if [[ $RATE_LIMITED -eq 0 ]]; then
+    echo "  API RATE LIMITED (the quota is exhausted) — every repo from here on is NOT evaluated: $1" >&2
+    RATE_LIMITED=1
+  fi
+}
 for repo in "${REPOS[@]}"; do
   [[ -z "$repo" ]] && continue
+  # Once the quota has refused one call it will refuse them all, so the remaining repos are
+  # reported as not evaluated instead of each paying another doomed request.
+  [[ $RATE_LIMITED -eq 1 ]] && { unevaluated "$repo"; continue; }
   if [[ "$repo" == "${SOURCE_REPO:-.github}" ]]; then
     echo "  skipped (the source repo's releases come from its own merges): $repo"; skipped=$((skipped+1)); continue
   fi
   # A repo with no caller mints no releases; tagging it would invent one.
   caller_out="$(api_absent "repos/$ORG/$repo/contents/$CALLER_PATH?ref=main")"; caller_rc=$?
+  [[ $caller_rc -eq 4 ]] && { unevaluated "$repo"; continue; }
   if [[ $caller_rc -eq 3 ]]; then
     echo "  skipped (no tag-on-merge caller — this repo mints no releases): $repo"; skipped=$((skipped+1)); continue
   fi
   [[ $caller_rc -eq 0 ]] || { echo "  CALLER UNREADABLE: $repo" >&2; failed=$((failed+1)); continue; }
-  head="$(gh api "repos/$ORG/$repo/git/ref/heads/main" --jq '.object.sha' 2>/dev/null)" || { echo "  UNREADABLE head: $repo" >&2; failed=$((failed+1)); continue; }
+  head_err="$(mktemp)"
+  if ! head="$(gh api "repos/$ORG/$repo/git/ref/heads/main" --jq '.object.sha' 2>"$head_err")"; then
+    if grep -qi 'API rate limit exceeded' "$head_err"; then rm -f "$head_err"; unevaluated "$repo"; continue; fi
+    rm -f "$head_err"; echo "  UNREADABLE head: $repo" >&2; failed=$((failed+1)); continue
+  fi
+  rm -f "$head_err"
   if head_tag "$ORG" "$repo" "$head"; then
     tagged=$((tagged+1)); continue
   fi
@@ -158,4 +187,13 @@ else
   echo "  tagged now         : $created"
   echo "  failures           : $failed"
 fi
-[[ "$failed" -eq 0 ]] || exit 1
+if [[ ${#L_UNEVALUATED[@]} -gt 0 ]]; then
+  echo "  API RATE LIMITED   : ${#L_UNEVALUATED[@]} repo(s) NOT evaluated — the API refused the call, so nothing is known about them either way"
+  echo "  retry with         : RECONCILE_REPOS=\"${L_UNEVALUATED[*]}\" $0 ${MODE}"
+  if [[ -n "${BF_UNEVALUATED_FILE:-}" ]]; then
+    printf '%s\n' "${L_UNEVALUATED[@]}" >"$BF_UNEVALUATED_FILE" \
+      || { echo "  cannot write BF_UNEVALUATED_FILE: $BF_UNEVALUATED_FILE" >&2; exit 1; }
+    echo "  unevaluated set    : $BF_UNEVALUATED_FILE"
+  fi
+fi
+[[ "$failed" -eq 0 && ${#L_UNEVALUATED[@]} -eq 0 ]] || exit 1
