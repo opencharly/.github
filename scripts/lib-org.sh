@@ -20,7 +20,8 @@
 # call site, under `set -o pipefail`.
 
 readonly ORG="${OPENCHARLY_ORG:-opencharly}"
-readonly SOURCE_REPO=".github"
+# Overridable so a test can exercise the source-repo guard without inventing a repo.
+readonly SOURCE_REPO="${SOURCE_REPO:-.github}"
 readonly DISPATCHER_PATH=".github/workflows/pr-validator.yml"
 readonly SOURCE_DISPATCHER_PATH=".github/workflows/pr-validator-dispatcher.yml"
 

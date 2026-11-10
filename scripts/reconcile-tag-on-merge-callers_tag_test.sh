@@ -86,11 +86,19 @@ grep -q '"commit":{}' "$STATE/bin/gh" || fail "mutation did not apply"
 if run_apply; then tail -4 "$STATE/out" >&2; fail "a PUT response with no commit sha must fail, not skip the tag"; fi
 echo "ok   a missing commit sha fails loudly"
 
-# 4. STRUCTURAL: the source-repo guard exists in the shipped script. A behavioural arm
-# needs the discovery mock to drive the repo NAME, which this fixture's mock does not, so
-# the guard is asserted structurally here and the write path it protects is arm 1.
-grep -q 'NEVER touch the SOURCE repo' "$STATE/repo/scripts/reconcile-tag-on-merge-callers.sh" \
-  || fail "the source-repo guard is missing from the shipped script"
-echo "ok   the source-repo guard is present"
+# 4. BEHAVIOURAL: when the discovered repo IS the source repo, it is SKIPPED — no write,
+# no tag. The guard compares against $SOURCE_REPO, so this arm sets it to the fixture's
+# own name rather than inventing a repo the discovery mock cannot produce.
+sed -i 's/"commit":{}/"commit":{"sha":"%s"}/' "$STATE/bin/gh"   # undo arm 3
+: >"$STATE/tags"
+printf 'name: stale\n' >"$STATE/caller.yml"
+SOURCE_REPO=fixture PATH="$STATE/bin:$PATH" OPENCHARLY_ORG=fixture RECONCILE_REPOS="fixture" \
+  bash "$STATE/repo/scripts/reconcile-tag-on-merge-callers.sh" --apply >"$STATE/out4" 2>&1 \
+  || { cat "$STATE/out4" >&2; fail "the source-repo run failed"; }
+grep -q 'skipped (the source repo holds the REUSABLE' "$STATE/out4" \
+  || { cat "$STATE/out4" >&2; fail "the source repo must be SKIPPED, not reconciled"; }
+grep -q 'reconciled (pin=' "$STATE/out4" && { cat "$STATE/out4" >&2; fail "the source repo was RECONCILED"; }
+[ -s "$STATE/tags" ] && { cat "$STATE/tags" >&2; fail "the source repo must not be tagged"; }
+echo "ok   the source repo is skipped, never written or tagged"
 
 echo "PASS: the reconcile tags every write it makes, and guards the source repo (4 properties)"
