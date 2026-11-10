@@ -45,6 +45,15 @@ case "$all" in
     while IFS= read -r n; do [ -n "$n" ] && printf '%s\tfalse\tfalse\tmain\n' "$n"; done <"$state/repos"; exit 0 ;;
   "api orgs/fixture"*) wc -l <"$state/repos" | tr -d ' '; exit 0 ;;
   "api --paginate "*"/tags"*)
+    # A refusal at the TAGS LISTING — the read head_tag makes.
+    if [ -f "$state/rate_limit_tags" ]; then
+      echo '{"message":"API rate limit exceeded for user ID 265000000.","status":"403"}' >&2; exit 1
+    fi
+    # A GENERIC unreadable answer: not a 404, not a quota. Single-shot, so the NEXT repo
+    # proves the run continued instead of aborting.
+    if [ -f "$state/server_error" ]; then
+      rm -f "$state/server_error"; echo '{"message":"Server Error","status":"500"}' >&2; exit 1
+    fi
     if [ -f "$state/tags_sha" ]; then cat "$state/tags_sha"; fi
     exit 0 ;;
   "api --method POST "*"/git/refs"*)
@@ -59,21 +68,43 @@ case "$all" in
     [ -f "$state/listing_lag" ] || printf '%s\n' "$head_sha" >"$state/tags_sha"
     printf '{}\n'; exit 0 ;;
   "api "*"/git/ref/tags/"*)
-    # A POINT read of one ref.
+    # A refusal at the POINT read of one ref — the read ref_points_at makes AFTER a create.
+    if [ -f "$state/rate_limit_ref" ]; then
+      echo '{"message":"API rate limit exceeded for user ID 265000000.","status":"403"}' >&2; exit 1
+    fi
     if [ -f "$state/ref_sha" ]; then cat "$state/ref_sha"; exit 0; fi
     echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;
-  "api "*"/git/ref/heads/main"*) printf '%s\n' "$head_sha"; exit 0 ;;
+  "api "*"/git/ref/heads/main"*)
+    # A refusal AT THE HEAD FETCH, reachable only after a caller read that succeeded — the
+    # path a caller-only rate limit never exercises.
+    if [ -f "$state/rate_limit_head" ]; then
+      echo '{"message":"API rate limit exceeded for user ID 265000000.","status":"403"}' >&2; exit 1
+    fi
+    printf '%s\n' "$head_sha"; exit 0 ;;
   "api "*"/commits/"*)
     # The two callers ask for different fields: the CalVer derivation wants the committer
     # DATE, the explained-check wants the SUBJECT. The mock answers the field the call's
     # own --jq names, exactly as the real API would.
     case "$all" in
       *committer.date*) printf '%s\n' "$date"; exit 0 ;;
-      *parents*) printf 'parent-sha\n'; exit 0 ;;
+      *parents*)
+        if [ -f "$state/rate_limit_parent" ]; then
+          echo '{"message":"API rate limit exceeded for user ID 265000000.","status":"403"}' >&2; exit 1
+        fi
+        printf 'parent-sha\n'; exit 0 ;;
     esac
+    if [ -f "$state/rate_limit_subject" ]; then
+      echo '{"message":"API rate limit exceeded for user ID 265000000.","status":"403"}' >&2; exit 1
+    fi
     if [ -f "$state/changelog" ]; then printf 'docs: add CHANGELOG 2026.314.0800 for PR #1\n'; else printf 'ci: reconcile the tag-on-merge caller with the canonical template\n'; fi
     exit 0 ;;
   "api "*"/contents/"*)
+    # CALLS counts how many repos reached the API, so an arm can prove the run STOPS paying
+    # once the quota has refused one call.
+    printf 'call\n' >>"$state/calls"
+    if [ -f "$state/rate_limit" ]; then
+      echo '{"message":"API rate limit exceeded for user ID 265000000.","status":"403"}' >&2; exit 1
+    fi
     if [ -f "$state/no_caller" ]; then echo "gh: Not Found (HTTP 404)" >&2; exit 1; fi
     printf '{}\n'; exit 0 ;;
 esac
@@ -82,7 +113,7 @@ exit 97
 MOCK
 chmod +x "$STATE/bin/gh"
 
-reset() { rm -f "$STATE/tags_sha" "$STATE/changelog" "$STATE/no_caller" "$STATE/ref_sha" "$STATE/listing_lag" "$STATE/post_422"; : >"$STATE/created"; printf '%s\n' "${1:-fixture}" >"$STATE/repos"; }
+reset() { rm -f "$STATE/tags_sha" "$STATE/changelog" "$STATE/no_caller" "$STATE/ref_sha" "$STATE/listing_lag" "$STATE/post_422" "$STATE/rate_limit" "$STATE/rate_limit_head" "$STATE/rate_limit_tags" "$STATE/rate_limit_ref" "$STATE/server_error" "$STATE/rate_limit_subject" "$STATE/rate_limit_parent" "$STATE/unevaluated.txt"; : >"$STATE/created"; : >"$STATE/calls"; printf '%s\n' "${1:-fixture}" >"$STATE/repos"; }
 run()   { PATH="$STATE/bin:$PATH" OPENCHARLY_ORG=fixture RECONCILE_REPOS="${1:-}" BF_STATE="$STATE" BF_HEAD="$HEAD_SHA" BF_DATE="$DATE" \
             bash "$STATE/repo/scripts/backfill-missing-tags.sh" ${2:-} >"$STATE/out" 2>&1; }
 
@@ -160,4 +191,87 @@ if run fixture --apply; then cat "$STATE/out" >&2; fail "a ref at a DIFFERENT co
 grep -q 'REF EXISTS AT A DIFFERENT COMMIT (v2026.314.0800): fixture' "$STATE/out" || { cat "$STATE/out" >&2; fail "the run must name the mismatched ref"; }
 echo "ok   a ref at a different commit is a failure"
 
-echo "PASS: the backfill tags only what is untagged and unexplained, in the right form, and verifies every create by the ref itself (10 properties)"
+# 11. an exhausted quota is ONE class, said ONCE, with the not-evaluated set written out —
+#     and it stops paying for calls that cannot succeed (opencharly/.github#300). Measured
+#     on the fleet pass: 60 repos reported as individual failures, all one 403.
+reset fixture; printf 'a\nb\nc\n' >"$STATE/repos"; touch "$STATE/rate_limit"
+export BF_UNEVALUATED_FILE="$STATE/unevaluated.txt"
+if run "a b c" --apply; then cat "$STATE/out" >&2; fail "a rate-limited run must exit non-zero — nothing is known about those repos"; fi
+[ -s "$STATE/created" ] && { cat "$STATE/created" >&2; fail "no tag may be created when the API refuses the read"; }
+[ "$(grep -c 'API RATE LIMITED (the quota is exhausted)' "$STATE/out")" -eq 1 ] \
+  || { cat "$STATE/out" >&2; fail "the cause must be named exactly once, not once per repo"; }
+grep -q 'API RATE LIMITED   : 3 repo(s) NOT evaluated' "$STATE/out" \
+  || { cat "$STATE/out" >&2; fail "the summary must count the repos that were not evaluated"; }
+grep -q 'retry with' "$STATE/out" || fail "the summary must hand back the retry allow-list"
+[ "$(wc -l <"$STATE/unevaluated.txt")" -eq 3 ] \
+  || { cat "$STATE/unevaluated.txt" >&2; fail "the not-evaluated set must be written as a file"; }
+[ "$(wc -l <"$STATE/calls")" -eq 1 ] \
+  || { cat "$STATE/calls" >&2; fail "only the FIRST repo may reach the API once the quota refuses it — the rest must not pay another call"; }
+echo "ok   an exhausted quota is one named class, once, and the run stops paying for it"
+
+# 12. a refusal AT THE HEAD FETCH is the same class — the branch a caller-only rate limit
+#     never reaches, and the one the first version of this fix left untested.
+reset fixture; touch "$STATE/rate_limit_head"
+export BF_UNEVALUATED_FILE="$STATE/unevaluated.txt"
+if run fixture --apply; then cat "$STATE/out" >&2; fail "a refused head read must exit non-zero"; fi
+[ -s "$STATE/created" ] && { cat "$STATE/created" >&2; fail "no tag may be created when the head cannot be read"; }
+grep -q 'API RATE LIMITED   : 1 repo(s) NOT evaluated' "$STATE/out" \
+  || { cat "$STATE/out" >&2; fail "the summary must count the head-refused repo"; }
+[ "$(wc -l <"$STATE/unevaluated.txt")" -eq 1 ] || fail "the set must name the head-refused repo"
+[ "$(wc -l <"$STATE/calls")" -eq 1 ] \
+  || { cat "$STATE/calls" >&2; fail "the caller read must have happened FIRST, so the refusal is at the HEAD fetch and not earlier"; }
+grep -q 'retry with         : RECONCILE_REPOS="fixture" .* --apply' "$STATE/out" \
+  || { cat "$STATE/out" >&2; fail "the retry line must be a runnable command with the set and the mode"; }
+echo "ok   a quota refusal at the head fetch is the same one named class, with a runnable retry line"
+
+# 13. a refusal at the TAGS LISTING (head_tag) is the same class, and still emits the summary,
+#     the set and the file — a refusal never leaves the run half-reported.
+reset fixture; touch "$STATE/rate_limit_tags"
+export BF_UNEVALUATED_FILE="$STATE/unevaluated.txt"
+if run fixture --apply; then cat "$STATE/out" >&2; fail "a refused tags listing must exit non-zero"; fi
+[ -s "$STATE/created" ] && fail "no tag may be created when the tags cannot be read"
+grep -q 'API RATE LIMITED   : 1 repo(s) NOT evaluated' "$STATE/out" || fail "the summary must count the tags-refused repo"
+[ "$(wc -l <"$STATE/unevaluated.txt")" -eq 1 ] || fail "the set must name the tags-refused repo"
+echo "ok   a quota refusal at the tags listing reports through the same summary and set"
+
+# 14. … and at the POINT REF read after a create, which is the read that CONFIRMS a tag.
+reset fixture; touch "$STATE/rate_limit_ref"
+export BF_UNEVALUATED_FILE="$STATE/unevaluated.txt"
+if run fixture --apply; then cat "$STATE/out" >&2; fail "a refused ref read must exit non-zero"; fi
+[ -s "$STATE/created" ] || fail "the create must have been ATTEMPTED, so the refusal is at the READ-BACK and not earlier"
+grep -q 'API RATE LIMITED   : 1 repo(s) NOT evaluated' "$STATE/out" || fail "the summary must count the ref-refused repo"
+[ "$(wc -l <"$STATE/unevaluated.txt")" -eq 1 ] || fail "the set must name the ref-refused repo"
+grep -q 'tagged now         : 0' "$STATE/out" || fail "an unconfirmed create must never be counted as tagged"
+echo "ok   a quota refusal at the confirming ref read is reported, never counted as tagged"
+
+# 15. a GENERIC unreadable read (not a 404, not a quota) COUNTS a failure and the run
+#     CONTINUES. That is a behaviour change this change introduces — the old code aborted —
+#     so it needs its own arm: the second repo must still be reached and tagged.
+reset fixture; printf 'a\nb\n' >"$STATE/repos"; touch "$STATE/server_error"
+if run "a b" --apply; then cat "$STATE/out" >&2; fail "an unreadable repo must still fail the run"; fi
+grep -q 'TAGS UNREADABLE: a' "$STATE/out" || { cat "$STATE/out" >&2; fail "the unreadable repo must be named"; }
+grep -q 'failures           : 1' "$STATE/out" || { cat "$STATE/out" >&2; fail "exactly one failure must be counted"; }
+grep -q 'tagged v2026.314.0800: b' "$STATE/out" || { cat "$STATE/out" >&2; fail "the run must CONTINUE past an unreadable repo and tag the next one"; }
+grep -q 'tagged now         : 1' "$STATE/out" || fail "the continued run must report the tag it made"
+echo "ok   a generic unreadable read counts one failure and the run continues to the next repo"
+
+# 16. a refusal at the SUBJECT read — the read that decides whether a head is the excused
+#     CHANGELOG tip — is the same class.
+reset fixture; touch "$STATE/rate_limit_subject"
+export BF_UNEVALUATED_FILE="$STATE/unevaluated.txt"
+if run fixture --apply; then cat "$STATE/out" >&2; fail "a refused subject read must exit non-zero"; fi
+[ -s "$STATE/created" ] && fail "no tag may be created when the subject cannot be read"
+grep -q 'API RATE LIMITED   : 1 repo(s) NOT evaluated' "$STATE/out" || fail "the summary must count the subject-refused repo"
+[ "$(wc -l <"$STATE/unevaluated.txt")" -eq 1 ] || fail "the set must name the subject-refused repo"
+echo "ok   a quota refusal at the subject read is the same one named class"
+
+# 17. … and at the PARENT read, which only the CHANGELOG-tip path reaches.
+reset fixture; touch "$STATE/changelog" "$STATE/rate_limit_parent"
+export BF_UNEVALUATED_FILE="$STATE/unevaluated.txt"
+if run fixture --apply; then cat "$STATE/out" >&2; fail "a refused parent read must exit non-zero"; fi
+[ -s "$STATE/created" ] && fail "no tag may be created when the parent cannot be read"
+grep -q 'API RATE LIMITED   : 1 repo(s) NOT evaluated' "$STATE/out" || fail "the summary must count the parent-refused repo"
+[ "$(wc -l <"$STATE/unevaluated.txt")" -eq 1 ] || fail "the set must name the parent-refused repo"
+echo "ok   a quota refusal at the parent read is the same one named class"
+
+echo "PASS: the backfill tags only what is untagged and unexplained, in the right form, verifies every create by the ref itself, names an exhausted quota once at EVERY read, and continues past an unreadable one (17 properties)"
