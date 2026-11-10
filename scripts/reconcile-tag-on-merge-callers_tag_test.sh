@@ -10,8 +10,10 @@
 #
 # WHAT IT PROVES, and each arm can fail:
 #   1. a reconcile creates a tag AT THE COMMIT IT WROTE, in the CalVer shape;
-#   2. the tag is not created twice (an existing ref is left alone);
-#   3. no commit sha in the PUT response is a loud failure, not a silent skip.
+#   2. the reconciled line names that tag;
+#   3. no commit sha in the PUT response is a loud failure, not a silent skip;
+#   4. the SOURCE repo is skipped — never written, never tagged;
+#   5. an EXISTING tag is left alone: the create-if-absent branch does not re-POST.
 #
 # It runs the SHIPPED script against a mock `gh`, so the code under test is the code.
 set -euo pipefail
@@ -47,7 +49,9 @@ case "\$all" in
   "api --method PUT "*"/contents/"*)
     cp "\$state/canonical.yml" "\$state/caller.yml"
     printf '{"commit":{"sha":"%s"}}\n' "$COMMIT_SHA"; exit 0 ;;
-  "api "*"/git/ref/tags/"*) echo "gh: Not Found" >&2; exit 1 ;;
+  "api "*"/git/ref/tags/"*)
+    if [ -f "\$state/tag_exists" ]; then printf '{}\n'; exit 0; fi
+    echo "gh: Not Found" >&2; exit 1 ;;
   "api --method POST "*"/git/refs"*)
     printf '%s\n' "\$all" >>"\$state/tags"; exit 0 ;;
   "api "*"/commits/"*) printf '2026-11-10T08:00:00Z\n'; exit 0 ;;
@@ -101,4 +105,16 @@ grep -q 'reconciled (pin=' "$STATE/out4" && { cat "$STATE/out4" >&2; fail "the s
 [ -s "$STATE/tags" ] && { cat "$STATE/tags" >&2; fail "the source repo must not be tagged"; }
 echo "ok   the source repo is skipped, never written or tagged"
 
-echo "PASS: the reconcile tags every write it makes, and guards the source repo (4 properties)"
+# 5. an EXISTING tag is left alone: the create-if-absent branch must not re-POST
+sed -i 's/"commit":{}/"commit":{"sha":"%s"}/' "$STATE/bin/gh"   # undo any mutation
+touch "$STATE/tag_exists"
+: >"$STATE/tags"
+printf 'name: stale\n' >"$STATE/caller.yml"
+PATH="$STATE/bin:$PATH" OPENCHARLY_ORG=fixture RECONCILE_REPOS="fixture" \
+  bash "$STATE/repo/scripts/reconcile-tag-on-merge-callers.sh" --apply >"$STATE/out5" 2>&1 \
+  || { cat "$STATE/out5" >&2; fail "the existing-tag run failed"; }
+grep -q 'reconciled (pin=' "$STATE/out5" || { cat "$STATE/out5" >&2; fail "the reconcile did not run with an existing tag"; }
+[ -s "$STATE/tags" ] && { cat "$STATE/tags" >&2; fail "an EXISTING tag must not be re-created"; }
+echo "ok   an existing tag is left alone"
+
+echo "PASS: the reconcile tags every write it makes, guards the source repo, and does not re-tag (5 properties)"
