@@ -67,24 +67,34 @@ api_absent() {
 # A create must be verified by identity, not by scanning a LISTING: the tags listing
 # lags a create (measured on the first pilot — the tag existed and the listing did not
 # show it yet), so a listing-based read-back reports a successful tag as a failure.
+# Answers, never exits: 0 = the ref holds <sha>, 10 = it does not (or is absent), 4 = the
+# API refused the read, 2 = the ref could not be read for another reason. The CALLER decides
+# what a refusal means, because only the caller owns the run's bookkeeping.
 ref_points_at() {
   local org="$1" repo="$2" tag="$3" sha="$4" got rc
   got="$(api_absent "repos/$org/$repo/git/ref/tags/$tag" --jq '.object.sha')"; rc=$?
-  [[ $rc -eq 3 ]] && return 1
-  [[ $rc -eq 4 ]] && { echo "  API RATE LIMITED — the ref cannot be read: $repo" >&2; exit 1; }
-  [[ $rc -eq 0 ]] || { echo "  REF UNREADABLE ($tag): $repo" >&2; exit 1; }
-  [[ "$got" = "$sha" ]]
+  case $rc in
+    0) [[ "$got" = "$sha" ]] && return 0 || return 10 ;;
+    3) return 10 ;;
+    4) return 4 ;;
+    *) return 2 ;;
+  esac
 }
 
 # head_tag <org> <repo> <sha> — true when a tag points at <sha>; false when none does;
 # and the whole run ABORTS when the tags cannot be read at all.
+# Same contract as ref_points_at: 0 = a tag points at <sha>, 10 = none does (a 404 means the
+# repo has no tags at all, which is also "none"), 4 = the API refused the read, 2 = the tags
+# could not be read for another reason.
 head_tag() {
-  local org="$1" repo="$2" sha="$3" out
-  out="$(api_absent --paginate "repos/$org/$repo/tags?per_page=100" --jq '.[].commit.sha')"; local rc=$?
-  if [[ $rc -eq 3 ]]; then return 1; fi          # genuine 404: the repo has no tags
-  [[ $rc -eq 4 ]] && { echo "  API RATE LIMITED — the tags cannot be read: $repo" >&2; exit 1; }
-  [[ $rc -eq 0 ]] || { echo "  TAGS UNREADABLE: $repo" >&2; exit 1; }
-  printf '%s\n' "$out" | grep -qxF "$sha"
+  local org="$1" repo="$2" sha="$3" out rc
+  out="$(api_absent --paginate "repos/$org/$repo/tags?per_page=100" --jq '.[].commit.sha')"; rc=$?
+  case $rc in
+    0) printf '%s\n' "$out" | grep -qxF "$sha" && return 0 || return 10 ;;
+    3) return 10 ;;
+    4) return 4 ;;
+    *) return 2 ;;
+  esac
 }
 
 if ! repos_raw="$(discover_repos)"; then echo "FATAL: discover_repos failed" >&2; exit 1; fi
@@ -125,9 +135,10 @@ for repo in "${REPOS[@]}"; do
   head="$(api_absent "repos/$ORG/$repo/git/ref/heads/main" --jq '.object.sha')"; head_rc=$?
   if [[ $head_rc -eq 4 ]]; then unevaluated "$repo"; continue; fi
   if [[ $head_rc -ne 0 ]]; then echo "  UNREADABLE head: $repo" >&2; failed=$((failed+1)); continue; fi
-  if head_tag "$ORG" "$repo" "$head"; then
-    tagged=$((tagged+1)); continue
-  fi
+  head_tag "$ORG" "$repo" "$head"; htt=$?
+  if [[ $htt -eq 4 ]]; then unevaluated "$repo"; continue; fi
+  if [[ $htt -eq 2 ]]; then echo "  TAGS UNREADABLE: $repo" >&2; failed=$((failed+1)); continue; fi
+  if [[ $htt -eq 0 ]]; then tagged=$((tagged+1)); continue; fi
   # EXPLAINED HEADS ARE NOT A FINDING. `design-pintag` accepts a head that is the
   # `docs: add CHANGELOG …` commit sitting one above a tag — that is the ordinary shape
   # every merge produces — so tagging it would invent a second release for a commit the
@@ -140,7 +151,10 @@ for repo in "${REPOS[@]}"; do
       # whose parent is untagged is still failing the control, so it needs a tag itself.
       parent="$(gh api "repos/$ORG/$repo/commits/$head" --jq '.parents[0].sha')" \
         || { echo "  PARENT UNREADABLE: $repo" >&2; failed=$((failed+1)); continue; }
-      if head_tag "$ORG" "$repo" "$parent"; then
+      head_tag "$ORG" "$repo" "$parent"; ptr=$?
+      if [[ $ptr -eq 4 ]]; then unevaluated "$repo"; continue; fi
+      if [[ $ptr -eq 2 ]]; then echo "  TAGS UNREADABLE: $repo" >&2; failed=$((failed+1)); continue; fi
+      if [[ $ptr -eq 0 ]]; then
         echo "  explained (CHANGELOG tip above a tag): $repo"; skipped=$((skipped+1)); continue
       fi
       echo "  CHANGELOG tip with an UNTAGGED parent — it needs a tag: $repo" ;;
@@ -156,14 +170,18 @@ for repo in "${REPOS[@]}"; do
   create_err="$(mktemp)"
   if gh api --method POST "repos/$ORG/$repo/git/refs" -f ref="refs/tags/$tag" -f sha="$head" >/dev/null 2>"$create_err"; then
     rm -f "$create_err"
-    if ref_points_at "$ORG" "$repo" "$tag" "$head"; then
+    ref_points_at "$ORG" "$repo" "$tag" "$head"; rp=$?
+    if [[ $rp -eq 4 ]]; then unevaluated "$repo"; continue; fi
+    if [[ $rp -eq 0 ]]; then
       echo "  tagged $tag: $repo"; created=$((created+1))
     else
       echo "  READ-BACK FAILED ($tag): $repo" >&2; failed=$((failed+1))
     fi
   elif grep -q 'HTTP 422' "$create_err"; then
     rm -f "$create_err"
-    if ref_points_at "$ORG" "$repo" "$tag" "$head"; then
+    ref_points_at "$ORG" "$repo" "$tag" "$head"; rp=$?
+    if [[ $rp -eq 4 ]]; then unevaluated "$repo"; continue; fi
+    if [[ $rp -eq 0 ]]; then
       echo "  already present at the head ($tag): $repo"; tagged=$((tagged+1))
     else
       echo "  REF EXISTS AT A DIFFERENT COMMIT ($tag): $repo" >&2; failed=$((failed+1))

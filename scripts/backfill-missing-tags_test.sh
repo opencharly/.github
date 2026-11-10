@@ -45,6 +45,10 @@ case "$all" in
     while IFS= read -r n; do [ -n "$n" ] && printf '%s\tfalse\tfalse\tmain\n' "$n"; done <"$state/repos"; exit 0 ;;
   "api orgs/fixture"*) wc -l <"$state/repos" | tr -d ' '; exit 0 ;;
   "api --paginate "*"/tags"*)
+    # A refusal at the TAGS LISTING — the read head_tag makes.
+    if [ -f "$state/rate_limit_tags" ]; then
+      echo '{"message":"API rate limit exceeded for user ID 265000000.","status":"403"}' >&2; exit 1
+    fi
     if [ -f "$state/tags_sha" ]; then cat "$state/tags_sha"; fi
     exit 0 ;;
   "api --method POST "*"/git/refs"*)
@@ -59,7 +63,10 @@ case "$all" in
     [ -f "$state/listing_lag" ] || printf '%s\n' "$head_sha" >"$state/tags_sha"
     printf '{}\n'; exit 0 ;;
   "api "*"/git/ref/tags/"*)
-    # A POINT read of one ref.
+    # A refusal at the POINT read of one ref — the read ref_points_at makes AFTER a create.
+    if [ -f "$state/rate_limit_ref" ]; then
+      echo '{"message":"API rate limit exceeded for user ID 265000000.","status":"403"}' >&2; exit 1
+    fi
     if [ -f "$state/ref_sha" ]; then cat "$state/ref_sha"; exit 0; fi
     echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;
   "api "*"/git/ref/heads/main"*)
@@ -94,7 +101,7 @@ exit 97
 MOCK
 chmod +x "$STATE/bin/gh"
 
-reset() { rm -f "$STATE/tags_sha" "$STATE/changelog" "$STATE/no_caller" "$STATE/ref_sha" "$STATE/listing_lag" "$STATE/post_422" "$STATE/rate_limit" "$STATE/rate_limit_head" "$STATE/unevaluated.txt"; : >"$STATE/created"; : >"$STATE/calls"; printf '%s\n' "${1:-fixture}" >"$STATE/repos"; }
+reset() { rm -f "$STATE/tags_sha" "$STATE/changelog" "$STATE/no_caller" "$STATE/ref_sha" "$STATE/listing_lag" "$STATE/post_422" "$STATE/rate_limit" "$STATE/rate_limit_head" "$STATE/rate_limit_tags" "$STATE/rate_limit_ref" "$STATE/unevaluated.txt"; : >"$STATE/created"; : >"$STATE/calls"; printf '%s\n' "${1:-fixture}" >"$STATE/repos"; }
 run()   { PATH="$STATE/bin:$PATH" OPENCHARLY_ORG=fixture RECONCILE_REPOS="${1:-}" BF_STATE="$STATE" BF_HEAD="$HEAD_SHA" BF_DATE="$DATE" \
             bash "$STATE/repo/scripts/backfill-missing-tags.sh" ${2:-} >"$STATE/out" 2>&1; }
 
@@ -205,4 +212,24 @@ grep -q 'retry with         : RECONCILE_REPOS="fixture" .* --apply' "$STATE/out"
   || { cat "$STATE/out" >&2; fail "the retry line must be a runnable command with the set and the mode"; }
 echo "ok   a quota refusal at the head fetch is the same one named class, with a runnable retry line"
 
-echo "PASS: the backfill tags only what is untagged and unexplained, in the right form, verifies every create by the ref itself, and names an exhausted quota once at either read (12 properties)"
+# 13. a refusal at the TAGS LISTING (head_tag) is the same class, and still emits the summary,
+#     the set and the file — a refusal never leaves the run half-reported.
+reset fixture; touch "$STATE/rate_limit_tags"
+export BF_UNEVALUATED_FILE="$STATE/unevaluated.txt"
+if run fixture --apply; then cat "$STATE/out" >&2; fail "a refused tags listing must exit non-zero"; fi
+[ -s "$STATE/created" ] && fail "no tag may be created when the tags cannot be read"
+grep -q 'API RATE LIMITED   : 1 repo(s) NOT evaluated' "$STATE/out" || fail "the summary must count the tags-refused repo"
+[ "$(wc -l <"$STATE/unevaluated.txt")" -eq 1 ] || fail "the set must name the tags-refused repo"
+echo "ok   a quota refusal at the tags listing reports through the same summary and set"
+
+# 14. … and at the POINT REF read after a create, which is the read that CONFIRMS a tag.
+reset fixture; touch "$STATE/rate_limit_ref"
+export BF_UNEVALUATED_FILE="$STATE/unevaluated.txt"
+if run fixture --apply; then cat "$STATE/out" >&2; fail "a refused ref read must exit non-zero"; fi
+[ -s "$STATE/created" ] || fail "the create must have been ATTEMPTED, so the refusal is at the READ-BACK and not earlier"
+grep -q 'API RATE LIMITED   : 1 repo(s) NOT evaluated' "$STATE/out" || fail "the summary must count the ref-refused repo"
+[ "$(wc -l <"$STATE/unevaluated.txt")" -eq 1 ] || fail "the set must name the ref-refused repo"
+grep -q 'tagged now         : 0' "$STATE/out" || fail "an unconfirmed create must never be counted as tagged"
+echo "ok   a quota refusal at the confirming ref read is reported, never counted as tagged"
+
+echo "PASS: the backfill tags only what is untagged and unexplained, in the right form, verifies every create by the ref itself, and names an exhausted quota once at ANY read (14 properties)"
