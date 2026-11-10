@@ -49,6 +49,12 @@ case "$all" in
     if [ -f "$state/rate_limit_tags" ]; then
       echo '{"message":"API rate limit exceeded for user ID 265000000.","status":"403"}' >&2; exit 1
     fi
+    # tags_skip counts successful tags reads BEFORE the refusal, so the arm can refuse the
+    # SECOND one (the parent's) rather than the first.
+    if [ -f "$state/tags_skip" ]; then
+      n="$(cat "$state/tags_skip")"
+      if [ "$n" -gt 0 ]; then echo $((n-1)) >"$state/tags_skip"; else rm -f "$state/tags_skip"; echo '{"message":"API rate limit exceeded for user ID 265000000.","status":"403"}' >&2; exit 1; fi
+    fi
     # A GENERIC unreadable answer: not a 404, not a quota. Single-shot, so the NEXT repo
     # proves the run continued instead of aborting.
     if [ -f "$state/server_error" ]; then
@@ -118,7 +124,7 @@ exit 97
 MOCK
 chmod +x "$STATE/bin/gh"
 
-reset() { rm -f "$STATE/tags_sha" "$STATE/changelog" "$STATE/no_caller" "$STATE/ref_sha" "$STATE/listing_lag" "$STATE/post_422" "$STATE/rate_limit" "$STATE/rate_limit_head" "$STATE/rate_limit_tags" "$STATE/rate_limit_ref" "$STATE/server_error" "$STATE/rate_limit_subject" "$STATE/rate_limit_parent" "$STATE/rate_limit_post" "$STATE/unevaluated.txt"; : >"$STATE/created"; : >"$STATE/calls"; printf '%s\n' "${1:-fixture}" >"$STATE/repos"; }
+reset() { rm -f "$STATE/tags_sha" "$STATE/changelog" "$STATE/no_caller" "$STATE/ref_sha" "$STATE/listing_lag" "$STATE/post_422" "$STATE/rate_limit" "$STATE/rate_limit_head" "$STATE/rate_limit_tags" "$STATE/rate_limit_ref" "$STATE/server_error" "$STATE/rate_limit_subject" "$STATE/rate_limit_parent" "$STATE/rate_limit_post" "$STATE/tags_skip" "$STATE/unevaluated.txt"; : >"$STATE/created"; : >"$STATE/calls"; printf '%s\n' "${1:-fixture}" >"$STATE/repos"; }
 run()   { PATH="$STATE/bin:$PATH" OPENCHARLY_ORG=fixture RECONCILE_REPOS="${1:-}" BF_STATE="$STATE" BF_HEAD="$HEAD_SHA" BF_DATE="$DATE" \
             bash "$STATE/repo/scripts/backfill-missing-tags.sh" ${2:-} >"$STATE/out" 2>&1; }
 
@@ -290,4 +296,21 @@ grep -q 'API RATE LIMITED   : 1 repo(s) NOT evaluated' "$STATE/out" || { cat "$S
 grep -q 'TAG CREATE FAILED' "$STATE/out" && fail "a quota refusal at the create must not be reported as a generic create failure"
 echo "ok   a quota refusal at the create POST is reported as NOT EVALUATED, not as a create failure"
 
-echo "PASS: the backfill tags only what is untagged and unexplained, in the right form, verifies every create by the ref itself, names an exhausted quota once at EVERY read AND at the create, and continues past an unreadable one (18 properties)"
+# 19. a refusal at the PARENT's tags listing — the SECOND head_tag call, which a static flag
+#     can never reach: the first read must succeed and the second be refused.
+reset fixture; touch "$STATE/changelog"; printf '1\n' >"$STATE/tags_skip"
+export BF_UNEVALUATED_FILE="$STATE/unevaluated.txt"
+if run fixture --apply; then cat "$STATE/out" >&2; fail "a refused parent tags read must exit non-zero"; fi
+[ -s "$STATE/created" ] && fail "no tag may be created when the parent's tags cannot be read"
+grep -q 'API RATE LIMITED   : 1 repo(s) NOT evaluated' "$STATE/out" || { cat "$STATE/out" >&2; fail "the summary must count the parent-tags-refused repo"; }
+echo "ok   a quota refusal at the SECOND (parent) tags read is reached and reported"
+
+# 20. … and at the ref read inside the 422 path, which only a lost create enters.
+reset fixture; touch "$STATE/post_422" "$STATE/rate_limit_ref"
+export BF_UNEVALUATED_FILE="$STATE/unevaluated.txt"
+if run fixture --apply; then cat "$STATE/out" >&2; fail "a refused ref read after a 422 must exit non-zero"; fi
+grep -q 'API RATE LIMITED   : 1 repo(s) NOT evaluated' "$STATE/out" || { cat "$STATE/out" >&2; fail "the summary must count the 422-ref-refused repo"; }
+grep -q 'REF EXISTS AT A DIFFERENT COMMIT' "$STATE/out" && fail "an unreadable ref must never be reported as a different-commit ref"
+echo "ok   a quota refusal at the ref read inside the 422 path is reported, not mislabelled"
+
+echo "PASS: the backfill tags only what is untagged and unexplained, in the right form, verifies every create by the ref itself, names an exhausted quota once at EVERY read (both tags reads included) AND at the create, and continues past an unreadable one (20 properties)"

@@ -195,6 +195,7 @@ for repo in "${REPOS[@]}"; do
     rm -f "$create_err"
     ref_points_at "$ORG" "$repo" "$tag" "$head"; rp=$?
     if [[ $rp -eq 4 ]]; then unevaluated "$repo"; continue; fi
+    if [[ $rp -eq 2 ]]; then echo "  REF UNREADABLE ($tag): $repo" >&2; failed=$((failed+1)); continue; fi
     if [[ $rp -eq 0 ]]; then
       echo "  already present at the head ($tag): $repo"; tagged=$((tagged+1))
     else
