@@ -246,3 +246,18 @@ calver_at() {
     *)                  date -u -d "$iso" +'v%Y.%j.%H%M' ;;
   esac
 }
+
+# select_repos — PURE. Reads repo names on stdin and prints those the allow-list names.
+# An EMPTY (or all-space/comma) allow-list passes everything through. Shared so the
+# reconcile and the backfill filter the same way instead of each carrying a copy.
+select_repos() {
+  local want="$1" line w
+  if [[ -z "${want//[ ,	]/}" ]]; then cat; return 0; fi
+  local -A keep=()
+  for w in ${want//,/ }; do keep["$w"]=1; done
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    [[ -n "${keep[$line]:-}" ]] && printf '%s\n' "$line"
+  done
+  return 0
+}
