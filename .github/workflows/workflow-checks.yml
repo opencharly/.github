@@ -83,6 +83,11 @@ jobs:
       # asserts the tag is created at the commit the PUT returned.
       - name: Run the reconcile tag-after-write test (offline, mock gh)
         run: bash scripts/reconcile-tag-on-merge-callers_tag_test.sh
+      # opencharly/.github#294: the heads the reconcile wrote BEFORE it learned to tag
+      # them. This test proves the backfill tags only untagged, unexplained heads, in the
+      # per-repo form, and never re-creates an existing tag.
+      - name: Run the missing-tag backfill test (offline, mock gh)
+        run: bash scripts/backfill-missing-tags_test.sh
       # The DETECTOR that makes an untagged merge loud (opencharly/.github#286).
       # Offline and extracted: the step's shipped `run:` text is run against a mock
       # `gh`, and the RED arms are the point — a detector that cannot fail is not a

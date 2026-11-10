@@ -67,18 +67,6 @@ show_how() { diff <(norm "$1") <(norm "$2") | grep -E '^[<>]' | head -4 | sed 's
 # The allow-list exists because a distribution is one commit on each repo's `main`: it can
 # be PILOTED on a named few and read back before it reaches the rest. `.github/workflows/
 # reconcile-tag-on-merge-callers.yml` exposes it as its `repos` input.
-select_repos() {
-  local want="$1" line w
-  if [[ -z "${want//[ ,	]/}" ]]; then cat; return 0; fi
-  local -A keep=()
-  for w in ${want//,/ }; do keep["$w"]=1; done
-  while IFS= read -r line; do
-    [[ -z "$line" ]] && continue
-    [[ -n "${keep[$line]:-}" ]] && printf '%s\n' "$line"
-  done
-  return 0
-}
-
 main() {
   local mode="${1:-verify}"
   case "$mode" in verify|--apply) ;; *) echo "usage: $0 [verify|--apply]" >&2; exit 2 ;; esac
