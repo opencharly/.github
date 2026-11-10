@@ -31,32 +31,38 @@ DATE="2026-11-10T08:00:00Z"
 
 # A mock gh whose answers are driven by files the arms write.
 mkdir -p "$STATE/bin"
-cat >"$STATE/bin/gh" <<MOCK
+cat >"$STATE/bin/gh" <<'MOCK'
 #!/usr/bin/env bash
+# A QUOTED heredoc: nothing is expanded at fixture-build time, so every $ below is
+# resolved at RUN time. The state dir arrives in the environment instead.
 set -euo pipefail
-state="$STATE"; all="\$*"
-case "\$all" in
+state="${BF_STATE:?BF_STATE unset}"
+head_sha="${BF_HEAD:?BF_HEAD unset}"
+all="$*"
+case "$all" in
   "api --paginate "*"/repos?per_page="*)
-    while IFS= read -r n; do [ -n "\$n" ] && printf '%s\tfalse\tfalse\tmain\n' "\$n"; done <"\$state/repos"; exit 0 ;;
-  "api orgs/fixture"*) wc -l <"\$state/repos" | tr -d ' '; exit 0 ;;
-  "api "*"/contents/"*)
-    if [ -f "\$state/no_caller" ]; then echo "gh: Not Found" >&2; exit 1; fi
-    printf '{}\n'; exit 0 ;;
+    while IFS= read -r n; do [ -n "$n" ] && printf '%s\tfalse\tfalse\tmain\n' "$n"; done <"$state/repos"; exit 0 ;;
+  "api orgs/fixture"*) wc -l <"$state/repos" | tr -d ' '; exit 0 ;;
   "api --paginate "*"/tags"*)
-    if [ -f "\$state/present" ]; then printf '%s\\n' "$HEAD_SHA"; fi
+    if [ -f "$state/present" ]; then printf '%s\n' "$head_sha"; fi
     exit 0 ;;
-  "api "*"/git/ref/heads/main"*) printf '%s\\n' "$HEAD_SHA"; exit 0 ;;
+  "api --method POST "*"/git/refs"*)
+    printf '%s\n' "$all" >>"$state/created"; printf '{}\n'; exit 0 ;;
+  "api "*"/git/ref/heads/main"*) printf '%s\n' "$head_sha"; exit 0 ;;
   "api "*"/commits/"*)
-    if [ -f "\$state/changelog" ]; then printf 'docs: add CHANGELOG 2026.314.0800 for PR #1\\n'; else printf 'ci: reconcile the tag-on-merge caller with the canonical template\\n'; fi
+    if [ -f "$state/changelog" ]; then printf 'docs: add CHANGELOG 2026.314.0800 for PR #1\n'; else printf 'ci: reconcile the tag-on-merge caller with the canonical template\n'; fi
     exit 0 ;;
-  "api --method POST "*"/git/refs"*) printf '%s\\n' "\$all" >>"\$state/created"; printf '{}\n'; exit 0 ;;
+  "api "*"/contents/"*)
+    if [ -f "$state/no_caller" ]; then echo "gh: Not Found" >&2; exit 1; fi
+    printf '{}\n'; exit 0 ;;
 esac
-echo "mock gh: unhandled: \$all" >&2; exit 97
+echo "mock gh: unhandled: $all" >&2
+exit 97
 MOCK
 chmod +x "$STATE/bin/gh"
 
 reset() { rm -f "$STATE/present" "$STATE/changelog" "$STATE/no_caller"; : >"$STATE/created"; printf '%s\\n' "${1:-fixture}" >"$STATE/repos"; }
-run()   { PATH="$STATE/bin:$PATH" OPENCHARLY_ORG=fixture RECONCILE_REPOS="${1:-}" \
+run()   { PATH="$STATE/bin:$PATH" OPENCHARLY_ORG=fixture RECONCILE_REPOS="${1:-}" BF_STATE="$STATE" BF_HEAD="$HEAD_SHA" \
             bash "$STATE/repo/scripts/backfill-missing-tags.sh" ${2:-} >"$STATE/out" 2>&1; }
 
 # 1. an unexplained head is tagged at that head
