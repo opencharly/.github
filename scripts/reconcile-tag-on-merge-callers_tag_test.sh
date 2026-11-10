@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+# The reconcile's TAG after its write (opencharly/.github#294).
+#
+# WHY THIS TEST EXISTS. The reconcile PUTs the canonical caller straight to `main`,
+# bypassing the merge path that mints a CalVer tag. A head left untagged — and not
+# explicable as the `docs: add CHANGELOG …` commit above a tag — fails
+# `design-pintag` for every pin that advances to it, and that control forbids RAISING
+# its census, so a pin wave cannot move. The fleet rollout of 414 repos produced
+# exactly that: 389 design-pintag findings.
+#
+# WHAT IT PROVES, and each arm can fail:
+#   1. a reconcile creates a tag AT THE COMMIT IT WROTE, in the CalVer shape;
+#   2. the reconciled line names that tag;
+#   3. no commit sha in the PUT response is a loud failure, not a silent skip;
+#   4. the SOURCE repo is skipped — never written, never tagged;
+#   5. an EXISTING tag is left alone: the create-if-absent branch does not re-POST;
+#   6. a proxy-consumed ROOT MODULE (sdk, spec, plugin-gh) gets Go's tag form, not the
+#      plain CalVer — a plain v<major> tag there would need a /vN module path.
+#
+# It runs the SHIPPED script against a mock `gh`, so the code under test is the code.
+set -euo pipefail
+
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+STATE="$(mktemp -d)"
+trap 'rm -rf "$STATE"' EXIT
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+# A minimal project layout the script reads: the canonical template.
+mkdir -p "$STATE/repo/.github/workflows"
+cp "$root/.github/workflows/tag-on-merge-dispatcher.yml" "$STATE/repo/.github/workflows/tag-on-merge-dispatcher.yml"
+mkdir -p "$STATE/repo/scripts"
+cp "$root/scripts/reconcile-tag-on-merge-callers.sh" "$STATE/repo/scripts/"
+cp "$root/scripts/lib-org.sh" "$STATE/repo/scripts/"
+
+# The canonical content the script will PUT, and a caller that differs from it.
+printf 'name: stale\n' >"$STATE/caller.yml"
+cp "$STATE/repo/.github/workflows/tag-on-merge-dispatcher.yml" "$STATE/canonical.yml"
+
+COMMIT_SHA="aaaa111122223333444455556666777788889999"
+
+mkdir -p "$STATE/bin"
+cat >"$STATE/bin/gh" <<MOCK
+#!/usr/bin/env bash
+set -euo pipefail
+state="$STATE"
+all="\$*"
+case "\$all" in
+  "repo list"*) if [ -f "\$state/reponame" ]; then cat "\$state/reponame"; else printf 'fixture\n'; fi; exit 0 ;;
+  "api orgs/fixture"*) printf '1\n'; exit 0 ;;
+  "api --paginate "*"/repos?per_page"*) printf 'fixture\tfalse\tfalse\tmain\n'; exit 0 ;;
+  "api --method PUT "*"/contents/"*)
+    cp "\$state/canonical.yml" "\$state/caller.yml"
+    printf '{"commit":{"sha":"%s"}}\n' "$COMMIT_SHA"; exit 0 ;;
+  "api "*"/git/ref/tags/"*)
+    if [ -f "\$state/tag_exists" ]; then printf '{}\n'; exit 0; fi
+    echo "gh: Not Found" >&2; exit 1 ;;
+  "api --method POST "*"/git/refs"*)
+    printf '%s\n' "\$all" >>"\$state/tags"; exit 0 ;;
+  "api "*"/commits/"*) printf '2026-11-10T08:00:00Z\n'; exit 0 ;;
+  "api "*"/contents/"*)
+    if printf '%s' "\$all" | grep -q -- '--jq .sha'; then printf 'deadbeef\n'; else base64 -w0 <"\$state/caller.yml"; fi
+    exit 0 ;;
+esac
+echo "mock gh: unhandled: \$all" >&2
+exit 97
+MOCK
+chmod +x "$STATE/bin/gh"
+
+run_apply() {
+  PATH="$STATE/bin:$PATH" \
+  OPENCHARLY_ORG=fixture RECONCILE_REPOS="fixture" \
+    bash "$STATE/repo/scripts/reconcile-tag-on-merge-callers.sh" --apply >"$STATE/out" 2>&1 || { cat "$STATE/out" >&2; return 1; }
+}
+
+# 1. a reconcile tags the commit it wrote
+: >"$STATE/tags"
+run_apply || fail "apply run failed"
+want_tag="$(date -u -d 2026-11-10T08:00:00Z +'v%Y.%j.%H%M')"
+grep -q "ref=refs/tags/$want_tag" "$STATE/tags" || { cat "$STATE/tags" >&2; fail "expected the reconcile to create refs/tags/$want_tag"; }
+grep -q "sha=$COMMIT_SHA" "$STATE/tags" || { cat "$STATE/tags" >&2; fail "expected the tag to point at the commit the PUT returned"; }
+echo "ok   reconcile tags the commit it wrote ($want_tag)"
+
+# 2. the reconciled line names the tag
+grep -q 'reconciled (pin=.* prose=.*) at v2026' "$STATE/out" || { cat "$STATE/out" >&2; fail "the reconciled line must name the tag"; }
+echo "ok   the reconciled line names the tag"
+
+# 3. no commit sha in the response is a loud failure
+# reset the caller so the apply path actually runs again
+printf 'name: stale\n' >"$STATE/caller.yml"
+sed -i 's/"commit":{"sha":"%s"}/"commit":{}/' "$STATE/bin/gh"
+grep -q '"commit":{}' "$STATE/bin/gh" || fail "mutation did not apply"
+if run_apply; then tail -4 "$STATE/out" >&2; fail "a PUT response with no commit sha must fail, not skip the tag"; fi
+echo "ok   a missing commit sha fails loudly"
+
+# 4. BEHAVIOURAL: when the discovered repo IS the source repo, it is SKIPPED — no write,
+# no tag. The guard compares against $SOURCE_REPO, so this arm sets it to the fixture's
+# own name rather than inventing a repo the discovery mock cannot produce.
+sed -i 's/"commit":{}/"commit":{"sha":"%s"}/' "$STATE/bin/gh"   # undo arm 3
+: >"$STATE/tags"
+printf 'name: stale\n' >"$STATE/caller.yml"
+SOURCE_REPO=fixture PATH="$STATE/bin:$PATH" OPENCHARLY_ORG=fixture RECONCILE_REPOS="fixture" \
+  bash "$STATE/repo/scripts/reconcile-tag-on-merge-callers.sh" --apply >"$STATE/out4" 2>&1 \
+  || { cat "$STATE/out4" >&2; fail "the source-repo run failed"; }
+grep -q 'skipped (the source repo holds the REUSABLE' "$STATE/out4" \
+  || { cat "$STATE/out4" >&2; fail "the source repo must be SKIPPED, not reconciled"; }
+grep -q 'reconciled (pin=' "$STATE/out4" && { cat "$STATE/out4" >&2; fail "the source repo was RECONCILED"; }
+[ -s "$STATE/tags" ] && { cat "$STATE/tags" >&2; fail "the source repo must not be tagged"; }
+echo "ok   the source repo is skipped, never written or tagged"
+
+# 5. an EXISTING tag is left alone: the create-if-absent branch must not re-POST
+sed -i 's/"commit":{}/"commit":{"sha":"%s"}/' "$STATE/bin/gh"   # undo any mutation
+touch "$STATE/tag_exists"
+: >"$STATE/tags"
+printf 'name: stale\n' >"$STATE/caller.yml"
+PATH="$STATE/bin:$PATH" OPENCHARLY_ORG=fixture RECONCILE_REPOS="fixture" \
+  bash "$STATE/repo/scripts/reconcile-tag-on-merge-callers.sh" --apply >"$STATE/out5" 2>&1 \
+  || { cat "$STATE/out5" >&2; fail "the existing-tag run failed"; }
+grep -q 'reconciled (pin=' "$STATE/out5" || { cat "$STATE/out5" >&2; fail "the reconcile did not run with an existing tag"; }
+[ -s "$STATE/tags" ] && { cat "$STATE/tags" >&2; fail "an EXISTING tag must not be re-created"; }
+echo "ok   an existing tag is left alone"
+
+# 6. calver_at is PER-REPO: a proxy-consumed root module gets Go's form, everything else
+# gets the plain CalVer. `lib-org.sh` is sourceable, so this arm calls the function the
+# reconcile calls — no discovery mock needed for a pure form question.
+cat >"$STATE/bin/gh-calver" <<'CAL'
+#!/usr/bin/env bash
+printf '2026-11-10T08:00:00Z\n'
+CAL
+chmod +x "$STATE/bin/gh-calver"
+calver_of() {
+  PATH="$STATE/bin:$PATH" bash -c '
+    set -eu
+    gh() { printf "2026-11-10T08:00:00Z\n"; }
+    export -f gh
+    . "$1"
+    calver_at org "$2" deadbeef
+  ' _ "$STATE/repo/scripts/lib-org.sh" "$1"
+}
+mod="$(calver_of sdk)"; plain="$(calver_of fixture)"
+[ "$mod" = "v0.2026314.800" ] || fail "a root module must get Go's form, got: $mod"
+[ "$plain" = "v2026.314.0800" ] || fail "a normal repo must get the plain CalVer, got: $plain"
+echo "ok   calver_at is per-repo: module=$mod plain=$plain"
+
+echo "PASS: the reconcile tags every write it makes, guards the source repo, does not re-tag, and uses Go's form for module repos (6 properties)"
