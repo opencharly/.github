@@ -83,6 +83,10 @@ case "$all" in
     if [ -f "$state/rate_limit_ref" ]; then
       echo '{"message":"API rate limit exceeded for user ID 265000000.","status":"403"}' >&2; exit 1
     fi
+    # A GENERIC unreadable point read: not a 404, not a quota. Single-shot.
+    if [ -f "$state/ref_error" ]; then
+      rm -f "$state/ref_error"; echo '{"message":"Server Error","status":"500"}' >&2; exit 1
+    fi
     if [ -f "$state/ref_sha" ]; then cat "$state/ref_sha"; exit 0; fi
     echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;
   "api "*"/git/ref/heads/main"*)
@@ -124,7 +128,7 @@ exit 97
 MOCK
 chmod +x "$STATE/bin/gh"
 
-reset() { rm -f "$STATE/tags_sha" "$STATE/changelog" "$STATE/no_caller" "$STATE/ref_sha" "$STATE/listing_lag" "$STATE/post_422" "$STATE/rate_limit" "$STATE/rate_limit_head" "$STATE/rate_limit_tags" "$STATE/rate_limit_ref" "$STATE/server_error" "$STATE/rate_limit_subject" "$STATE/rate_limit_parent" "$STATE/rate_limit_post" "$STATE/tags_skip" "$STATE/unevaluated.txt"; : >"$STATE/created"; : >"$STATE/calls"; printf '%s\n' "${1:-fixture}" >"$STATE/repos"; }
+reset() { rm -f "$STATE/tags_sha" "$STATE/changelog" "$STATE/no_caller" "$STATE/ref_sha" "$STATE/listing_lag" "$STATE/post_422" "$STATE/rate_limit" "$STATE/rate_limit_head" "$STATE/rate_limit_tags" "$STATE/rate_limit_ref" "$STATE/server_error" "$STATE/rate_limit_subject" "$STATE/rate_limit_parent" "$STATE/rate_limit_post" "$STATE/tags_skip" "$STATE/ref_error" "$STATE/unevaluated.txt"; : >"$STATE/created"; : >"$STATE/calls"; printf '%s\n' "${1:-fixture}" >"$STATE/repos"; }
 run()   { PATH="$STATE/bin:$PATH" OPENCHARLY_ORG=fixture RECONCILE_REPOS="${1:-}" BF_STATE="$STATE" BF_HEAD="$HEAD_SHA" BF_DATE="$DATE" \
             bash "$STATE/repo/scripts/backfill-missing-tags.sh" ${2:-} >"$STATE/out" 2>&1; }
 
@@ -313,4 +317,13 @@ grep -q 'API RATE LIMITED   : 1 repo(s) NOT evaluated' "$STATE/out" || { cat "$S
 grep -q 'REF EXISTS AT A DIFFERENT COMMIT' "$STATE/out" && fail "an unreadable ref must never be reported as a different-commit ref"
 echo "ok   a quota refusal at the ref read inside the 422 path is reported, not mislabelled"
 
-echo "PASS: the backfill tags only what is untagged and unexplained, in the right form, verifies every create by the ref itself, names an exhausted quota once at EVERY read (both tags reads included) AND at the create, and continues past an unreadable one (20 properties)"
+# 21. a GENERIC unreadable POINT read (rp=2) counts a failure under its own message — it must
+#     never be reported as "a different commit", which states something unestablished.
+reset fixture; touch "$STATE/post_422" "$STATE/ref_error"
+if run fixture --apply; then cat "$STATE/out" >&2; fail "an unreadable ref must fail the run"; fi
+grep -q 'REF UNREADABLE (v2026.314.0800): fixture' "$STATE/out" || { cat "$STATE/out" >&2; fail "the unreadable ref must be named as such"; }
+grep -q 'REF EXISTS AT A DIFFERENT COMMIT' "$STATE/out" && fail "an unreadable ref must never be reported as a different-commit ref"
+grep -q 'failures           : 1' "$STATE/out" || { cat "$STATE/out" >&2; fail "exactly one failure must be counted"; }
+echo "ok   a generic unreadable ref read is named as unreadable and counted, never mislabelled"
+
+echo "PASS: the backfill tags only what is untagged and unexplained, in the right form, verifies every create by the ref itself, names an exhausted quota at EVERY read (both tags reads and the create) and every unreadable one, and continues past it (21 properties)"
