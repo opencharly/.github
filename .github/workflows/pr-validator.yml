@@ -459,6 +459,10 @@ jobs:
             echo "::warning::on-PATH charly $HAVE != pinned $WANT — downloading the pinned engine (the welded plugin-review differs; a stale engine produces no verdict)"
           fi
           # PINNED charly release - the gate is deterministic; bump here per release.
+          BASE="https://github.com/opencharly/charly/releases/download/$TAG"
+          BIN_URL="$BASE/charly-linux-amd64"
+          PLG_URL="$BASE/charly-plugins-linux-amd64.tar.gz"
+
           # No runtime latest-resolution: the releases/latest redirect is
           # abuse-limited on shared runner IPs (curl exit 22). TAG is
           # vars.CHARLY_VERSION verbatim — there is NO fallback default (an
@@ -469,56 +473,116 @@ jobs:
           # the gate (live evidence: plugin-review parseReviewArgs panic, exit 2,
           # while the same tag+tar runs green in a clean dir).
           D="${{ runner.temp }}/charly-$TAG"; mkdir -p "$D/bin" "$D/plugins"
-          # release assets are public — tokenless curl (gh/GITHUB_TOKEN injection
-          # is unreliable in workflow_call step envs: live smoke exit-4 evidence).
+          # ---- THE ASSET PROBE: the detector this gate was missing -------------
+          # opencharly/.github#285. The gate fetched with `curl -fsSL` and, on ANY
+          # non-zero exit, asked the release API and reported "the release is
+          # published but its assets could not be downloaded (a partial upload)".
+          # That sentence is FALSE for the failure that actually happens: GitHub's
+          # release-download path answers **HTTP 504** with a 92-byte gateway page
+          # while the release API reports every asset `state: uploaded` at its full
+          # size. A missing upload, a dead tag, and a failing download path are
+          # three classes with three remedies; the old branch collapsed them into
+          # one — the wrong one — and sent the operator to move a pin that was fine.
           #
-          # AN UNRESOLVABLE PIN MUST NAME ITSELF, NOT KILL THE RUN (opencharly/charly#723).
-          # A charly TAG can exist with NO published release (measured live 2026-10-13:
-          # 717 tags, 272 releases), and the pin names the TAG. The curl then 404s, the
-          # step died here, every later step was `skipped`, and the run ended with NO
-          # verdict and NO comment (measured on opencharly/sdk#317) — the author could see
-          # nothing to act on. The gate must NOT review with a different engine (that is
-          # what the pin exists for), so the failure is handed to the parse/comment steps as
-          # an INFRASTRUCTURE INCONCLUSIVE: the same class the provider failures use, which
-          # the auto-close counter EXCLUDES (opencharly/.github#170).
-          fetch_ok=1
-          curl -fsSL -o "$D/charly-linux-amd64" "https://github.com/opencharly/charly/releases/download/$TAG/charly-linux-amd64" || fetch_ok=0
-          if [ "$fetch_ok" = "1" ]; then
-            curl -fsSL -o "$D/charly-plugins-linux-amd64.tar.gz" "https://github.com/opencharly/charly/releases/download/$TAG/charly-plugins-linux-amd64.tar.gz" || fetch_ok=0
+          # Each asset is now fetched WITHOUT `-f` (the status and the body ARE the
+          # measurement) and the BYTES are judged, not trusted: a 200 carrying a
+          # gateway page is still not an engine. `asset_state` names the class:
+          #   endpoint-failed — 5xx / transport error: the DOWNLOAD PATH failed;
+          #                     the pin and the release are fine, so the remedy is
+          #                     a RE-RUN (never a pin move);
+          #   absent          — 4xx: the published release does not serve it;
+          #   wrong-body      — 2xx with the wrong magic: a truncated object or an
+          #                     interception page.
+          # A 200 STATUS ALONE IS NOT THE CHECK — only the MAGIC is, because a
+          # cached error page can arrive with any status and a plausible length.
+          #
+          # AND THE FAILURE MUST NAME ITSELF, NOT KILL THE RUN (opencharly/charly#723): a
+          # charly TAG can exist with NO published release (measured live 2026-10-13: 717
+          # tags, 272 releases), and the step used to die mid-fetch, so every later step was
+          # `skipped` and the run ended with NO verdict and NO comment (opencharly/sdk#317) —
+          # the author had nothing to act on. The gate must NOT review with a different
+          # engine (that is what the pin exists for), so the measured class is handed to the
+          # parse/comment steps as an INFRASTRUCTURE INCONCLUSIVE: the same class the
+          # provider failures use, which the auto-close counter EXCLUDES (opencharly/.github#170).
+          probe_asset() {  # probe_asset <url> <dest> -> "<http> <bytes> <magic> <form>"
+            local url="$1" dest="$2" http bytes magic form
+            # `-f` would discard both the status and the body, which is exactly how
+            # a 504 became "a partial upload". `|| true` keeps a transport failure
+            # from aborting the step before the class can be measured.
+            http="$(curl -sSL -o "$dest" -w '%{http_code}' "$url" 2>/dev/null || true)"
+            http="${http##*$'\n'}"; http="${http:-000}"
+            bytes="$(wc -c < "$dest" 2>/dev/null || true)"; bytes="${bytes:-0}"
+            magic="$(head -c 4 "$dest" 2>/dev/null | od -An -tx1 | tr -d ' \n' || true)"
+            case "$magic" in
+              7f454c46) form="an ELF binary" ;;
+              1f8b*)    form="a gzip archive" ;;
+              3c*)      form="an HTML page, not the asset" ;;
+              *)        form="an unrecognised body" ;;
+            esac
+            printf '%s %s %s %s\n' "$http" "$bytes" "${magic:-none}" "$form"
+          }
+          read -r BIN_HTTP BIN_BYTES BIN_MAGIC BIN_FORM <<<"$(probe_asset "$BIN_URL" "$D/charly-linux-amd64")"
+          # The FIRST failing asset is the one reported, and the second is only
+          # fetched when the first is good: on a failing download path the probe
+          # must not spend a second 100 MB round trip to learn what the first
+          # already measured.
+          asset_ok=true; asset_url=""; asset_http=""; asset_bytes=""; asset_form=""
+          if [ "$BIN_HTTP" != "200" ] || [ "$BIN_MAGIC" != "7f454c46" ]; then
+            asset_ok=false; asset_url="$BIN_URL"; asset_http="$BIN_HTTP"
+            asset_bytes="$BIN_BYTES"; asset_form="$BIN_FORM"
+          else
+            read -r PLG_HTTP PLG_BYTES PLG_MAGIC PLG_FORM <<<"$(probe_asset "$PLG_URL" "$D/charly-plugins-linux-amd64.tar.gz")"
+            if [ "$PLG_HTTP" != "200" ] || [ "${PLG_MAGIC:0:6}" != "1f8b08" ]; then
+              asset_ok=false; asset_url="$PLG_URL"; asset_http="$PLG_HTTP"
+              asset_bytes="$PLG_BYTES"; asset_form="$PLG_FORM"
+            fi
           fi
-          if [ "$fetch_ok" != "1" ]; then
-            # Name the SUB-CASE with the API, because the remedy differs — and the release
-            # PAGE cannot tell them apart: MEASURED live 2026-10-13, the page answers 200 for
-            # an existing tag whose release is absent (it falls back to the tag view) and 404
-            # only for a tag that does not exist at all. The API discriminates exactly
-            # (200 published / 404 absent / 404 nonsense). This job holds `contents: write`,
-            # so a DRAFT release is visible here as `draft: true`; a read-only token would
-            # simply 404 it and the message must not claim more than the probe shows.
-            # The ASSET download above stays tokenless (its own comment explains why); only
-            # this failure-path classification uses the token.
+
+          if [ "$asset_ok" != "true" ]; then
+            # THE RELEASE'S STATE and the ASSET'S STATUS are measured separately,
+            # because they answer different questions and carry different remedies.
+            # The release PAGE cannot tell them apart — it answers 200 for an
+            # existing tag whose release is absent (it falls back to the tag view)
+            # and 404 only for a tag that does not exist. The API discriminates
+            # exactly (200 published / 404 absent / 404 nonsense), and `contents:
+            # write` makes a DRAFT visible here. Only this failure path uses the
+            # token; the asset fetch above stays tokenless (its own comment says why).
             api="https://api.github.com/repos/opencharly/charly"
-            rel_code="$(curl -s -o "$D/release.json" -w '%{http_code}' -H "Authorization: Bearer ${GH_TOKEN}" "$api/releases/tags/$TAG" || echo 000)"
+            rel_code="$(curl -s -o "$D/release.json" -w '%{http_code}' -H "Authorization: Bearer ${GH_TOKEN}" "$api/releases/tags/$TAG" || true)"
+            rel_code="${rel_code##*$'\n'}"; rel_code="${rel_code:-000}"
+            release_state="absent"
             if [ "$rel_code" = "200" ]; then
               if grep -q '"draft"[[:space:]]*:[[:space:]]*true' "$D/release.json"; then
-                pin_class="the release exists but is a DRAFT, so its assets are not publicly downloadable"
+                release_state="draft"
               else
-                pin_class="the release is published but its assets could not be downloaded (a partial upload)"
+                release_state="published"
               fi
             else
-              tag_code="$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${GH_TOKEN}" "$api/git/ref/tags/$TAG" || echo 000)"
+              tag_code="$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${GH_TOKEN}" "$api/git/ref/tags/$TAG" || true)"
+              tag_code="${tag_code##*$'\n'}"; tag_code="${tag_code:-000}"
               if [ "$tag_code" = "200" ]; then
-                pin_class="no PUBLISHED release exists for this tag (the tag itself exists)"
+                release_state="absent"   # the tag exists; no published release for it
               else
-                pin_class="the tag does not exist in opencharly/charly (HTTP ${tag_code} on its ref) — a pin typo?"
+                release_state="no-tag"   # the tag itself does not exist — a pin typo
               fi
             fi
+            case "$asset_http" in
+              2*) asset_state="wrong-body" ;;       # answered, but not with the asset
+              4*) asset_state="absent" ;;           # this release does not serve it
+              *)  asset_state="endpoint-failed" ;;  # 5xx / 000 / anything else
+            esac
             {
               echo "engine_unresolved=true"
               echo "pin_tag=$TAG"
               echo "pin_from=$PIN_FROM"
-              echo "pin_class=$pin_class"
+              echo "release_state=$release_state"
+              echo "asset_state=$asset_state"
+              echo "asset_url=$asset_url"
+              echo "asset_http=$asset_http"
+              echo "asset_bytes=$asset_bytes"
+              echo "asset_form=$asset_form"
             } >> "$GITHUB_OUTPUT"
-            echo "::error::the pinned engine $TAG cannot be obtained — $pin_class. Refusing to review with ANY other engine (the pin's purpose), and reporting it as an INFRASTRUCTURE INCONCLUSIVE with a PR comment (opencharly/charly#723)."
+            echo "::error::the pinned engine $TAG cannot be obtained — ${asset_url} answered HTTP ${asset_http} with ${asset_bytes} bytes (${asset_form}); release_state=${release_state} asset_state=${asset_state}. Refusing to review with ANY other engine (the pin's purpose); reporting it as an INFRASTRUCTURE INCONCLUSIVE with a PR comment that carries this URL and status (opencharly/charly#723, opencharly/.github#285)."
             exit 0
           fi
           mv "$D/charly-linux-amd64" "$D/bin/charly" && chmod +x "$D/bin/charly"
@@ -955,7 +1019,15 @@ jobs:
           ENGINE_UNRESOLVED: ${{ steps.ensure-charly.outputs.engine_unresolved }}
           PIN_TAG: ${{ steps.ensure-charly.outputs.pin_tag }}
           PIN_FROM: ${{ steps.ensure-charly.outputs.pin_from }}
-          PIN_CLASS: ${{ steps.ensure-charly.outputs.pin_class }}
+          # The asset probe's MEASUREMENTS (opencharly/.github#285): the release's own
+          # state, and the failing asset's URL, HTTP status, size and body form. The
+          # class line quotes them, so it says WHY and never guesses.
+          RELEASE_STATE: ${{ steps.ensure-charly.outputs.release_state }}
+          ASSET_STATE: ${{ steps.ensure-charly.outputs.asset_state }}
+          ASSET_URL: ${{ steps.ensure-charly.outputs.asset_url }}
+          ASSET_HTTP: ${{ steps.ensure-charly.outputs.asset_http }}
+          ASSET_BYTES: ${{ steps.ensure-charly.outputs.asset_bytes }}
+          ASSET_FORM: ${{ steps.ensure-charly.outputs.asset_form }}
           ENGINE_TERMINAL: ${{ steps.review.outputs.engine_terminal }}
           ENGINE_REQUEST: ${{ steps.review.outputs.engine_request }}
         run: |
@@ -975,16 +1047,51 @@ jobs:
           # through to a signature story. (Above them all sits the unresolvable pin, which is
           # not a signature at all: it is measured before the review step is even reached.)
           #
-          # THE UNRESOLVABLE PIN COMES FIRST (opencharly/charly#723): it is a MEASURED class
-          # from the ensure step — no review ran — so it outranks every log-signature
-          # heuristic below, exactly as the engine's own terminal line does. Its remedy is
-          # the operator's two paths (serve the release, or move the pin), and it is carried
-          # as INFRA so it never counts toward AI_REVIEW_AUTO_CLOSE_AFTER.
+          # THE UNOBTAINABLE ENGINE COMES FIRST (opencharly/charly#723, opencharly/.github#285):
+          # it is a MEASURED class from the ensure step — no review ran — so it outranks every
+          # log-signature heuristic below, exactly as the engine's own terminal line does. It is
+          # carried as INFRA so it never counts toward AI_REVIEW_AUTO_CLOSE_AFTER, and it splits
+          # three ways because the three causes carry three DIFFERENT remedies: a dead tag or a
+          # tag without a published release (the pin is wrong — serve the release or move the
+          # pin), a published release that does not serve the asset (the release is wrong —
+          # re-upload), and an asset the DOWNLOAD PATH failed to serve (neither is wrong —
+          # re-run, never move the pin). The gate names which one it measured; it never
+          # guesses, because the wrong branch sends the operator to a fix that is already true.
           if [ "${ENGINE_UNRESOLVED:-}" = "true" ]; then
-            class="engine pin unresolvable — the pinned charly release could not be obtained, so NO review ran (opencharly/charly#723)"
-            rootcause="**Root cause (measured in this run).** \`${PIN_FROM}\` names \`${PIN_TAG}\`, and the gate could not download that release's assets: **${PIN_CLASS}**. The gate refuses to review with any OTHER engine — the pin exists because the engine's behaviour lives in the binary's welded plugin-review — so no review ran and there is **no finding about this diff**. Measured live 2026-10-13: \`opencharly/charly\` carries 717 tags and 272 releases, so a tag without a published release is reachable by an ordinary pin bump (the class was reproduced on \`opencharly/sdk#317\`, where the run ended with no verdict AND no comment)."
-            remedy1="1. serve the pinned release: \`gh release view ${PIN_TAG} --repo opencharly/charly\`; if the tag has no release, its build is \`release-binary.yml\` (workflow_run on tag-on-merge, or a manual dispatch) — publish it, then re-run this review;"
-            remedy2="2. or move the pin: \`vars.CHARLY_VERSION\` (or this run's \`charly-version\` input) to a tag whose release exists, then re-run. Either way the fix is the operator's, not the author's diff."
+            # THREE CLASSES, THREE REMEDIES (opencharly/.github#285). The old single
+            # branch reported "a partial upload" for EVERY failure, which blamed the
+            # release even when the release was intact and GitHub's download path was
+            # the failing hop — and the remedy it named ("serve the pinned release")
+            # was already true. The ensure step now MEASURES the release's state and
+            # the asset's own HTTP status separately; this table keeps them apart.
+            # All three stay INFRA (excluded from AI_REVIEW_AUTO_CLOSE_AFTER): none is
+            # a finding about the diff, so none may count toward a thread's bound.
+            if [ "$RELEASE_STATE" = "no-tag" ]; then
+              class="engine pin unresolvable — the pin names no existing tag: ${PIN_TAG} is absent from opencharly/charly and ${ASSET_URL} answered HTTP ${ASSET_HTTP}, so NO review ran (opencharly/charly#723)"
+              rootcause="**Root cause (measured in this run).** \`${PIN_FROM}\` names \`${PIN_TAG}\`, which is not a tag in \`opencharly/charly\`: the release API answered 404 both for a release of that name and for the tag ref itself, so there is nothing to serve its assets — a pin typo, or a pin ahead of its tag."
+              remedy1="1. confirm the tag set — \`git ls-remote --tags https://github.com/opencharly/charly.git 'refs/tags/${PIN_TAG}'\`; an empty answer is the proof;"
+              remedy2="2. point \`vars.CHARLY_VERSION\` (or this run's \`charly-version\` input) at a tag that exists, then re-run. The fix is the operator's, not the author's diff."
+            elif [ "$RELEASE_STATE" = "absent" ] || [ "$RELEASE_STATE" = "draft" ]; then
+              class="engine pin unresolvable — the tag ${PIN_TAG} has no PUBLIC release to serve its assets (state: ${RELEASE_STATE}), so NO review ran (opencharly/charly#723)"
+              rootcause="**Root cause (measured in this run).** \`${PIN_FROM}\` names \`${PIN_TAG}\`; the TAG exists, but the release API has no PUBLISHED release for it (\`${RELEASE_STATE}\`), so its assets cannot be downloaded at all. Measured live 2026-10-13: \`opencharly/charly\` carries 717 tags and 272 releases, so a tag without a published release is reachable by an ordinary pin bump (reproduced on \`opencharly/sdk#317\`, where the run ended with no verdict AND no comment)."
+              remedy1="1. serve the pinned release — \`gh release view ${PIN_TAG} --repo opencharly/charly\`; if the tag has no release, its build is \`release-binary.yml\` (workflow_run on tag-on-merge, or a manual dispatch): publish it, then re-run this review;"
+              remedy2="2. or move the pin to a tag whose release exists, then re-run. Either way the fix is the operator's, not the author's diff."
+            elif [ "$ASSET_STATE" = "endpoint-failed" ]; then
+              class="asset unreachable — ${ASSET_URL} answered HTTP ${ASSET_HTTP} (${ASSET_BYTES} bytes, ${ASSET_FORM}), so NO review ran (opencharly/.github#285)"
+              rootcause="**Root cause (measured in this run).** \`${PIN_FROM}\` names \`${PIN_TAG}\`, the release exists and is PUBLISHED, and its assets are \`uploaded\` at their full sizes in the release API — yet the DOWNLOAD PATH answered **HTTP ${ASSET_HTTP}** with a ${ASSET_BYTES}-byte body (${ASSET_FORM}). So neither the pin nor the release is the defect: the failing hop is GitHub's release-download path. This class is INTERMITTENT and per-OBJECT, not per-tag and not per-size — measured 2026-11-09 within one minute: \`v2026.313.0209/charly-linux-amd64\` answered 504 with this same 92-byte gateway page while \`v2026.313.0209/charly-candy-charly.yml\` answered 200 and the OTHER release's 37 MB binary answered 200. Moving the pin therefore cannot fix it: it moves the failure, it does not remove it."
+              remedy1="1. RE-RUN this review on the same head — the pin and the release are correct, and an explicit re-run is the remedy for a transient 5xx (the gate keeps NO in-job retry, R3). Do NOT move the pin and do NOT re-upload the release;"
+              remedy2="2. while the path is down, verify the release itself is intact: \`gh release view ${PIN_TAG} --repo opencharly/charly\` lists that asset \`uploaded\`, and GitHub's API asset route (\`GET /repos/opencharly/charly/releases/assets/<id>\` with \`Accept: application/octet-stream\`) serves the same bytes. The gate deliberately does NOT fall back to that route: a silent second fetch would hide this class instead of naming it (R3)."
+            elif [ "$ASSET_STATE" = "absent" ]; then
+              class="asset absent — the published release ${PIN_TAG} does not serve ${ASSET_URL} (HTTP ${ASSET_HTTP}), so NO review ran (opencharly/charly#723)"
+              rootcause="**Root cause (measured in this run).** The release for \`${PIN_TAG}\` is PUBLISHED, but the asset the gate must fetch is not served: \`${ASSET_URL}\` answered **HTTP ${ASSET_HTTP}**. That is the release's OWN defect — an upload that never completed, or an asset removed or renamed — and the 4xx says nothing transient is involved, so waiting and re-running cannot clear it."
+              remedy1="1. serve the asset — \`gh release upload ${PIN_TAG} <file> --repo opencharly/charly\`, or re-run \`release-binary.yml\` for the tag — then re-run this review;"
+              remedy2="2. or move the pin to a tag whose release serves both \`charly-linux-amd64\` and \`charly-plugins-linux-amd64.tar.gz\`. Either way the fix is the operator's, not the author's diff."
+            else
+              class="asset unreadable — ${ASSET_URL} answered HTTP ${ASSET_HTTP} with ${ASSET_BYTES} bytes that are ${ASSET_FORM}, so NO review ran (opencharly/.github#285)"
+              rootcause="**Root cause (measured in this run).** The fetch SUCCEEDED at the HTTP level but the bytes are not the asset: \`${ASSET_URL}\` answered **HTTP ${ASSET_HTTP}** and the body is ${ASSET_FORM}. This is a truncated/other object at the release, or an interception page on the runner's egress — and the gate refuses to run a binary it cannot identify, because a plausible-looking wrong engine is worse than none."
+              remedy1="1. re-upload that asset, then re-run this review;"
+              remedy2="2. if the body is an HTML/proxy page, this run's egress is intercepted — escalate to the operator: the runner's network path, not the release, is then the defect."
+            fi
           elif [ "$INCONCLUSIVE_CLASS" = "attempt-cap" ]; then
             class="whole-request cap (the ONE review call ran past AI_REVIEW_ATTEMPT_TIMEOUT and was cut; not retried)"
             rootcause="**Root cause (measured in this run).** The engine's own terminal line names the class: the generation ran longer than the whole-request cap. A generation that long is a reasoning length problem — compare \`reasoning_effort\` and \`max_tokens\` in the request line below with the org vars (an empty \`reasoning_effort\` means none was sent; opencharly/plugin-review#36)."
