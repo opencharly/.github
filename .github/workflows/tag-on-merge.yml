@@ -16,6 +16,13 @@ jobs:
     permissions:
       contents: write
       pull-requests: read
+    env:
+      # ONE literal for the sweep window, read by BOTH the sweep (which decides
+      # which merges to tag) and the detector below (which decides which merges
+      # MUST carry a tag). Two literals would let the two windows drift apart and
+      # the detector would then judge a different population than the sweep acted
+      # on — a green detector over merges the sweep never looked at.
+      SWEEP_WINDOW_HOURS: "24"
     steps:
       # Bot token for the protected-main CHANGELOG write. GITHUB_TOKEN
       # cannot write to branch-protected main (required checks apply), so
@@ -189,8 +196,16 @@ jobs:
               return;
             }
 
-            // Sweep mode: scan recently merged PRs
-            const since = new Date(Date.now() - 24 * 3600 * 1000);
+            // Sweep mode: scan recently merged PRs. The window is the job's ONE
+            // SWEEP_WINDOW_HOURS literal, shared with the detector step below.
+            // A missing or non-numeric value FAILS the run rather than defaulting:
+            // a silently empty window would report "nothing to tag" forever.
+            const windowHours = Number(process.env.SWEEP_WINDOW_HOURS);
+            if (!Number.isFinite(windowHours) || windowHours <= 0) {
+              core.setFailed(`SWEEP_WINDOW_HOURS is not a positive number: ${JSON.stringify(process.env.SWEEP_WINDOW_HOURS)}`);
+              return;
+            }
+            const since = new Date(Date.now() - windowHours * 3600 * 1000);
             let page = 1, done = false;
             while (!done) {
               const { data: prs } = await github.rest.pulls.list({
@@ -210,3 +225,94 @@ jobs:
               page++;
             }
             core.info('Sweep complete');
+
+      # THE DETECTOR — opencharly/.github#286, opencharly/crabbox#40.
+      #
+      # WHY A SEPARATE STEP, AND WHY `if: ${{ !cancelled() }}`. The sweep can leave a
+      # merged PR untagged in two ways, and both used to be invisible:
+      #
+      #   * SILENT — in sweep mode every per-PR failure is caught and downgraded to
+      #     `core.warning('… — continuing')`, so the step exits 0 with the merge
+      #     untagged. A GREEN sweep therefore does NOT mean "every merge is tagged";
+      #     it means "no error escaped", which is a different sentence.
+      #   * FATAL — a transient 5xx or socket reset aborts the step before any tag
+      #     is written. That is #286's own failure (`HttpError: other side closed`
+      #     inside the listing read). Without this step's non-cancelled condition
+      #     it would be SKIPPED, so the untagged merge would stay unnamed even
+      #     though the run is red.
+      #
+      # `!cancelled()` makes this step the post-condition of BOTH paths — it runs
+      # after a FAILED step, and skips only when the run was CANCELLED (a
+      # superseded run must stay cancelled, not turn red on a merge it never
+      # tried to tag). Its failure NAMES the PR instead of leaving that to
+      # inference.
+      #
+      # It derives NO CalVer. It asks only whether each merged PR's merge commit
+      # carries ANY tag, so it cannot drift from the naming rules the step above
+      # uses (root CalVer, the Go-module form, the subdir module tag). An annotated
+      # tag is dereferenced to its commit: comparing against the tag OBJECT would be
+      # a false negative for every annotated tag.
+      - name: Assert every merge in the sweep window carries a tag at its merge commit
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          window_hours="${SWEEP_WINDOW_HOURS}"
+          since="$(date -u -d "-${window_hours} hours" +%Y-%m-%dT%H:%M:%SZ)"
+          repo="${GITHUB_REPOSITORY}"
+
+          # Merged PRs, as {number, merged_at, sha}. `gh api --paginate --jq` emits
+          # ONE document per page, so `jq -s add` folds the pages into one array.
+          merged="$(
+            gh api --paginate \
+              "repos/${repo}/pulls?state=closed&sort=updated&direction=desc&per_page=100" \
+              --jq '[.[] | select(.merged_at != null and .merge_commit_sha != null)
+                           | {number, merged_at, sha: .merge_commit_sha}]' \
+              | jq -s 'add // []'
+          )"
+
+          # Every tag ref, as {ref, sha, type}.
+          refs="$(
+            gh api --paginate "repos/${repo}/git/matching-refs/tags" \
+              --jq '[.[] | {ref: .ref, sha: .object.sha, type: .object.type}]' \
+              | jq -s 'add // []'
+          )"
+
+          # The COMMIT each tag points at. A lightweight tag's object IS the commit;
+          # an annotated tag's object is a tag object, dereferenced once. The org's
+          # own mint (createRef at the merge commit) is lightweight, so the loop is
+          # normally empty; it exists for the annotated tags a fork carries.
+          targets="${RUNNER_TEMP:-/tmp}/charly-tag-targets-$$"
+          {
+            echo "$refs" | jq -r '.[] | select(.type != "tag") | "\(.ref)\t\(.sha)"'
+            echo "$refs" | jq -r '.[] | select(.type == "tag") | "\(.ref)\t\(.sha)"' \
+              | while IFS=$'\t' read -r ref sha; do
+                  [ -n "$ref" ] || continue
+                  printf '%s\t%s\n' "$ref" "$(gh api "repos/${repo}/git/tags/${sha}" --jq '.object.sha')"
+                done
+          } >"$targets"
+          tagged_commits="$(cut -f2 "$targets" | sed '/^$/d' | sort -u)"
+          rm -f "$targets"
+
+          untagged=""
+          while IFS=$'\t' read -r number sha merged_at; do
+            [ -n "$number" ] || continue
+            # Both timestamps are ISO-8601 UTC (`…Z`), so the string order IS the
+            # time order. An `if`, not `[ … ] && continue`: under `set -e` that
+            # compound would EXIT the step on the first PR outside the window.
+            if [[ "$merged_at" < "$since" ]]; then continue; fi
+            if ! printf '%s\n' "$tagged_commits" | grep -qxF "$sha"; then
+              untagged="${untagged}PR #${number} — merge ${sha} (merged ${merged_at}) has no tag"$'\n'
+            fi
+          done < <(echo "$merged" | jq -r '.[] | "\(.number)\t\(.sha)\t\(.merged_at)"')
+
+          if [ -n "$untagged" ]; then
+            echo "::error::merged PR(s) in the ${window_hours}h sweep window carry NO tag at their merge commit."
+            printf '%s' "$untagged"
+            echo "A green sweep does not prove every merge was tagged (opencharly/.github#286)."
+            echo "Add-only remedy: re-run this workflow (the sweep is idempotent), or tag the merge commit."
+            echo "NEVER move an existing tag."
+            exit 1
+          fi
+          echo "${window_hours}h sweep window: every merged PR carries a tag at its merge commit."

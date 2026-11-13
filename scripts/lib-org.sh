@@ -20,24 +20,80 @@
 # call site, under `set -o pipefail`.
 
 readonly ORG="${OPENCHARLY_ORG:-opencharly}"
-readonly SOURCE_REPO=".github"
+# Overridable so a test can exercise the source-repo guard without inventing a repo.
+readonly SOURCE_REPO="${SOURCE_REPO:-.github}"
 readonly DISPATCHER_PATH=".github/workflows/pr-validator.yml"
 readonly SOURCE_DISPATCHER_PATH=".github/workflows/pr-validator-dispatcher.yml"
 
+# discovery page size — the ONE named literal (R3: no unnamed magic number).
+#
+# WHY REST PAGING AND NOT ONE `gh repo list --limit 1000` (opencharly/.github#290).
+# The org holds ~486 repos, so the single GraphQL listing was five requests, and its
+# later pages returned 502/504 intermittently while `--limit 100`/`--limit 200` and
+# REST paging answered on every attempt. Measured INTERLEAVED, so the variable was
+# the request, not the minute. Discovery is step zero of every org-wide script, so a
+# flake there aborts the whole report — which is what happened: four consecutive
+# attempts at the tag-on-merge caller rollout died at `FATAL: discover_repos failed`.
+readonly DISCOVERY_PAGE_SIZE="${DISCOVERY_PAGE_SIZE:-100}"
+
+# discover_all — every repo the listing can see, one row per repo, TAB-separated:
+#   <name>\t<archived>\t<fork>\t<default_branch>
+#
+# TWO CONTROLS, and they are different controls:
+#   1. `--paginate` returns non-zero if ANY page fails, so a page that 502s can
+#      never be mistaken for the end of the org.
+#   2. The COUNT is a LOWER BOUND on what the org reports. A merely TRUNCATED
+#      successful response would still read as a smaller org to every caller — the
+#      same class as the `mapfile < <(fn)` trap described at the top of this file,
+#      where emptiness is not a failure signal on its own. One cheap request buys
+#      the invariant.
+# A repo created between the listing and the count makes this fail LOUD rather than
+# return a set nobody verified. Nothing retries it (R3): every call site ABORTS on a
+# non-zero status, and a re-run yields a consistent pair.
+discover_all() {
+  local rows got want
+  if ! rows="$(gh api --paginate "orgs/${ORG}/repos?per_page=${DISCOVERY_PAGE_SIZE}" \
+      --jq '.[] | [.name, (.archived|tostring), (.fork|tostring), (.default_branch // "")] | @tsv')"; then
+    echo "discover_all: the org listing FAILED — refusing to return a partial repo set" >&2
+    return 1
+  fi
+  if ! want="$(gh api "orgs/${ORG}" --jq '(.public_repos // 0) + (.total_private_repos // 0)')"; then
+    echo "discover_all: the org repo COUNT could not be read — refusing to return an unverifiable repo set" >&2
+    return 1
+  fi
+  got="$(printf '%s\n' "$rows" | sed '/^$/d' | wc -l)"
+  # A LOWER BOUND, not an equality. Truncation removes repos, so `got < want` is the
+  # failure this catches. `got > want` is NOT a failure and must not be treated as one:
+  # measured on a runner (opencharly/.github run 42770802075) the listing returned 486
+  # while `public_repos + total_private_repos` reported 485 — the count is not an exact
+  # census of what the listing serves, and an equality test turned that off-by-one into
+  # `FATAL: discover_repos failed`, blocking every org-wide script.
+  if [ "$got" -lt "$want" ]; then
+    echo "discover_all: discovered ${got} repo(s) but the org reports ${want} — a page was TRUNCATED; refusing to understate the org" >&2
+    return 1
+  fi
+  printf '%s\n' "$rows"
+}
+
 # discover_repos — active, non-fork, `main`-default repos (the target set).
 discover_repos() {
-  gh repo list "$ORG" --limit 1000 \
-    --json name,isArchived,isFork,defaultBranchRef \
-    --jq '.[] | select(.isArchived == false and .isFork == false and .defaultBranchRef.name == "main") | .name' \
-    | sed '/^$/d' | sort
+  discover_all | awk -F'\t' '$2 == "false" && $3 == "false" && $4 == "main" { print $1 }' | sort
 }
 
 # discover_excludes — everything NOT in the target set (archived, fork, non-main).
 discover_excludes() {
-  gh repo list "$ORG" --limit 1000 \
-    --json name,isArchived,isFork,defaultBranchRef \
-    --jq '.[] | select((.isArchived == true) or (.isFork == true) or (.defaultBranchRef.name != "main")) | .name' \
-    | sed '/^$/d' | sort
+  discover_all | awk -F'\t' '$2 == "true" || $3 == "true" || $4 != "main" { print $1 }' | sort
+}
+
+# discover_membership — the active, non-fork repos as `<name>\t<default_branch>`,
+# the read org-ruleset.sh's membership arm needs. It issues its OWN paged,
+# count-checked fetch: a command substitution cannot memoise, so this read CAN
+# diverge from the target set (a repo created between the two lands in neither)
+# and CAN fail behind a successful targets read. Neither is silent — each read
+# refuses a truncated set and every call site aborts on failure — and putting all
+# three filters on ONE read per script is opencharly/.github#292.
+discover_membership() {
+  discover_all | awk -F'\t' '$2 == "false" && $3 == "false" { print $1 "\t" $4 }'
 }
 
 # declared_non_main_defaults — the active, non-fork repos whose default branch is
@@ -169,4 +225,39 @@ extract_step_yaml() {
     in_step && /^ *- name: / { exit }
     in_step { print }
   ' "$wf" >"$out"
+}
+
+# calver_at <org> <repo> <commit-sha> — the CalVer tag this org mints at a release,
+# derived from the commit's OWN committer date, in the same v<YYYY>.<DDD>.<HHMM> shape
+# tag-on-merge uses. It exists because a write that bypasses the merge path bypasses the
+# tag: the commit the reconcile PUTs lands on main untagged, so the tree is left with a
+# head that is neither at a tag nor explicable as the CHANGELOG commit above one, and
+# every pin that advances to it fails design-pintag (opencharly/.github#294).
+calver_at() {
+  local org="$1" repo="$2" sha="$3" iso
+  iso="$(gh api "repos/$org/$repo/commits/$sha" --jq '.commit.committer.date')" || return 1
+  # THE FORM IS PER-REPO, exactly as the reusable's tag-on-merge derives it: a root Go
+  # module consumed through the proxy (sdk, spec, plugin-gh) is tagged in Go's form
+  # v0.<y><doy>.<hhmm>, because a plain v<major>.<doy>.<hhmm> tag would need a /vN
+  # module-path suffix and no consumer could name it. Every other repo gets the plain
+  # CalVer. A single fixed form here would mint an unusable tag on those three.
+  case "$repo" in
+    sdk|spec|plugin-gh) date -u -d "$iso" +'v0.%Y%j.%-H%M' ;;
+    *)                  date -u -d "$iso" +'v%Y.%j.%H%M' ;;
+  esac
+}
+
+# select_repos — PURE. Reads repo names on stdin and prints those the allow-list names.
+# An EMPTY (or all-space/comma) allow-list passes everything through. Shared so the
+# reconcile and the backfill filter the same way instead of each carrying a copy.
+select_repos() {
+  local want="$1" line w
+  if [[ -z "${want//[ ,	]/}" ]]; then cat; return 0; fi
+  local -A keep=()
+  for w in ${want//,/ }; do keep["$w"]=1; done
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    [[ -n "${keep[$line]:-}" ]] && printf '%s\n' "$line"
+  done
+  return 0
 }
