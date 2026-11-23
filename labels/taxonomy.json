@@ -1,0 +1,151 @@
+{
+  "version": 1,
+  "org": "opencharly",
+  "axes": [
+    { "name": "category", "required": true, "single": true },
+    { "name": "type", "required": true, "single": true }
+  ],
+  "labels": [
+    {
+      "name": "category:runtime",
+      "axis": "category",
+      "color": "D93F0B",
+      "description": "The host/framework, loader/provider registration, or a cross-cutting contract.",
+      "test": "The remedy changes a host or framework, a loader/provider registration, an org-owned binary/service/library that is neither a build/deploy/check capability nor org control-plane tooling, or a cross-cutting normative contract (the design contract, its schema, the shared wire types/IR) that no single build/deploy/check capability owns; a host capability that is neither build/deploy nor check is runtime; a defect in how the loader resolves or registers what is served is runtime even inside a capability verb, and a declaration that contradicts the placement law takes the declaring component; shared schema compilation/import resolution is runtime; a capability's own artifact/image-ref resolution takes that capability; lowering secret values into deploy plans is delivery; an agent control-plane harness is governance; a provider implementation for a capability is not runtime."
+    },
+    {
+      "name": "category:delivery",
+      "axis": "category",
+      "color": "FBCA04",
+      "description": "A build/compose/install/deploy capability, its definitions, or its wire schema.",
+      "test": "The remedy changes or exercises a build/compose/install/deploy capability: its code and provider implementations, its definitions, its own wire schema/generated constants, its CI/lint; containerfiles, image/layer/pod/VM/Kubernetes manifests, deploy-plan IR, build/release CI, a runner/build image. The run:/build/composition steps of a plan are delivery. A docs-site build/CI or a publishing pin bump is delivery; the site's content is experience; a pin-currency report/gate is governance."
+    },
+    {
+      "name": "category:verification",
+      "axis": "category",
+      "color": "8B5CF6",
+      "description": "A check/probe/grading/validation capability, its beds/plans, or an artifact gate.",
+      "test": "The remedy changes or exercises a check/probe/grading or validation/verdict capability: its code/providers, its own wire schema, its beds/plans, roster/ordering, ADE grading, its CI/lint, a pin bump whose primary action is a proof; a gate over a product build/deploy/check artifact or a product authored-prose artifact; the check:/probe/bed steps of a plan. A PR-body or landing-gate check is governance."
+    },
+    {
+      "name": "category:experience",
+      "axis": "category",
+      "color": "0EA5E9",
+      "description": "Authored prose or rendered text: docs, skills, published corpus, READMEs.",
+      "test": "The remedy edits only authored/static prose or rendered text: Markdown, skills, a published corpus, READMEs, docs-site, authored/static UI strings/layout, a prose-only field in a config/YAML, or a documentation comment inside a source file. Computed output/reports/fields whose correctness is semantic belong to the owning capability. A prose change documenting another capability is experience unless the remedy also changes that capability. A directly edited checked-in Markdown artifact is experience; editing its generator takes the generator. The org rulebook is governance; the normative design contract is runtime; every other Markdown surface is experience."
+    },
+    {
+      "name": "category:governance",
+      "axis": "category",
+      "color": "3D3D3D",
+      "description": "Org policy/config/tooling: rulesets, workflows, landing gate, control plane.",
+      "test": "The remedy changes org policy/config/tooling: rulesets, workflows, the landing gate/validator, org pin-currency/coordination tooling, agent control-plane tooling, repo-class policy, or org label tooling. A gate over org policy/config/pins or a PR-body/landing check; a pin-currency report; an in-place org workflow/CI or pin declaration edit; the org rulebook itself. The policy that schedules a runner image is governance; the image is delivery."
+    },
+    {
+      "name": "category:hygiene",
+      "axis": "category",
+      "color": "C5DEF5",
+      "description": "Cross-repo upkeep with no primary component: dependency/pin waves, cleanups.",
+      "test": "The remedy is a cross-repo upkeep wave with no primary component: a dependency/pin version wave across repos, a cross-repo cleanup, a release chore, or a pin wave whose proof is explicitly deferred. A component's own source, lint findings, dependency manifest, and CI/lint config take that component's category plus type:chore. Hygiene changes no org config/tooling."
+    },
+    {
+      "name": "type:fix",
+      "axis": "type",
+      "color": "B60205",
+      "description": "A named defect in existing behavior; a violated rule of the rulebook or design.",
+      "test": "A named defect in existing behavior whose remedy corrects it, reproducible, latent, or non-deterministic, with a concrete wrong output; a silent omission of declared behavior; a stated requirement in the org rulebook or the normative design contract that the implementation (code, config, or skill) violates; or a new mechanism added to correct such a defect. The remedy need not be known at filing."
+    },
+    {
+      "name": "type:feat",
+      "axis": "type",
+      "color": "0E8A16",
+      "description": "New behavior, coverage, or mechanism not yet implemented; no defect named.",
+      "test": "The remedy adds behavior, coverage, or a mechanism that is not yet implemented, whether or not the design contract states the intent; a capability the tree entirely lacks, unless the change is declaration-only (then spec); no defect named. A bed/check that never landed is feat unless a specific architecture decision requires it and the tree violates that requirement. A gap in an existing gate's tests, checks, or arms where the production behavior is already correct is feat, not fix; an arm whose absence lets wrong output through is still feat unless a concrete wrong output is named in the same issue."
+    },
+    {
+      "name": "type:design",
+      "axis": "type",
+      "color": "5319E7",
+      "description": "A design-contract amendment that is the primary deliverable.",
+      "test": "The remedy edits the normative design contract to add or amend an architecture decision as the primary deliverable. When the design contract is amended producer-first as a dependency of implementing a capability, the type is the capability's remedy (fix or feat) and the design edit is a dependent. Implementing an existing decision is never design; a code/config violation of an existing design requirement is fix or spec."
+    },
+    {
+      "name": "type:spec",
+      "axis": "type",
+      "color": "1D76DB",
+      "description": "A declaration-only change in the machine-checked contract.",
+      "test": "Every changed file is declaration-only within the machine-checked contract (schema/CUE/generated constants) while the design contract already states the intent. A component's own schema is not spec."
+    },
+    {
+      "name": "type:docs",
+      "axis": "type",
+      "color": "006B75",
+      "description": "Prose, Markdown, skill, or site only; a non-violation prose update.",
+      "test": "Every changed file is prose, Markdown, skill, or site; or the only semantic change is a prose-only field in a config/YAML; or a documentation comment inside a source file; except a design-contract amendment, which is design. A prose change documenting another capability is docs; a directly edited checked-in Markdown artifact is docs even if tooling computed its value, while editing the generator is that capability's type; regenerating a checked-in Markdown/skill projection is docs and non-prose generated output is chore. Prose that contradicts a stated org-rulebook, design-contract, or machine-contract requirement is fix, not docs; a non-violation prose update is docs. A prose surface that contradicts only the shipped implementation it documents is docs; a contradiction with a stated rule is fix."
+    },
+    {
+      "name": "type:chore",
+      "axis": "type",
+      "color": "6E7781",
+      "description": "No behavior/schema/prose change: deps, pins, CI, generated code, refactor.",
+      "test": "No behavior, schema, or prose change: deps, pins, CI/format config, non-prose generated output (code/constants), pure code refactor, or a naming/class-contract cleanup with no behavior change. A stale dependency/version bump is chore unless a behavioral defect is named."
+    }
+  ],
+  "retired": [
+    { "name": "bug", "replacement": "type:fix", "reason": "Replaced by the closed type axis." },
+    { "name": "enhancement", "replacement": "type:feat", "reason": "Replaced by the closed type axis." },
+    { "name": "documentation", "replacement": "type:docs", "reason": "Replaced by the closed type axis." },
+    { "name": "duplicate", "replacement": null, "reason": "Use GitHub's native duplicate close reason." },
+    { "name": "good first issue", "replacement": null, "reason": "Not a measurable fact; outside the taxonomy." },
+    { "name": "help wanted", "replacement": null, "reason": "Not a measurable fact; outside the taxonomy." },
+    { "name": "invalid", "replacement": null, "reason": "Use GitHub's native close reason." },
+    { "name": "question", "replacement": null, "reason": "A question is not a work item; close with the native reason." },
+    { "name": "wontfix", "replacement": null, "reason": "Use GitHub's native not-planned close reason." },
+    { "name": "auto-merge", "replacement": null, "reason": "Retired mechanism; no auto-merge workflow exists." },
+    { "name": "rerun", "replacement": null, "reason": "Retired mechanism; the REST re-run replaced it." }
+  ],
+  "forbidden_prefixes": [
+    "session:",
+    "owner:",
+    "author:",
+    "assignee:",
+    "priority:",
+    "severity:",
+    "sev:",
+    "size:",
+    "status:"
+  ],
+  "forbidden_values": [
+    "category:unclassified",
+    "type:unclassified"
+  ],
+  "pr_label_allowlist": [
+    "clawsweeper:*",
+    "auto-merge",
+    "rerun"
+  ],
+  "issue_form": {
+    "category_values": [
+      "category:runtime",
+      "category:delivery",
+      "category:verification",
+      "category:experience",
+      "category:governance",
+      "category:hygiene"
+    ],
+    "type_values": [
+      "type:fix",
+      "type:feat",
+      "type:design",
+      "type:spec",
+      "type:docs",
+      "type:chore"
+    ],
+    "fields": [
+      { "id": "category", "label": "Category", "kind": "dropdown", "required": true },
+      { "id": "type", "label": "Type", "kind": "dropdown", "required": true },
+      { "id": "remedy", "label": "Remedy / files the remedy will touch", "kind": "textarea", "required": true },
+      { "id": "cited", "label": "Cited design decision or org-rulebook rule (or none)", "kind": "input", "required": true }
+    ]
+  }
+}
