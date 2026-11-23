@@ -12,12 +12,13 @@
 # HOW IT WORKS. The step's `script:` text is EXTRACTED from the shipped workflow — the text
 # under test IS the text that runs, the same discipline the shell steps get — and executed
 # under node with mocks for `github` (the GraphQL client), `context` and `core`. The mock's
-# mutation throws the refusal the case is about. Three assertions, plus a NEGATIVE CONTROL
-# that removes EXACTLY the clean-status branch, so the coverage can fire:
+# mutation throws the refusal the case is about. FOUR assertions, one of them a NEGATIVE
+# CONTROL that removes EXACTLY the clean-status branch, so the coverage can fire:
 #
 #   1. clean-status refusal  -> the step RETURNS and notices CLEAN   (fails without #316)
-#   2. any other refusal     -> still THROWS                         (the recogniser is narrow)
-#   3. no refusal            -> arms and verifies                    (the happy path survives)
+#   2. the pre-#316 shape    -> the SAME input THROWS                (the hole, isolated)
+#   3. any other refusal     -> still THROWS                         (the recogniser is narrow)
+#   4. no refusal            -> arms and verifies the postcondition  (the happy path survives)
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -75,7 +76,8 @@ const core = {
 
 // A CLEAN pull request: no auto-merge yet, head matches, state OPEN. The mutation's answer
 // is the variable under test.
-const pr = { id: "PR_test", headRefOid: process.env.REVIEWED_HEAD, state: "OPEN", autoMergeRequest: null };
+const pr = { id: "PR_test", headRefOid: process.env.REVIEWED_HEAD, state: "OPEN" };
+let armed = false;
 const graphql = async (query) => {
   const q = String(query);
   if (q.includes("enablePullRequestAutoMerge")) {
@@ -85,17 +87,18 @@ const graphql = async (query) => {
     if (mode === "other") {
       throw new Error("Resource not accessible by integration");
     }
-    throw new Error("Request failed due to following response errors:\n - Pull request Pull request is in unstable status");
+    if (mode === "unstable") {
+      throw new Error("Request failed due to following response errors:\n - Pull request Pull request is in unstable status");
+    }
+    // mode "armed": the mutation SUCCEEDS, and the next read must reflect it.
+    armed = true;
+    return { enablePullRequestAutoMerge: { pullRequest: { id: pr.id } } };
   }
   if (q.includes("disablePullRequestAutoMerge")) {
     return { disablePullRequestAutoMerge: { pullRequest: { id: pr.id } } };
   }
-  if (q.includes("enablePullRequestAutoMerge")) {
-    return { enablePullRequestAutoMerge: { pullRequest: { id: pr.id } } };
-  }
-  // Anything else is the PR read. A mutation that SUCCEEDS is reflected in the next read.
-  pr.autoMergeRequest = mode === "armed" ? { mergeMethod: "SQUASH" } : pr.autoMergeRequest;
-  return { repository: { pullRequest: { ...pr } } };
+  // Anything else is the PR read.
+  return { repository: { pullRequest: { ...pr, autoMergeRequest: armed ? { mergeMethod: "SQUASH" } : null } } };
 };
 const github = { graphql };
 const context = { repo: { owner: "opencharly", repo: ".github" } };
@@ -107,7 +110,7 @@ try {
 } catch (e) {
   threw = String(e?.message || e);
 }
-process.stdout.write(JSON.stringify({ threw, notices, warnings }));
+process.stdout.write(JSON.stringify({ threw, notices, warnings, infos }));
 HARNESS
 
 run_case() { # run_case <script> <mode> -> prints the harness JSON
@@ -151,5 +154,15 @@ out="$(run_case "$STATE/enable.js" other)"
 python3 -I "$STATE/check.py" other-throws "$out" \
   || { echo "FAIL: (3) an unrelated arming refusal must still fail the step; got: $out" >&2; exit 1; }
 echo "ok  (3) unrelated refusal   -> still throws (the recogniser is narrow)"
+
+# ---- (4) the HAPPY PATH survives: a successful mutation arms and is verified ----------
+out="$(run_case "$STATE/enable.js" armed)"
+python3 -I -c '
+import json,sys
+d=json.loads(sys.argv[1])
+assert d["threw"] is None, "arming must succeed, got: %r" % (d.get("threw"),)
+assert any("verified" in m.lower() for m in (d.get("infos") or [])), "the postcondition was not verified: %r" % (d,)
+' "$out" || { echo "FAIL: (4) a successful mutation must arm and verify; got: $out" >&2; exit 1; }
+echo "ok  (4) no refusal          -> arms and verifies the postcondition"
 
 echo "arm-enable_test: all assertions passed"
