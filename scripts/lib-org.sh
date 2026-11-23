@@ -180,12 +180,14 @@ api_status() {
 
 # api_error_class <stderr-file> — THE one classifier for a failed `gh api`/`gh` call.
 # 3 = the thing does not exist (HTTP 404); 4 = the API refused us (the primary QUOTA or
-# a secondary/abuse limit); 5 = the token lacks the permission; 1 = any other failure.
+# a secondary/abuse limit); 5 = the token lacks the permission; 2 = the repository has
+# GitHub issues DISABLED (a repository property, not an API failure); 1 = any other failure.
 # Shared by every owner script so the predicate exists once (R2).
 api_error_class() {
   if grep -qi 'Resource not accessible' "$1"; then return 5; fi
   if grep -q 'HTTP 404' "$1"; then return 3; fi
   if grep -qi 'API rate limit exceeded\|secondary rate limit\|abuse detection' "$1"; then return 4; fi
+  if grep -qi 'has disabled issues' "$1"; then return 2; fi
   return 1
 }
 
