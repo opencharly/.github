@@ -38,6 +38,13 @@ jobs:
       # guardrail is found in the org instead of here.
       - name: Run the head-settle gate test (offline, extracted step text)
         run: bash scripts/head-settle_test.sh
+      # The `Enable auto-merge` step is shipped JAVASCRIPT, so its coverage extracts the
+      # shipped `script:` text and runs THAT under node with mocked `github`/`context`/
+      # `core` — the same "the text under test is the text that runs" discipline the shell
+      # steps get. It pins both of GitHub's arming refusals: `unstable` is a finding,
+      # `clean status` is a head that is ready (opencharly/.github#313, #316).
+      - name: Run the arm-enable step test (offline, extracted script text)
+        run: bash scripts/arm-enable_test.sh
       # The retired-sweep arm lives INSIDE the reusable workflow and runs in the
       # CALLER's repository, so it cannot be a script here for the same reason the
       # settle gate cannot: the coverage EXTRACTS the shipped step's `run:` text

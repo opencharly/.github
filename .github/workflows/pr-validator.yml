@@ -1884,6 +1884,17 @@ jobs:
                   break;
                 } catch (error) {
                   const message = String(error?.message || error);
+                  // THE OTHER refusal, and it is not a failure (opencharly/.github#313).
+                  // GitHub will not enable auto-merge when there is nothing to wait for, and
+                  // says so: "Pull request is in clean status". That means every required
+                  // check passed and the merge is available NOW — a maintainer merges it.
+                  // Without this branch the 180 s budget burns on the only state in which
+                  // arming is unnecessary, and the session is told the gate failed.
+                  // Measured on gst-wayland-display#12 once the head settled after #314 merged.
+                  if (/is in clean status/i.test(message)) {
+                    core.notice('the head is CLEAN: every required check passed and the merge is available now, so auto-merge has nothing to wait for — a maintainer merges this pull request');
+                    return;
+                  }
                   const transient = /is in unstable status/i.test(message);
                   if (!transient || Date.now() >= armDeadline) {
                     if (transient) throw new Error(

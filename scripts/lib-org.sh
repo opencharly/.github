@@ -223,6 +223,28 @@ extract_step_run() {
   ' "$wf" >"$out"
 }
 
+# extract_step_script <workflow> <selector-regex> <outfile>
+# The `script:` block of ONE `uses: actions/github-script` step, dedented — the JS
+# counterpart of extract_step_run. A github-script step is shipped CODE like any `run:`
+# block, so it is judged the same way: the text under test IS the text that runs
+# (opencharly/.github#316).
+extract_step_script() {
+  local wf="$1" selector="$2" out="$3"
+  awk -v sel="$selector" '
+    function indent(s,   i) { for (i = 1; i <= length(s); i++) if (substr(s, i, 1) != " ") return i - 1; return length(s) }
+    $0 ~ sel { in_step = 1; next }
+    in_step && !found && /^ *script: *\|/ { script_indent = indent($0); found = 1; next }
+    found {
+      if ($0 ~ /^[[:space:]]*$/) { print ""; next }
+      ind = indent($0)
+      if (ind <= script_indent) { exit }
+      if (content_indent == 0) content_indent = ind
+      if (ind < content_indent) { exit }
+      print substr($0, content_indent + 1)
+    }
+  ' "$wf" >"$out"
+}
+
 # extract_step_yaml <workflow> <selector-regex> <outfile>
 # The YAML BLOCK of ONE workflow step: the matching line and every line up to the
 # next step. Where extract_step_run returns the step's CODE, this returns the step's
