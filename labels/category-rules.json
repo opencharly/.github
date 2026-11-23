@@ -1,0 +1,94 @@
+{
+  "version": 1,
+  "order": "first-match",
+  "path_rules": [
+    { "glob": "AGENTS.md", "category": "governance" },
+    { "glob": "DESIGN.md", "category": "runtime" },
+    { "glob": "DESIGN.cue", "category": "runtime" },
+    { "glob": "design/**", "category": "runtime" },
+    { "glob": ".github/workflows/**", "category": "governance" },
+    { "glob": "**/.github/workflows/**", "category": "governance" },
+    { "glob": ".github/scripts/**", "category": "governance" },
+    { "glob": "**/Containerfile*", "category": "delivery" },
+    { "glob": ".agents/skills/**", "category": "experience" },
+    { "glob": "**/.agents/skills/**", "category": "experience" },
+    { "glob": "**/docs/**", "category": "experience" },
+    { "glob": "**/*.md", "category": "experience" }
+  ],
+  "action_keywords": {
+    "runtime": [
+      "host framework",
+      "host service",
+      "loader",
+      "provider registration",
+      "verb framework",
+      "normative contract",
+      "design contract",
+      "machine-checked contract",
+      "shared wire",
+      "schema",
+      "service",
+      "library"
+    ],
+    "delivery": [
+      "build",
+      "containerfile",
+      "compose",
+      "install",
+      "deploy",
+      "pod",
+      "vm",
+      "kubernetes",
+      "manifest",
+      "deploy plan",
+      "release ci",
+      "runner image",
+      "layer"
+    ],
+    "verification": [
+      "check",
+      "probe",
+      "bed",
+      "roster",
+      "grade",
+      "grading",
+      "validation gate",
+      "verdict",
+      "test harness",
+      "review tool"
+    ],
+    "experience": [
+      "docs",
+      "documentation",
+      "skill",
+      "readme",
+      "published corpus",
+      "markdown",
+      "ui text"
+    ],
+    "governance": [
+      "workflow",
+      "ruleset",
+      "landing gate",
+      "validator",
+      "coordination",
+      "pin-currency",
+      "agent control plane",
+      "label tooling",
+      "org policy"
+    ],
+    "hygiene": [
+      "dependency wave",
+      "pin wave",
+      "cross-repo cleanup",
+      "release chore"
+    ]
+  },
+  "notes": [
+    "The classifier reads the issue's remedy and the paths it names. The repository name is NEVER a signal.",
+    "Apply path_rules in order (first match) to the paths the issue names; one category from the paths wins. A second, conflicting path category is under-specified, not a silent pick.",
+    "Only when no path decides, match the generic action_keywords against the issue body; exactly one matching category wins. More than one is under-specified.",
+    "No repository names, no repo_to_category defaults, no declared per-repo exceptions. A new or future repository needs no rule change.",
+    "Every category is available in every repository; a docs issue in a code repo is experience, a runtime issue in a docs repo is runtime, a build change anywhere is delivery."
+  ]
+}

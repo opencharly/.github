@@ -21,6 +21,16 @@ Canonical files:
   (`scripts/retire-per-repo-candy-gates.sh` deletes those).
 - `.github/PULL_REQUEST_TEMPLATE.md` — the inherited PR template the validator
   reads (change-class gate, pasted evidence, R0–R10 accounting, attribution).
+- `labels/taxonomy.json` + `labels/category-rules.json` + `scripts/labels.sh` — the
+  org-wide issue-label taxonomy: 12 closed labels, exactly one `category:` and one
+  `type:` per issue, no fallback value. The rules are generic (no repository names,
+  no repo→category defaults); a new repository inherits via bootstrap/label-sync.
+  The sync/audit/classify/apply/retire/render/verify-close/sample/explain verbs live
+  in the ONE script; its offline mock-`gh` test is `scripts/labels-test.sh`.
+- `.github/workflows/label-sync.yml` + `label-audit.yml` — provision the labels
+  (dry-run by default) and report missing/multi-value/forbidden/unknown labels
+  daily (report-only until the backfill). The canonical label tests live in the
+  umbrella's `/charly-internals:git-workflow` (`references/issue-labels.md`).
 - `scripts/org-ruleset.sh` — the SINGLE owner of the org ruleset (required check
   + branch rules) and the per-repo auto-merge settings; `scripts/*_test.sh` are
   its offline mock-`gh` tests.
@@ -75,6 +85,11 @@ Canonical files:
   against a stubbed `curl`, because the live endpoint is intermittent and a live-driven
   discrimination could not be deterministic — and `scripts/proof-engine-pin.sh` runs the
   same shipped text live for the measurement.
+- The issue-label taxonomy's test is `scripts/labels-test.sh`, a step in
+  `workflow-checks.yml`: it runs the shipped script against a mock `gh` and covers
+  sync (dry-run and apply), the quota and permission classes, audit findings, the
+  form-answer apply, TSV apply, sample disjointness/record, retire dry-run, render,
+  verify-close and the DESIGN-amendment classification.
 - `scripts/org-ruleset.sh verify` asserts the whole org end state.
 
 ## Modify this repo

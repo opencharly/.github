@@ -162,3 +162,7 @@ unresolvable_pin_infra	validator workflow	dotgithub/.github/workflows/pr-validat
 # 'forbid' row below be read as a rule rather than as a vacuous absence.
 engine_pin_asset_probe	validator workflow	dotgithub/.github/workflows/pr-validator.yml	require	asset unreachable
 engine_pin_asset_probe_retired_output	validator workflow	dotgithub/.github/workflows/pr-validator.yml	forbid	pin_class
+issue_label_taxonomy	machine spec	dotgithub/labels/taxonomy.json	require	category:runtime
+issue_label_taxonomy	generic rules	dotgithub/labels/category-rules.json	require	action_keywords
+issue_label_taxonomy	sync tool	dotgithub/scripts/labels.sh	require	labels.sh sync
+issue_label_taxonomy	user overview	dotgithub/README.md	require	Issue-label taxonomy

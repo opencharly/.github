@@ -129,6 +129,8 @@ jobs:
           if-no-files-found: error
       - name: Run the repo-bootstrap script test (offline, mock gh)
         run: bash scripts/bootstrap-repo-main_test.sh
+      - name: Run the issue-label taxonomy test (offline, mock gh)
+        run: bash scripts/labels-test.sh
       - name: Run the governance-reconcile self-test (offline, fixtures)
         run: bash scripts/governance-reconcile.sh --self-test
       - name: Reconcile the governance surfaces (org-wide; skips absent sibling repos)

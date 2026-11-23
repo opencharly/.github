@@ -1,0 +1,43 @@
+name: label-audit
+
+# Audit every open issue for exactly one category: and one type:. REPORT-ONLY by
+# default: it applies a form answer only when the org variable LABELS_AUDIT_APPLY
+# is true, and it reds the run only when LABELS_AUDIT_STRICT is true. There is no
+# fallback label — a missing or split axis is reported, never guessed.
+
+on:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ${{ vars.CI_RUNNER_LABEL || 'ubuntu-latest' }}
+    timeout-minutes: 60
+    steps:
+      - name: Create bot token (charly-auto-merge App)
+        id: app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0, node24
+        with:
+          app-id: ${{ secrets.CHARLY_AUTO_MERGE_APP_ID }}
+          private-key: ${{ secrets.CHARLY_AUTO_MERGE_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7, node24
+
+      - name: Audit the org issue-label taxonomy
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          APPLY: ${{ vars.LABELS_AUDIT_APPLY }}
+          STRICT: ${{ vars.LABELS_AUDIT_STRICT }}
+          CLOSE_PASS: ${{ vars.LABELS_AUDIT_CLOSE_PASS }}
+        run: |
+          set -euo pipefail
+          args=(audit --org --state open)
+          if [ "${APPLY:-false}" = "true" ]; then args+=(--apply); fi
+          if [ "${STRICT:-false}" = "true" ]; then args+=(--strict); fi
+          if [ "${CLOSE_PASS:-true}" = "true" ]; then args+=(--close-pass); fi
+          bash scripts/labels.sh "${args[@]}"

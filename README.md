@@ -10,6 +10,10 @@ copy inherits the files here — so a change lands **once**, not in every repo.
   the exact evidence the fresh `pr-validator` validator needs: the change-class
   R10 gate + pasted output, whether the changed code path ran live (which caps
   the attribution tier), and a full R0–R10 + pillars "state HOW / N/A" checklist.
+- **`labels/` + `scripts/labels.sh`** — the org-wide issue-label taxonomy: 12
+  closed labels, exactly one `category:` and one `type:` per issue, with the
+  sync/audit/classify/apply/retire/render/verify-close/sample/explain tooling and
+  its offline mock-`gh` test `scripts/labels-test.sh`.
 - **`scripts/org-ruleset.sh`** — the SINGLE organization-wide owner of BOTH the
   required `validate / validate` check AND main-branch protection. On GitHub Team
   it creates ONE org ruleset carrying the `workflows` rule (pointing at this repo's
@@ -425,6 +429,31 @@ Setup (already done org-wide):
 
 The rename step hard-fails when neither is configured, so a missing
 secret never silently degrades to the approval-required loop.
+
+## Issue-label taxonomy
+
+Every issue in the org carries **exactly one `category:` and exactly one `type:`**
+from the closed sets in `labels/taxonomy.json`. The same 12 labels exist in every
+non-archived repo; the taxonomy is generic (no repo or product names), and there is
+**no fallback value**: an issue that cannot be decided is improved or split.
+
+| Axis | Values |
+|---|---|
+| `category` | runtime, delivery, verification, experience, governance, hygiene |
+| `type` | fix, feat, design, spec, docs, chore |
+
+`labels/category-rules.json` records the **generic** path/action evidence the
+classifier uses. It contains **no repository names and no repo→category defaults**:
+every category is available in every repository, and a new or future repository needs
+no rule change. A new repository inherits the 12 labels from the bootstrap/label-sync;
+no per-repo label config is needed.
+`scripts/labels.sh` owns sync, audit, classify, apply, retire, render, verify-close,
+sample and explain; its offline mock-`gh` test is `scripts/labels-test.sh`.
+`.github/workflows/label-sync.yml` provisions the labels (dry-run by default);
+`.github/workflows/label-audit.yml` reports missing, multi-value, forbidden and
+unknown labels daily (report-only until the backfill). The full yes/no tests,
+precedence rules and the design/rulebook violation table live in the umbrella's
+`/charly-internals:git-workflow` (`references/issue-labels.md`).
 
 ## Org-wide CI runners — the label contract
 

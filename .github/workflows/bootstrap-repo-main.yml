@@ -93,3 +93,15 @@ jobs:
           else
             bash scripts/bootstrap-repo-main.sh
           fi
+
+      - name: Sync the org issue-label taxonomy (the bootstrapped repos)
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          REPOS: ${{ inputs.repos }}
+        run: |
+          set -euo pipefail
+          if [ -n "$REPOS" ]; then
+            bash scripts/labels.sh sync --repos "$REPOS"
+          else
+            echo "labels: no REPOS input — run the label-sync workflow for the org"
+          fi

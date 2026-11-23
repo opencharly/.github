@@ -1,0 +1,53 @@
+name: label-sync
+
+# Create/update the org-wide issue-label taxonomy in every non-archived repo.
+# The default is a DRY RUN; `apply` writes. The App token carries issues: write.
+# The 12 labels come from labels/taxonomy.json; there is no fallback value.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "check (dry-run) or apply (write the labels)"
+        type: choice
+        options: [check, apply]
+        default: check
+      repos:
+        description: "Optional allow-list: space- or comma-separated repo names. Empty = every non-archived repo."
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ${{ vars.CI_RUNNER_LABEL || 'ubuntu-latest' }}
+    timeout-minutes: 60
+    steps:
+      - name: Create bot token (charly-auto-merge App)
+        id: app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0, node24
+        with:
+          app-id: ${{ secrets.CHARLY_AUTO_MERGE_APP_ID }}
+          private-key: ${{ secrets.CHARLY_AUTO_MERGE_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7, node24
+
+      - name: Sync the org issue-label taxonomy
+        env:
+          # Inputs travel through the ENVIRONMENT, never interpolated into `run:`.
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          MODE: ${{ inputs.mode }}
+          REPOS: ${{ inputs.repos }}
+        run: |
+          set -euo pipefail
+          args=(sync)
+          if [ -n "$REPOS" ]; then args+=(--repos "$REPOS"); fi
+          if [ "$MODE" = "apply" ]; then
+            bash scripts/labels.sh "${args[@]}"
+          else
+            bash scripts/labels.sh "${args[@]}" --dry-run
+          fi

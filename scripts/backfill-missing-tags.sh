@@ -55,11 +55,7 @@ esac
 # classify_api_error <stderr-file> — THE one classifier, shared by every read and by the
 # create, so the predicate that recognises an absent thing or a spent quota exists once:
 # 3 = the thing does not exist (HTTP 404), 4 = the API refused us (the quota), 1 = a failure.
-classify_api_error() {
-  if grep -q 'HTTP 404' "$1"; then return 3; fi
-  if grep -qi 'API rate limit exceeded' "$1"; then return 4; fi
-  return 1
-}
+classify_api_error() { api_error_class "$1"; }
 
 api_absent() {
   local err out rc cls
@@ -67,7 +63,7 @@ api_absent() {
   out="$(gh api "$@" 2>"$err")"; rc=$?
   if [[ $rc -eq 0 ]]; then rm -f "$err"; printf '%s' "$out"; return 0; fi
   classify_api_error "$err"; cls=$?
-  [[ $cls -eq 1 ]] && cat "$err" >&2
+  [[ $cls -eq 1 || $cls -eq 5 ]] && cat "$err" >&2
   rm -f "$err"
   return $cls
 }
