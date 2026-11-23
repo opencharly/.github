@@ -11,7 +11,12 @@
 # (scripts/check-verify-branch-audit.mjs). The text under test IS the shipped text,
 # so the two cannot drift.
 #
-# The classes it proves — the EXIT CODE IS THE CLASS:
+# The classes it proves — the EXIT CODE IS THE CLASS, and the step ALSO writes that class
+# to `$GITHUB_OUTPUT` (`class=<n>`, plus `green=true|false`) because the `arm` job now
+# REPORTS a non-green head instead of failing as a check run (opencharly/.github#313: a
+# completed FAILURE of this non-required check run makes the pull request `unstable`
+# forever, which is exactly the state `enablePullRequestAutoMerge` waits on). Both halves
+# are asserted below, so the exit code and the reported class cannot drift apart.
 #   0 GREEN       every check on the head passed.
 #   1 NOT-PASSED  a check on the head did not pass — a FINDING about the change.
 #   2 IN-FLIGHT   a check is still RUNNING — NOT a finding: re-run only this job.
@@ -333,6 +338,16 @@ while [ "$n" -lt 37 ]; do
 done
 printf '%s\n' "$STATE/fx-settled.json" >>"$STATE/seq-slow37.txt"
 
+# expect_class <out> <class> — the step must REPORT the class it exits with. A failure
+# here means the job-level report (the PR comment that replaces the failing check run)
+# would name the wrong class.
+expect_class() {
+  local out="$1" want="$2" got
+  got="$(sed -n 's/^class=//p' "${out%.out}.ghout" | tail -1)"
+  [[ "$got" == "$want" ]] \
+    || { echo "FAIL: ${out} reported class [${got}], want [${want}]" >&2; exit 1; }
+}
+
 # ---- the runner --------------------------------------------------------------------
 # run_settle <out> <step-file> <backstop> <margin> <seq> <clock-step> [curl-mode]
 # The clock step compresses the wall clock so the budget arithmetic is exercised at
@@ -341,6 +356,11 @@ run_settle() {
   local out="$1" step="$2" backstop="$3" margin="$4" seq="$5" step_size="$6" mode="${7:-ok}"
   printf '0' >"$STATE/clock"
   printf '0' >"$STATE/counter"
+  # GitHub sets GITHUB_OUTPUT for every `run:` step; the harness must too, or the step's
+  # own output writes would be a redirect error rather than the no-op they are on a runner
+  # (measured: the first run of this change failed (A) with "line 169: : No such file").
+  local ghout="${out%.out}.ghout"
+  : >"$ghout"
   local rc=0
   (
     export PATH="$STATE/bin:$PATH"
@@ -350,6 +370,7 @@ run_settle() {
     export GITHUB_RUN_ID="4242" GH_TOKEN="test-token" HEAD_SHA="deadbeef"
     export SETTLE_BACKSTOP_SECONDS="$backstop" SETTLE_REPORT_MARGIN_SECONDS="$margin"
     export SETTLE_POLL_INTERVAL_SECONDS="1"
+    export GITHUB_OUTPUT="$ghout"
     # The pre-#229 shape read its budget from this variable; the shipped shape must
     # NOT read it, and the invariant below asserts that.
     export WAIT_BUDGET_SECONDS="$LEGACY_BUDGET_SECONDS"
@@ -364,6 +385,7 @@ rc=0
 run_settle "$STATE/a.out" "$STATE/step.sh" 4200 300 "$STATE/seq-green.txt" 100 || rc=$?
 [[ "$rc" == 0 ]] \
   || { echo "FAIL: (A) a green head must exit 0 (got $rc)" >&2; cat "$STATE/a.out" >&2; exit 1; }
+expect_class "$STATE/a.out" 0
 grep -q 'safe to arm auto-merge' "$STATE/a.out" \
   || { echo "FAIL: (A) the green path must say it is safe to arm" >&2; cat "$STATE/a.out" >&2; exit 1; }
 grep -q 'validate / arm' "$STATE/a.out" \
@@ -375,6 +397,7 @@ rc=0
 run_settle "$STATE/b.out" "$STATE/step.sh" 4200 300 "$STATE/seq-bad.txt" 100 || rc=$?
 [[ "$rc" == 1 ]] \
   || { echo "FAIL: (B) a failed check must exit 1 (got $rc)" >&2; cat "$STATE/b.out" >&2; exit 1; }
+expect_class "$STATE/b.out" 1
 grep -q 'go -> failure' "$STATE/b.out" \
   || { echo "FAIL: (B) the failure must name the check" >&2; cat "$STATE/b.out" >&2; exit 1; }
 grep -q 'did not pass' "$STATE/b.out" \
@@ -388,6 +411,7 @@ rc=0
 run_settle "$STATE/c.out" "$STATE/step.sh" 4200 300 "$STATE/seq-pending.txt" 100 || rc=$?
 [[ "$rc" == 2 ]] \
   || { echo "FAIL: (C) a still-running check must exit 2, not 1 (got $rc)" >&2; cat "$STATE/c.out" >&2; exit 1; }
+expect_class "$STATE/c.out" 2
 grep -q 'NOT a finding about the change' "$STATE/c.out" \
   || { echo "FAIL: (C) the in-flight class must say it is not a finding" >&2; cat "$STATE/c.out" >&2; exit 1; }
 grep -q 'Re-run ONLY this job' "$STATE/c.out" \
@@ -401,6 +425,7 @@ rc=0
 run_settle "$STATE/d.out" "$STATE/step.sh" 4200 300 "$STATE/seq-green.txt" 100 fail || rc=$?
 [[ "$rc" == 3 ]] \
   || { echo "FAIL: (D) an unreadable head must exit 3 (got $rc)" >&2; cat "$STATE/d.out" >&2; exit 1; }
+expect_class "$STATE/d.out" 3
 grep -q 'refusing to arm auto-merge on an unread head' "$STATE/d.out" \
   || { echo "FAIL: (D) the unread head must be refused by name" >&2; cat "$STATE/d.out" >&2; exit 1; }
 grep -q 'safe to arm auto-merge' "$STATE/d.out" \
@@ -422,6 +447,7 @@ rc=0
 run_settle "$STATE/e2.out" "$STATE/step.sh" 4200 600 "$STATE/seq-slow37.txt" 100 || rc=$?
 [[ "$rc" == 2 ]] \
   || { echo "FAIL: (E2) the pre-#229 budget must yield the in-flight class (got $rc)" >&2; cat "$STATE/e2.out" >&2; exit 1; }
+expect_class "$STATE/e2.out" 2
 echo "ok  (E2) pre-#229 budget -> exit 2  (the SAME head, the pre-#229 budget: $(grep -m1 'still in flight after' "$STATE/e2.out" | tr -s ' '))"
 # (E3) the pre-#229 SHAPE on the SAME head at the SAME budget: it exits 1 — the same
 # status as a FAILED check — and names the whole-validator re-run as the remedy.
@@ -496,6 +522,7 @@ rc=0
 run_settle "$STATE/h1.out" "$STATE/step.sh" 4200 300 "$STATE/seq-empty.txt" 100 || rc=$?
 [[ "$rc" == 4 ]] \
   || { echo "FAIL: (H1) an empty check set must exit 4, not 0 (got $rc)" >&2; cat "$STATE/h1.out" >&2; exit 1; }
+expect_class "$STATE/h1.out" 4
 grep -q 'safe to arm auto-merge' "$STATE/h1.out" \
   && { echo "FAIL: (H1) an empty check set must NEVER reach the arming line" >&2; cat "$STATE/h1.out" >&2; exit 1; }
 grep -q 'no check run to judge' "$STATE/h1.out" \
@@ -535,5 +562,44 @@ grep -q '4 EMPTY' "$STATE/step.sh" \
 grep -q '4 EMPTY' "$STATE/step-248.sh" \
   && { echo "FAIL: (H4) the pre-#248 control must NOT carry the EMPTY class" >&2; exit 1; }
 echo "ok  (H4) the class table  -> 4 EMPTY is named in the shipped text, and absent from the pre-#248 control"
+
+
+# ---- (I) A NON-GREEN HEAD IS REPORTED, NOT LEFT AS A FAILING CHECK RUN -------------
+# (opencharly/.github#313). Measured on opencharly/gst-wayland-display#12: all three
+# required checks GREEN, verdict PASS, and the PR could still never land — the only red
+# on the head was `validate / arm` itself. GitHub computes `mergeable_state` over EVERY
+# check run on the head, so ONE completed FAILURE of this NON-required check run leaves
+# the pull request permanently `unstable`; `enablePullRequestAutoMerge` is refused while
+# unstable, and the job that would clear it must itself complete to fail. A self-
+# perpetuating deadlock: the gate poisoned the condition it waits on. (Same POISON class
+# scripts/check-stalled-automerge.sh shape 3 documents for the REQUIRED context.)
+#
+# The contract that closes it, all three parts asserted here because deleting ANY ONE
+# silently restores either the deadlock or the invisibility:
+#   1. the head-checks step carries `continue-on-error: true` — its failure no longer
+#      completes as a FAILED check run;
+#   2. `Enable auto-merge` runs ONLY on a green head (`green == 'true'`), so a class 1-4
+#      head cannot reach the mutation, and it carries `continue-on-error: true` too;
+#   3. a report step runs when either did not succeed and comments the class — the
+#      check run is green by design now, so this comment IS the alarm.
+extract_step_yaml "$WF" '^ *- name: .*Head check-runs' "$STATE/i-head.yaml"
+extract_step_yaml "$WF" '^ *- name: Enable auto-merge' "$STATE/i-enable.yaml"
+extract_step_yaml "$WF" '^ *- name: Report an unarmed head' "$STATE/i-report.yaml"
+for f in i-head i-enable i-report; do
+  [[ -s "$STATE/$f.yaml" ]] || { echo "FAIL: (I) the $f step was not found in $WF" >&2; exit 1; }
+done
+grep -qE '^ *continue-on-error: *true$' "$STATE/i-head.yaml" \
+  || { echo "FAIL: (I1) the head-checks step must carry continue-on-error: true — without it a non-green head completes as a FAILED check run and poisons mergeability forever (#313)" >&2; exit 1; }
+echo "ok  (I1) head-checks     -> continue-on-error: true (a non-green head cannot complete as a FAILED check run)"
+grep -qE '^ *continue-on-error: *true$' "$STATE/i-enable.yaml" \
+  || { echo "FAIL: (I2) the enable step must carry continue-on-error: true — an arming failure is reported, not a poisoned check run" >&2; exit 1; }
+grep -qF "if: steps.head-checks.outputs.green == 'true'" "$STATE/i-enable.yaml" \
+  || { echo "FAIL: (I2) the enable step must be GATED on the green output — continue-on-error alone would let a class 1-4 head reach the mutation" >&2; exit 1; }
+echo "ok  (I2) enable          -> continue-on-error + gated on green == 'true'"
+grep -q 'always()' "$STATE/i-report.yaml" && grep -q 'head-checks.outcome' "$STATE/i-report.yaml" && grep -q 'enable.outcome' "$STATE/i-report.yaml" \
+  || { echo "FAIL: (I3) the report step must run on a failed head-checks OR a failed enable (always() + both outcomes)" >&2; exit 1; }
+grep -q 'arm-unarmed-report' "$STATE/i-report.yaml" \
+  || { echo "FAIL: (I3) the report step must own a marker comment — a new comment per retry spams the PR" >&2; exit 1; }
+echo "ok  (I3) report          -> runs on either failure, updates ONE marker comment"
 
 echo "head-settle_test: all assertions passed"
