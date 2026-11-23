@@ -113,7 +113,10 @@ forbidden_values(){ jq -r '.forbidden_values[]' "$SPEC"; }
 
 valid_axis_value() {
   local axis="$1" value="$2"
-  printf '%s\n' "$(spec_axis_names "$axis")" | grep -qxF "$value"
+  # Here-string, NOT a pipeline: `grep -q` exits early and `printf` would take
+  # SIGPIPE, which `set -o pipefail` turns into a false "not a taxonomy value"
+  # (measured: 12 of 248 valid rows failed the apply nondeterministically).
+  grep -qxF "$value" <<<"$(spec_axis_names "$axis")"
 }
 
 # map_path_category <path> — the first matching generic path rule, or nothing. The
@@ -339,14 +342,14 @@ cmd_audit() {
           if [[ "$l" == "$pref"* ]]; then hit=1; break; fi
         done <<<"$forb_prefixes"
         if [[ $hit -eq 1 ]]; then bad+=("$l"); continue; fi
-        if printf '%s\n' "$forb" | grep -qxF "$l"; then bad+=("$l"); continue; fi
+        if grep -qxF "$l" <<<"$forb"; then bad+=("$l"); continue; fi
         case "$l" in
           category:*) cats+=("$l") ;;
           type:*) types+=("$l") ;;
           *)
-            if printf '%s\n' "$retired_names" | grep -qxF "$l"; then
+            if grep -qxF "$l" <<<"$retired_names"; then
               [[ $ignore_retired -eq 1 ]] || unknown+=("$l")
-            elif ! printf '%s\n' "$spec_all" | grep -qxF "$l"; then
+            elif ! grep -qxF "$l" <<<"$spec_all"; then
               unknown+=("$l")
             fi ;;
         esac
@@ -581,7 +584,7 @@ cmd_retire() {
     done <<<"$out"
     while IFS=$'\t' read -r name repl reason; do
       [[ -z "$name" ]] && continue
-      if ! printf '%s\n' "$out" | cut -f1 | grep -qxF "$name"; then absent=$((absent + 1)); continue; fi
+      if ! awk -F'\t' -v n="$name" '$1 == n { found=1 } END { exit !found }' <<<"$out"; then absent=$((absent + 1)); continue; fi
       local count=""
       gh_call cnt issue list -R "$ORG/$repo" --label "$name" --state open --limit 1000 --json number --jq 'length' 2>/dev/null; rc=$?
       if [[ $rc -ne 0 ]]; then
@@ -711,7 +714,7 @@ verify_close_one() {
     bad=1
   fi
   if [[ -n "$icat" && ${#cats[@]} -gt 0 ]]; then
-    if ! printf '%s\n' "${cats[@]}" | grep -qxF "$icat"; then
+    if ! grep -qxF "$icat" <<<"$(printf '%s\n' "${cats[@]}")"; then
       say "MISMATCH $pr_item closes $issue_item — PR paths map to ${cats[*]}, issue says $icat"
       bad=1
     fi
