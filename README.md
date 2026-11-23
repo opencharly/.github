@@ -451,7 +451,10 @@ no per-repo label config is needed.
 sample and explain; its offline mock-`gh` test is `scripts/labels-test.sh`.
 `.github/workflows/label-sync.yml` provisions the labels (dry-run by default);
 `.github/workflows/label-audit.yml` reports missing, multi-value, forbidden and
-unknown labels daily (report-only until the backfill). The full yes/no tests,
+unknown labels daily (report-only until the backfill). `.github/ISSUE_TEMPLATE/issue.yml`
+is the org-default issue form: it requires Category, Type, Remedy/files and the cited
+decision/rule, applies no static labels, and is inherited by every repository without
+its own template. The full yes/no tests,
 precedence rules and the design/rulebook violation table live in the umbrella's
 `/charly-internals:git-workflow` (`references/issue-labels.md`).
 

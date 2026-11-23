@@ -43,16 +43,26 @@ case "$cmd" in
         if [[ -f "$S/perm" ]]; then echo 'Resource not accessible by integration' >&2; exit 1; fi
         : ;;
       repos/opencharly/repo1/issues*)
-        if [[ "$jqexpr" == *".number"* && "$jqexpr" != *"@json"* ]]; then
-          printf '10\n11\n12\n'
+        if [[ -f "$S/clean_issues" ]]; then
+          if [[ "$jqexpr" == *".number"* && "$jqexpr" != *"@json"* ]]; then printf '20\n'
+          else printf '%s\n' '{"number":20,"title":"clean","body":"","labels":["category:runtime","type:fix","bug"]}'; fi
+        elif [[ "$jqexpr" == *".number"* && "$jqexpr" != *"@json"* ]]; then
+          printf '10\n11\n12\n13\n15\n16\n'
         else
           printf '%s\n' \
             '{"number":10,"title":"missing type","body":"### Category\n\ncategory:runtime\n\n### Type\n\ntype:fix\n","labels":["category:runtime"]}' \
             '{"number":11,"title":"two categories","body":"","labels":["category:runtime","category:delivery","type:fix"]}' \
-            '{"number":12,"title":"retired label","body":"","labels":["category:runtime","type:fix","bug"]}'
+            '{"number":12,"title":"retired and forbidden","body":"","labels":["category:runtime","type:fix","bug","priority:high"]}' \
+            '{"number":13,"title":"design amendment","body":"Amend DESIGN.md to add the rule","labels":[]}' \
+            '{"number":15,"title":"extra one","body":"","labels":[]}' \
+            '{"number":16,"title":"extra two","body":"","labels":[]}'
         fi ;;
-      repos/opencharly/repo1/pulls*) : ;;
-      repos/opencharly/repo2/issues*) : ;;
+      repos/opencharly/repo1/pulls*)
+        if [[ -f "$S/quota_pulls" ]]; then echo 'API rate limit exceeded' >&2; exit 1; fi
+        : ;;
+      repos/opencharly/repo2/issues*)
+        if [[ -f "$S/quota" ]]; then echo 'API rate limit exceeded' >&2; exit 1; fi
+        : ;;
       repos/opencharly/repo2/pulls*) : ;;
       *) echo "unexpected api: $url" >&2; exit 1 ;;
     esac
@@ -124,6 +134,7 @@ capture audit --repo repo1 --strict
 grep -q 'FINDING opencharly/repo1#10 missing=1' <<<"$OUT" || fail "missing type must be a finding: $OUT"
 grep -q 'FINDING opencharly/repo1#11 missing=0 multi=1' <<<"$OUT" || fail "two categories must be a finding: $OUT"
 grep -q 'FINDING opencharly/repo1#12 .*unknown=bug' <<<"$OUT" || fail "a retired label must be a finding: $OUT"
+grep -q 'FINDING opencharly/repo1#12 .*forbidden=priority:high' <<<"$OUT" || fail "a forbidden prefix must be a finding: $OUT"
 echo "ok   audit finds missing, multi-value and unknown labels"
 
 # 6. audit --apply maps ONLY the form answer and never guesses.
@@ -133,6 +144,37 @@ grep -q 'issue edit 10 -R opencharly/repo1 --add-label type:fix' "$STATE/calls" 
 ! grep -q 'issue edit 11' "$STATE/calls" || fail "a multi-value axis must never be auto-picked"
 ! grep -q 'issue edit 12' "$STATE/calls" || fail "a complete axis must not be re-applied"
 echo "ok   audit --apply maps the form answer only"
+
+# 6b. classify + apply round-trip (the TSV path).
+capture classify --repo repo1 --out "$STATE/class.tsv"
+[[ $RC -eq 0 ]] || fail "classify must succeed: $OUT"
+grep -q $'repo1\t13\tcategory:runtime\ttype:design' "$STATE/class.tsv" || fail "classify must resolve the DESIGN amendment from the issue text"
+: > "$STATE/calls"
+capture apply --from "$STATE/class.tsv"
+[[ $RC -eq 0 ]] || fail "apply from classify must succeed: $OUT"
+grep -q 'issue edit 13 -R opencharly/repo1 --add-label category:runtime --add-label type:design' "$STATE/calls" || fail "the classified row must be applied"
+echo "ok   classify + apply round-trip from the issue text"
+
+# 6c. the retire gate ignores retired labels; a real finding still reds it.
+: > "$STATE/clean_issues"
+capture audit --repo repo1 --strict
+[[ $RC -ne 0 ]] || fail "a retired label is a normal-audit finding"
+capture audit --repo repo1 --strict --ignore-retired
+[[ $RC -eq 0 ]] || fail "audit --ignore-retired must clear a retired-only finding: $OUT"
+capture retire --repo repo1 --after-backfill --dry-run
+[[ $RC -eq 0 ]] || fail "retire --after-backfill must proceed when only retired labels remain: $OUT"
+grep -q 'PLAN DELETE repo1 bug' <<<"$OUT" || fail "the clean retirement must plan the retired label"
+rm -f "$STATE/clean_issues"
+echo "ok   the retire gate ignores retired labels but keeps real findings"
+
+# 6d. classify stops on a quota refusal and prints the retry set.
+: > "$STATE/quota"
+capture classify --repo repo1,repo2
+[[ $RC -ne 0 ]] || fail "classify must exit non-zero on a quota refusal"
+grep -q 'API RATE LIMITED' <<<"$OUT" || fail "classify must name the quota class: $OUT"
+grep -q 'NOT EVALUATED' <<<"$OUT" || fail "classify must print the unevaluated set: $OUT"
+rm -f "$STATE/quota"
+echo "ok   classify stops on a quota refusal and prints the retry set"
 
 # 7. apply reads a reviewed TSV, skips ?, and validates the closed set.
 cat > "$STATE/apply.tsv" <<'TSV'
@@ -168,6 +210,20 @@ capture sample --from "$STATE/from.txt" --record --set R --revision vtest
 jq -e '.rounds[-1].set == "R" and .rounds[-1].revision == "vtest" and (.rounds[-1].issues | length) == 2' "$STATE/repo/labels/cold-reader-used.json" >/dev/null || fail "sample --from must record the tested round"
 echo "ok   sample --from records the tested fixture exactly"
 
+# 8c. sample dies when it cannot satisfy --n.
+capture sample --n 5 --out "$STATE/short.txt"
+[[ $RC -ne 0 ]] || fail "sample must die when it cannot draw --n"
+grep -q 'cannot draw 5' <<<"$OUT" || fail "the short draw must be named: $OUT"
+echo "ok   sample dies when it cannot satisfy --n"
+
+# 8d. sample stops on a quota refusal.
+: > "$STATE/quota"
+capture sample --n 2 --out "$STATE/sampleq.txt"
+[[ $RC -ne 0 ]] || fail "sample must exit non-zero on a quota refusal"
+grep -q 'API RATE LIMITED' <<<"$OUT" || fail "sample must name the quota class: $OUT"
+rm -f "$STATE/quota"
+echo "ok   sample stops on a quota refusal"
+
 # 9. retire --dry-run lists a retired label and deletes nothing.
 : > "$STATE/calls"
 capture retire --repo repo1 --dry-run
@@ -175,6 +231,22 @@ capture retire --repo repo1 --dry-run
 grep -q 'PLAN DELETE repo1 bug' <<<"$OUT" || fail "a present retired label must be planned"
 ! grep -q 'label delete' "$STATE/calls" || fail "retire --dry-run must not delete"
 echo "ok   retire --dry-run lists retired labels and deletes nothing"
+
+# 9b. retire stops on a quota refusal.
+: > "$STATE/quota"
+capture retire --repo repo1,repo2 --dry-run
+[[ $RC -ne 0 ]] || fail "retire must exit non-zero on a quota refusal"
+grep -q 'API RATE LIMITED' <<<"$OUT" || fail "retire must name the quota class: $OUT"
+rm -f "$STATE/quota"
+echo "ok   retire stops on a quota refusal"
+
+# 9c. audit --close-pass stops when the merged-PR read is refused.
+: > "$STATE/quota_pulls"
+capture audit --repo repo1 --close-pass
+[[ $RC -ne 0 ]] || fail "audit --close-pass must exit non-zero on a quota refusal"
+grep -q 'API RATE LIMITED' <<<"$OUT" || fail "the close-pass quota must be named: $OUT"
+rm -f "$STATE/quota_pulls"
+echo "ok   audit --close-pass stops on a quota refusal"
 
 # 10. render emits the four required fields and both closed sets.
 capture render --out "$STATE/issue.yml"
@@ -204,4 +276,4 @@ grep -q 'category: runtime' <<<"$OUT" || fail "the repo name must not change the
 grep -q 'type:     design' <<<"$OUT" || fail "the repo name must not change the type"
 echo "ok   genericity: the same body in an arbitrary repo gets the same category"
 
-echo "PASS: the label taxonomy tool syncs, audits, applies, samples, records the tested fixture, retires, renders, verifies close, names the quota/permission classes, and classifies by the issue text alone (never the repo name)"
+echo "PASS: the label taxonomy tool syncs, audits (forbidden prefixes + the retired gate), classifies and applies, samples (tested-fixture recording + --n), retires, renders, verifies close, handles the quota/permission classes in every verb, and classifies by the issue text alone (never the repo name)"

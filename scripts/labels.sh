@@ -74,6 +74,20 @@ gh_call() {
   return "$__cls"
 }
 
+# handle_api_class <verb> <repo> <rc> — the ONE quota/permission/absent policy for
+# every read and write. 4 = quota (the caller stops and prints the retry set);
+# 5 = permission (abort with the required permission); 3 = absent; 1 = other.
+# The cause is named ONCE; the caller owns the bookkeeping.
+handle_api_class() {
+  local verb="$1" repo="$2" rc="$3"
+  case "$rc" in
+    4) warn "API RATE LIMITED at $repo — every later repo is NOT evaluated"; return 4 ;;
+    5) die "$verb: permission denied at $repo — the token needs issues: write" ;;
+    3) warn "$verb: absent: $repo"; return 3 ;;
+    *) warn "$verb: request failed: $repo"; return 1 ;;
+  esac
+}
+
 # split_item <owner/repo#N> — sets ITEM_REPO and ITEM_NUM.
 split_item() {
   local raw="${1:-}"
@@ -271,7 +285,7 @@ cmd_sync() {
 # audit — report missing/multi/forbidden/unknown labels; optionally map form answers.
 # ---------------------------------------------------------------------------
 cmd_audit() {
-  local state=open apply=0 strict=0 json=0 close_pass=0 allow="" repo rc out out2 line
+  local state=open apply=0 strict=0 json=0 close_pass=0 ignore_retired=0 allow="" repo rc out out2 line cls
   local number title body l
   local issues=0 findings=0 missing=0 multi=0 forbidden=0 unknown_n=0 applied=0 failed=0
   while (($#)); do
@@ -284,6 +298,7 @@ cmd_audit() {
       --strict) strict=1 ;;
       --json) json=1 ;;
       --close-pass) close_pass=1 ;;
+      --ignore-retired) ignore_retired=1 ;;
       *) die "audit: unknown flag '$1'" ;;
     esac
     shift
@@ -295,6 +310,8 @@ cmd_audit() {
   local -a L_UNEVAL=()
   local spec_all; spec_all="$(spec_names)"
   local forb; forb="$(forbidden_values)"
+  local forb_prefixes; forb_prefixes="$(jq -r '.forbidden_prefixes[]' "$SPEC")"
+  local retired_names; retired_names="$(jq -r '.retired[].name' "$SPEC")"
   while IFS= read -r repo; do
     [[ -z "$repo" ]] && continue
     if [[ $RATE_LIMITED -eq 1 ]]; then L_UNEVAL+=("$repo"); continue; fi
@@ -316,11 +333,22 @@ cmd_audit() {
       local -a cats=() types=() unknown=() bad=()
       while IFS= read -r l; do
         [[ -z "$l" ]] && continue
+        local pref hit=0
+        while IFS= read -r pref; do
+          [[ -z "$pref" ]] && continue
+          if [[ "$l" == "$pref"* ]]; then hit=1; break; fi
+        done <<<"$forb_prefixes"
+        if [[ $hit -eq 1 ]]; then bad+=("$l"); continue; fi
         if printf '%s\n' "$forb" | grep -qxF "$l"; then bad+=("$l"); continue; fi
         case "$l" in
           category:*) cats+=("$l") ;;
           type:*) types+=("$l") ;;
-          *) if ! printf '%s\n' "$spec_all" | grep -qxF "$l"; then unknown+=("$l"); fi ;;
+          *)
+            if printf '%s\n' "$retired_names" | grep -qxF "$l"; then
+              [[ $ignore_retired -eq 1 ]] || unknown+=("$l")
+            elif ! printf '%s\n' "$spec_all" | grep -qxF "$l"; then
+              unknown+=("$l")
+            fi ;;
         esac
       done < <(jq -r '.labels[]?' <<<"$line")
       if [[ $apply -eq 1 ]]; then
@@ -375,21 +403,31 @@ cmd_audit() {
     done <<<"$out"
   done <<<"$rows"
   if [[ $close_pass -eq 1 ]]; then
-    local merged
+    local merged cutoff vrc
     while IFS= read -r repo; do
       [[ -z "$repo" ]] && continue
+      if [[ $RATE_LIMITED -eq 1 ]]; then L_UNEVAL+=("$repo"); continue; fi
       gh_call merged api --paginate "repos/$ORG/$repo/pulls?state=closed&sort=updated&direction=desc&per_page=100" \
-        --jq '.[] | select(.merged_at != null) | [.number, .merged_at, .title, .body] | @tsv' || continue
-      local cutoff; cutoff="$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ)"
+        --jq '.[] | select(.merged_at != null) | [.number, .merged_at, .title, .body] | @tsv'; rc=$?
+      if [[ $rc -ne 0 ]]; then
+        handle_api_class audit "$repo" "$rc"; cls=$?
+        [[ $cls -eq 4 ]] && { RATE_LIMITED=1; L_UNEVAL+=("$repo"); break; }
+        continue
+      fi
+      cutoff="$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ)"
       while IFS=$'\t' read -r pnum pmerged ptitle pbody; do
         [[ -z "$pnum" || "$pmerged" < "$cutoff" ]] && continue
         while IFS= read -r closes; do
           [[ -z "$closes" ]] && continue
           local inum="${closes##*#}"
-          if ! verify_close_one "$ORG/$repo#$pnum" "$ORG/$repo#$inum"; then
-            findings=$((findings + 1))
-            [[ $json -eq 1 ]] && jq -cn --arg pr "$ORG/$repo#$pnum" --arg issue "$ORG/$repo#$inum" '{repo:($pr|split("#")[0]), pr:($pr|split("#")[1]|tonumber), issue:($issue|split("#")[1]|tonumber), kind:"close-mismatch"}'
-          fi
+          verify_close_one "$ORG/$repo#$pnum" "$ORG/$repo#$inum"; vrc=$?
+          case $vrc in
+            0) ;;
+            4) RATE_LIMITED=1; L_UNEVAL+=("$repo"); break 2 ;;
+            *)
+              findings=$((findings + 1))
+              [[ $json -eq 1 ]] && jq -cn --arg pr "$ORG/$repo#$pnum" --arg issue "$ORG/$repo#$inum" '{repo:($pr|split("#")[0]), pr:($pr|split("#")[1]|tonumber), issue:($issue|split("#")[1]|tonumber), kind:"close-mismatch"}' ;;
+          esac
         done < <(grep -oiE '(closes|fixes|resolves)[[:space:]]+#[0-9]+' <<<"$pbody" | grep -oE '#[0-9]+' | tr -d '#')
       done <<<"$merged"
     done <<<"$rows"
@@ -405,7 +443,7 @@ cmd_audit() {
 # classify — propose category/type per open issue, with evidence. Never applies.
 # ---------------------------------------------------------------------------
 cmd_classify() {
-  local state=open allow="" out_file="-" repo rc out line number title body
+  local state=open allow="" out_file="-" repo rc out line number title body cls
   while (($#)); do
     case "$1" in
       --org) ;;
@@ -421,32 +459,42 @@ cmd_classify() {
   local tmp; tmp="$(mktemp)"
   printf 'repo\tissue\tcategory\ttype\tconfidence\tevidence\ttitle\n' > "$tmp"
   local RATE_LIMITED=0
+  local -a L_UNEVAL=()
   while IFS= read -r repo; do
     [[ -z "$repo" ]] && continue
-    if [[ $RATE_LIMITED -eq 1 ]]; then continue; fi
+    if [[ $RATE_LIMITED -eq 1 ]]; then L_UNEVAL+=("$repo"); continue; fi
     gh_call out api --paginate "repos/$ORG/$repo/issues?state=$state&per_page=100" \
       --jq '.[] | select(.pull_request == null) | {number, title, body} | @json'
     rc=$?
-    case $rc in
-      0) ;;
-      4) RATE_LIMITED=1; warn "API RATE LIMITED at $repo — later repos NOT evaluated"; continue ;;
-      5) die "classify: permission denied at $repo" ;;
-      *) warn "issues unreadable: $repo"; continue ;;
-    esac
+    if [[ $rc -ne 0 ]]; then
+      handle_api_class classify "$repo" "$rc"; cls=$?
+      case $cls in
+        4) RATE_LIMITED=1; L_UNEVAL+=("$repo"); continue ;;
+        *) continue ;;
+      esac
+    fi
     while IFS= read -r line; do
       [[ -z "$line" ]] && continue
       number="$(jq -r '.number' <<<"$line")"
       title="$(jq -r '.title' <<<"$line")"
       body="$(jq -r '.body // ""' <<<"$line")"
-      local paths cat typ conf ev p
+      local paths cat typ conf ev p cat_lab typ_lab
       paths="$(extract_paths "$body")"
       cat="$(propose_category "$body")"
       typ="$(propose_type "$body" "$paths")"
+      cat_lab="$cat"; [[ "$cat" != "?" ]] && cat_lab="category:$cat"
+      typ_lab="$typ"; [[ "$typ" != "?" ]] && typ_lab="type:$typ"
       ev="paths=$(printf '%s' "$paths" | tr '\n' ',' | sed 's/,$//'); actions=$(action_hits "$body" | tr '\n' ',' | sed 's/,$//')"
       if [[ "$cat" != "?" && "$typ" != "?" ]]; then conf=high; elif [[ "$cat" != "?" || "$typ" != "?" ]]; then conf=medium; else conf=low; fi
-      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$repo" "$number" "$cat" "$typ" "$conf" "$ev" "$title" >> "$tmp"
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$repo" "$number" "$cat_lab" "$typ_lab" "$conf" "$ev" "$title" >> "$tmp"
     done <<<"$out"
   done <<<"$rows"
+  if [[ ${#L_UNEVAL[@]} -gt 0 ]]; then
+    rm -f "$tmp"
+    say "classify: NOT EVALUATED (${#L_UNEVAL[@]}): ${L_UNEVAL[*]}"
+    say "  retry with : LABELS_REPOS=\"${L_UNEVAL[*]}\" bash scripts/labels.sh classify --state $state"
+    exit 1
+  fi
   if [[ "$out_file" == "-" ]]; then cat "$tmp"; else cp "$tmp" "$out_file"; say "classify: wrote $out_file"; fi
   rm -f "$tmp"
 }
@@ -494,7 +542,7 @@ cmd_apply() {
 # retire — snapshot, then delete the retired labels (after the backfill).
 # ---------------------------------------------------------------------------
 cmd_retire() {
-  local allow="" after=0 snapshot="${TMPDIR:-/tmp}/opencharly-labels-retired-snapshot.tsv" dry=0 repo rc out name repl reason
+  local allow="" after=0 snapshot="${TMPDIR:-/tmp}/opencharly-labels-retired-snapshot.tsv" dry=0 repo rc out name repl reason cls
   local deleted=0 absent=0 failed=0 carries=0
   while (($#)); do
     case "$1" in
@@ -509,21 +557,22 @@ cmd_retire() {
     shift
   done
   if [[ $after -eq 1 ]]; then
-    if ! ( cmd_audit --org --state open --strict ) >/dev/null 2>&1; then
+    if ! ( cmd_audit --org --state open --strict --ignore-retired ) >/dev/null 2>&1; then
       die "retire: audit still reports findings — finish the backfill (no fallback label exists)"
     fi
   fi
   local rows; rows="$(active_repos "$allow")" || die "retire: repo discovery failed"
   printf 'repo\tname\tcolor\tdescription\n' > "$snapshot"
   local RATE_LIMITED=0
+  local -a L_UNEVAL=()
   while IFS= read -r repo; do
     [[ -z "$repo" ]] && continue
-    if [[ $RATE_LIMITED -eq 1 ]]; then continue; fi
+    if [[ $RATE_LIMITED -eq 1 ]]; then L_UNEVAL+=("$repo"); continue; fi
     gh_call out api --paginate "repos/$ORG/$repo/labels?per_page=100" --jq '.[] | [.name, .color, .description] | @tsv'
     rc=$?
     case $rc in
       0) ;;
-      4) RATE_LIMITED=1; warn "API RATE LIMITED at $repo — later repos NOT evaluated"; continue ;;
+      4) RATE_LIMITED=1; L_UNEVAL+=("$repo"); warn "API RATE LIMITED at $repo — later repos NOT evaluated"; continue ;;
       5) die "retire: permission denied at $repo — the token needs issues: write" ;;
       *) failed=$((failed + 1)); warn "labels unreadable: $repo"; continue ;;
     esac
@@ -533,8 +582,18 @@ cmd_retire() {
     while IFS=$'\t' read -r name repl reason; do
       [[ -z "$name" ]] && continue
       if ! printf '%s\n' "$out" | cut -f1 | grep -qxF "$name"; then absent=$((absent + 1)); continue; fi
-      local count; count="$(gh_call cnt issue list -R "$ORG/$repo" --label "$name" --state open --limit 1000 --json number --jq 'length' 2>/dev/null)"; rc=$?
-      if [[ $rc -eq 0 && -n "$count" ]]; then carries=$((carries + count)); fi
+      local count=""
+      gh_call cnt issue list -R "$ORG/$repo" --label "$name" --state open --limit 1000 --json number --jq 'length' 2>/dev/null; rc=$?
+      if [[ $rc -ne 0 ]]; then
+        handle_api_class retire "$repo" "$rc"; cls=$?
+        case $cls in
+          4) RATE_LIMITED=1; L_UNEVAL+=("$repo"); break 2 ;;
+          *) count=0 ;;
+        esac
+      else
+        count="$cnt"
+      fi
+      if [[ -n "$count" ]]; then carries=$((carries + count)); fi
       if [[ $dry -eq 1 ]]; then
         say "PLAN DELETE $repo $name (open issues carrying it: ${count:-?})"
       else
@@ -543,13 +602,14 @@ cmd_retire() {
           0) deleted=$((deleted + 1)) ;;
           3) absent=$((absent + 1)) ;;
           5) die "retire: permission denied deleting $name in $repo — the token needs issues: write" ;;
-          4) RATE_LIMITED=1; warn "API RATE LIMITED deleting $name in $repo"; break ;;
+          4) RATE_LIMITED=1; L_UNEVAL+=("$repo"); warn "API RATE LIMITED deleting $name in $repo"; break ;;
           *) failed=$((failed + 1)); warn "delete failed: $repo $name" ;;
         esac
       fi
     done < <(retired_tsv)
   done <<<"$rows"
   say "retire: mode=$([[ $dry -eq 1 ]] && echo plan || echo apply) deleted=$deleted absent=$absent open_carriers=$carries failed=$failed snapshot=$snapshot"
+  [[ ${#L_UNEVAL[@]} -gt 0 ]] && { say "  NOT EVALUATED (${#L_UNEVAL[@]}): ${L_UNEVAL[*]}"; say "  retry with : LABELS_REPOS=\"${L_UNEVAL[*]}\" bash scripts/labels.sh retire --dry-run"; exit 1; }
   [[ $failed -eq 0 ]] || exit 1
 }
 
@@ -619,11 +679,21 @@ verify_close_one() {
   local pr_item="$1" issue_item="$2" pr_repo pr_num is_repo is_num
   split_item "$pr_item"; pr_repo="$ITEM_REPO"; pr_num="$ITEM_NUM"
   split_item "$issue_item"; is_repo="$ITEM_REPO"; is_num="$ITEM_NUM"
-  local pr issue
+  local pr issue rc cls
   gh_call pr pr view "$pr_num" -R "$ORG/$pr_repo" --json title,body,files \
-    --jq '{title, body, files: [.files[].path]}' || { warn "PR unreadable: $pr_item"; return 1; }
+    --jq '{title, body, files: [.files[].path]}'; rc=$?
+  if [[ $rc -ne 0 ]]; then
+    handle_api_class audit "$pr_repo" "$rc"; cls=$?
+    [[ $cls -eq 4 ]] && return 4
+    return 1
+  fi
   gh_call issue issue view "$is_num" -R "$ORG/$is_repo" --json title,body,labels \
-    --jq '{title, body, labels: [.labels[].name]}' || { warn "issue unreadable: $issue_item"; return 1; }
+    --jq '{title, body, labels: [.labels[].name]}'; rc=$?
+  if [[ $rc -ne 0 ]]; then
+    handle_api_class audit "$is_repo" "$rc"; cls=$?
+    [[ $cls -eq 4 ]] && return 4
+    return 1
+  fi
   local icat itype ititle ptitle
   icat="$(jq -r '[.labels[] | select(startswith("category:"))] | if length == 1 then .[0] else "" end' <<<"$issue")"
   itype="$(jq -r '[.labels[] | select(startswith("type:"))] | if length == 1 then .[0] else "" end' <<<"$issue")"
@@ -717,13 +787,18 @@ cmd_sample() {
     return 0
   fi
   local rows; rows="$(active_repos "")" || die "sample: repo discovery failed"
-  local repo rc out ids
+  local repo rc out ids cls
   declare -A groups=()
   local -a order=()
   while IFS= read -r repo; do
     [[ -z "$repo" ]] && continue
     gh_call ids api --paginate "repos/$ORG/$repo/issues?state=open&per_page=100" \
-      --jq '.[] | select(.pull_request == null) | .number' || continue
+      --jq '.[] | select(.pull_request == null) | .number'; rc=$?
+    if [[ $rc -ne 0 ]]; then
+      handle_api_class sample "$repo" "$rc"; cls=$?
+      if [[ $cls -eq 4 ]]; then rm -f "$used_tmp"; die "sample: API RATE LIMITED at $repo — retry after the quota resets"; fi
+      continue
+    fi
     while IFS= read -r inum; do
       [[ -z "$inum" ]] && continue
       local id="$ORG/$repo#$inum"
@@ -744,13 +819,20 @@ cmd_sample() {
   done
   [[ ${#selected[@]} -gt 0 ]] || die "sample: no unused open issues left"
   selected=("${selected[@]:0:$n}")
+  [[ ${#selected[@]} -ge $n ]] || die "sample: cannot draw $n unused issues (got ${#selected[@]})"
   local fixture; fixture="$(mktemp)"
   local item
   for item in "${selected[@]}"; do
     split_item "$item"
     printf '=== %s/%s#%s\n' "$ORG" "$ITEM_REPO" "$ITEM_NUM" >> "$fixture"
     gh_call one issue view "$ITEM_NUM" -R "$ORG/$ITEM_REPO" --json number,title,body,url \
-      --jq '"TITLE: \(.title)\nURL: \(.url)\nBODY: \(.body[0:1400])"' || die "sample: cannot read $item"
+      --jq '"TITLE: \(.title)\nURL: \(.url)\nBODY: \(.body[0:1400])"'; rc=$?
+    if [[ $rc -ne 0 ]]; then
+      handle_api_class sample "$ITEM_REPO" "$rc"; cls=$?
+      rm -f "$fixture" "$used_tmp"
+      [[ $cls -eq 4 ]] && die "sample: API RATE LIMITED at $ITEM_REPO — retry after the quota resets"
+      die "sample: cannot read $item"
+    fi
     printf '%s\n\n' "$one" >> "$fixture"
   done
   if [[ -n "$out" ]]; then cp "$fixture" "$out"; say "sample: wrote $out (${#selected[@]} issues)"; else cat "$fixture"; fi

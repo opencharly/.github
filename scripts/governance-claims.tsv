@@ -166,3 +166,4 @@ issue_label_taxonomy	machine spec	dotgithub/labels/taxonomy.json	require	categor
 issue_label_taxonomy	generic rules	dotgithub/labels/category-rules.json	require	action_keywords
 issue_label_taxonomy	sync tool	dotgithub/scripts/labels.sh	require	labels.sh sync
 issue_label_taxonomy	user overview	dotgithub/README.md	require	Issue-label taxonomy
+issue_label_taxonomy	issue form	dotgithub/.github/ISSUE_TEMPLATE/issue.yml	require	Category

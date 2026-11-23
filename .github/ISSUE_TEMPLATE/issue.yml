@@ -1,0 +1,51 @@
+name: Issue
+description: File an org-wide issue with exactly one category and one type.
+title: "[issue] "
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Every issue carries exactly one category and one type. There is no fallback: if the evidence does not decide, improve the issue or split it.
+  - type: dropdown
+    id: category
+    attributes:
+      label: Category
+      description: The work category; exactly one.
+      options:
+        - category:runtime
+        - category:delivery
+        - category:verification
+        - category:experience
+        - category:governance
+        - category:hygiene
+    validations:
+      required: true
+  - type: dropdown
+    id: type
+    attributes:
+      label: Type
+      description: The remedy class; exactly one.
+      options:
+        - type:fix
+        - type:feat
+        - type:design
+        - type:spec
+        - type:docs
+        - type:chore
+    validations:
+      required: true
+  - type: textarea
+    id: remedy
+    attributes:
+      label: Remedy / files the remedy will touch
+      description: The primary action and the paths; the classifier uses these.
+    validations:
+      required: true
+  - type: input
+    id: cited
+    attributes:
+      label: Cited DESIGN D-id or AGENTS.md rule (or none)
+      description: For a violation, name the D-id or rule; otherwise write none.
+    validations:
+      required: true

@@ -26,7 +26,9 @@ Canonical files:
   `type:` per issue, no fallback value. The rules are generic (no repository names,
   no repo→category defaults); a new repository inherits via bootstrap/label-sync.
   The sync/audit/classify/apply/retire/render/verify-close/sample/explain verbs live
-  in the ONE script; its offline mock-`gh` test is `scripts/labels-test.sh`.
+  in the ONE script; its offline mock-`gh` test is `scripts/labels-test.sh`. The
+  org-default issue form is `.github/ISSUE_TEMPLATE/issue.yml` (four required fields;
+  no static labels).
 - `.github/workflows/label-sync.yml` + `label-audit.yml` — provision the labels
   (dry-run by default) and report missing/multi-value/forbidden/unknown labels
   daily (report-only until the backfill). The canonical label tests live in the
