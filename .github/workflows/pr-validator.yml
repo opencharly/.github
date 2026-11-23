@@ -1612,13 +1612,23 @@ jobs:
     runs-on: ${{ vars.REVIEW_RUNNER_LABEL || 'ubuntu-latest' }}
     timeout-minutes: 75
     steps:
-      - name: "Head check-runs (wait for the head to settle, then fail on any check that did not pass)"
+      - name: "Head check-runs (wait for the head to settle, then REPORT any check that did not pass)"
         id: head-checks
         # Its OWN wall clock: the wait below is bounded, this is the backstop should the
         # API hang rather than answer. The wait's BUDGET is DERIVED from this backstop
         # (below) — and scripts/head-settle_test.sh proves the two agree, so a second,
         # independently hard-coded budget can never drift away from it again.
         timeout-minutes: 70
+        # THIS STEP'S FAILURE MUST NOT BE A CHECK RUN THAT FAILS (opencharly/.github#313).
+        # `arm` is a NON-required check, and GitHub's mergeability counts EVERY run on the
+        # head: once `arm` has a COMPLETED FAILURE, the pull request stays `unstable`, and
+        # `enablePullRequestAutoMerge` is refused forever — the job poisons the condition it
+        # waits on (the POISON class this repo already documents for the REQUIRED context in
+        # scripts/check-stalled-automerge.sh shape 3, one level down). So a class that is not
+        # a finding about the change (2 IN-FLIGHT, 3 UNREAD, 4 EMPTY) is reported through the
+        # annotations below AND a PR comment, and the step still exits 0 for the JOB. The
+        # enable step is gated on `green` instead of on the job's status.
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ needs.validate.outputs.head_sha }}
@@ -1717,6 +1727,8 @@ jobs:
           while :; do
             if ! snap="$(snapshot)"; then
               echo "::error title=The head could not be read::could not read the check runs for ${HEAD_SHA} — refusing to arm auto-merge on an unread head"
+              echo "green=false" >> "$GITHUB_OUTPUT"
+              echo "class=3" >> "$GITHUB_OUTPUT"
               exit 3
             fi
             npending="$(jq -r '.pending | length' <<<"$snap")"
@@ -1769,6 +1781,8 @@ jobs:
             echo "::error::Re-run ONLY this job. It has no dependent jobs, so the review is NOT re-run and the verdict cannot change:"
             echo "::error::  gh run view ${GITHUB_RUN_ID} --repo ${GITHUB_REPOSITORY} --json jobs --jq '.jobs[] | select(.name==\"arm\") | .databaseId'"
             echo "::error::  gh run rerun --job <that databaseId> --repo ${GITHUB_REPOSITORY}"
+            echo "green=false" >> "$GITHUB_OUTPUT"
+            echo "class=4" >> "$GITHUB_OUTPUT"
             exit 4
           fi
 
@@ -1776,6 +1790,8 @@ jobs:
           if [ "$nbad" -ne 0 ]; then
             while IFS= read -r line; do echo "::error title=A check on this head did not pass::${line}"; done < <(jq -r '.bad[]' <<<"$snap")
             echo "::error title=A check on this head did not pass::${nbad} check(s) on this head did not pass. Auto-merge is NOT armed — fix them and push."
+            echo "green=false" >> "$GITHUB_OUTPUT"
+            echo "class=1" >> "$GITHUB_OUTPUT"
             exit 1
           fi
 
@@ -1785,14 +1801,27 @@ jobs:
             echo "::error::Re-run ONLY this job. It has no dependent jobs, so the review is NOT re-run and the verdict cannot change (GitHub REST: 'Re-run a job and its dependent jobs'):"
             echo "::error::  gh run view ${GITHUB_RUN_ID} --repo ${GITHUB_REPOSITORY} --json jobs --jq '.jobs[] | select(.name==\"arm\") | .databaseId'"
             echo "::error::  gh run rerun --job <that databaseId> --repo ${GITHUB_REPOSITORY}"
+            echo "green=false" >> "$GITHUB_OUTPUT"
+            echo "class=2" >> "$GITHUB_OUTPUT"
             exit 2
           fi
 
+          echo "green=true" >> "$GITHUB_OUTPUT"
+          echo "class=0" >> "$GITHUB_OUTPUT"
           echo "all $(jq -r '.total' <<<"$snap") check run(s) on this head passed — safe to arm auto-merge"
 
       # A PASS must arm native auto-merge and verify the live postcondition.
-      # Arming errors fail this required check; no retries, branch mutation, or manual-merge fallback.
+      # An arming FAILURE is reported by "Report an unarmed head" below, and this job stays
+      # GREEN — because a FAILED `validate / arm` run is what makes the PR permanently
+      # `unstable` and blocks every later arming attempt (opencharly/.github#313). No
+      # retries, branch mutation, or manual-merge fallback.
       - name: Enable auto-merge
+        id: enable
+        # Same class as the step above: an enable failure (head moved, auth, a persistent
+        # "unstable") must be REPORTED, not left as a failing non-required check run that
+        # blocks every later attempt (opencharly/.github#313).
+        if: steps.head-checks.outputs.green == 'true'
+        continue-on-error: true
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0, node24
         env:
           PR_NUMBER: ${{ inputs.pr-number }}
@@ -1879,3 +1908,56 @@ jobs:
               throw new Error('native squash auto-merge was not armed');
             }
             core.info(`Native squash auto-merge verified: PR #${variables.number}, head ${after.headRefOid}, state ${after.state}`);
+
+      # A NON-GREEN HEAD IS REPORTED HERE, AND NOWHERE ELSE (opencharly/.github#313).
+      # `continue-on-error` on the two steps above keeps this job's check run GREEN even when it
+      # did not arm — which is the point (a failing non-required check run poisons mergeability
+      # forever), but it also means the check run can no longer be the alarm. This comment is.
+      # It updates ONE marker comment instead of appending a new one per attempt, so a retried
+      # job does not spam the PR, and it names the class and the remedy the annotations carry.
+      - name: Report an unarmed head
+        if: always() && (steps.head-checks.outcome == 'failure' || steps.enable.outcome == 'failure')
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0, node24
+        env:
+          PR_NUMBER: ${{ inputs.pr-number }}
+          ARM_CLASS: ${{ steps.head-checks.outputs.class }}
+          ENABLE_OUTCOME: ${{ steps.enable.outcome }}
+          REVIEWED_HEAD: ${{ needs.validate.outputs.head_sha }}
+        with:
+          script: |
+            const marker = '<!-- arm-unarmed-report -->';
+            const cls = process.env.ARM_CLASS || '';
+            const remedies = {
+              '0': 'the head was green but `Enable auto-merge` did not complete — see that step\'s log.',
+              '1': 'at least one check run on this head did not pass. Fix it and push; auto-merge arms on the next PASS.',
+              '2': 'at least one check on this head was STILL IN FLIGHT when the wait budget ran out. Re-run the `arm` job only (`gh run rerun --job <id>`): it has no dependent jobs, so the review is not re-run and the verdict cannot change.',
+              '3': 'the head could not be READ (no `HEAD_SHA`, or the API did not answer). This is NOT a finding about the change. Re-run the `arm` job only (`gh run rerun --job <id>`).',
+              '4': 'the API returned ZERO check runs for this head — an unjudgeable head, NOT a green one. Re-run the `arm` job only (`gh run rerun --job <id>`).',
+            };
+            const why = remedies[cls] || (process.env.ENABLE_OUTCOME === 'failure'
+              ? '`Enable auto-merge` failed — see that step\'s log.'
+              : 'this head was not armed — see the `arm` job log.');
+            const body = [
+              marker,
+              `**Auto-merge was NOT armed** for head \`${process.env.REVIEWED_HEAD || '(unknown head)'}\`.`,
+              '',
+              `Class: \`${cls || 'n/a'}\` — ${why}`,
+              '',
+              'This is reported as a comment because a failing `validate / arm` check run would make the',
+              'pull request permanently `unstable` and block every later arming attempt',
+              '(opencharly/.github#313). The `arm` job therefore reports success and this comment is its alarm.',
+              '',
+              '_Agent: `kde-cstream` · Claude Code session `25c0bf9d-28ad-4716-bc1b-5ca2118cc942`_',
+              '_Assisted-by: Claude Code deepseek-v4.1-flash (analysed on a live system)_',
+            ].join('\n');
+            const { owner, repo } = context.repo;
+            const issue_number = Number(process.env.PR_NUMBER);
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number, per_page: 100 });
+            const existing = comments.find((c) => (c.body || '').includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+              core.info(`updated the unarmed-head report (comment ${existing.id})`);
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+              core.info('posted the unarmed-head report');
+            }
