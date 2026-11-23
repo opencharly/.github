@@ -10,7 +10,7 @@
 #
 # Usage:
 #   bash scripts/labels.sh sync       [--org] [--repo <name>]... [--repos "<a b>"] [--dry-run]
-#   bash scripts/labels.sh audit      [--org] [--repo ...] [--state open|closed|all] [--apply]
+#   bash scripts/labels.sh audit      [--org] [--repo ...] [--state open|closed|all] [--issue <owner/repo#N>] [--apply]
 #                                     [--strict] [--json] [--close-pass]
 #   bash scripts/labels.sh classify   [--org] [--repo ...] [--state open] [--out FILE]
 #   bash scripts/labels.sh apply      --from FILE [--dry-run]
@@ -60,7 +60,7 @@ validate_spec() {
 }
 
 # gh_call <outvar> <gh args...> — run gh, capture stdout; return 0 on success, else the
-# api_error_class (3 = absent, 4 = quota, 5 = permission, 1 = other). The class names the
+# api_error_class (2 = issues disabled, 3 = absent, 4 = quota, 5 = permission, 1 = other). The class names the
 # cause once; every verb owns its bookkeeping.
 gh_call() {
   local __outvar="$1"; shift
@@ -76,14 +76,16 @@ gh_call() {
 
 # handle_api_class <verb> <repo> <rc> — the ONE quota/permission/absent policy for
 # every read and write. 4 = quota (the caller stops and prints the retry set);
-# 5 = permission (abort with the required permission); 3 = absent; 1 = other.
-# The cause is named ONCE; the caller owns the bookkeeping.
+# 5 = permission (abort with the required permission); 3 = absent; 2 = the repo has
+# GitHub issues DISABLED (a property, not a failure — the caller treats it as "no
+# issues"); 1 = other. The cause is named ONCE; the caller owns the bookkeeping.
 handle_api_class() {
   local verb="$1" repo="$2" rc="$3"
   case "$rc" in
     4) warn "API RATE LIMITED at $repo — every later repo is NOT evaluated"; return 4 ;;
     5) die "$verb: permission denied at $repo — the token needs issues: write" ;;
     3) warn "$verb: absent: $repo"; return 3 ;;
+    2) return 2 ;;  # the caller names it once; it is a property, not a failure
     *) warn "$verb: request failed: $repo"; return 1 ;;
   esac
 }
@@ -290,6 +292,7 @@ cmd_sync() {
 cmd_audit() {
   local state=open apply=0 strict=0 json=0 close_pass=0 ignore_retired=0 allow="" repo rc out out2 line cls
   local number title body l
+  local only_item="" only_repo="" only_num=""
   local issues=0 findings=0 missing=0 multi=0 forbidden=0 unknown_n=0 applied=0 failed=0
   while (($#)); do
     case "$1" in
@@ -297,6 +300,7 @@ cmd_audit() {
       --repo)  shift; allow+=" ${1:-}" ;;
       --repos) shift; allow+=" ${1:-}" ;;
       --state) shift; state="${1:-open}" ;;
+      --issue) shift; only_item="${1:?audit: --issue needs owner/repo#N}" ;;
       --apply) apply=1 ;;
       --strict) strict=1 ;;
       --json) json=1 ;;
@@ -309,6 +313,12 @@ cmd_audit() {
   [[ "$state" =~ ^(open|closed|all)$ ]] || die "audit: --state must be open|closed|all"
   local rows
   rows="$(active_repos "$allow")" || die "audit: repo discovery failed"
+  if [[ -n "$only_item" ]]; then
+    split_item "$only_item"
+    only_repo="$ITEM_REPO"; only_num="$ITEM_NUM"; state=all
+    rows="$(printf '%s\n' "$rows" | grep -Fx "$only_repo" || true)"
+    [[ -n "$rows" ]] || die "audit: --issue repo '$only_repo' is not an active repo"
+  fi
   local RATE_LIMITED=0
   local -a L_UNEVAL=()
   local spec_all; spec_all="$(spec_names)"
@@ -329,8 +339,9 @@ cmd_audit() {
     esac
     while IFS= read -r line; do
       [[ -z "$line" ]] && continue
-      issues=$((issues + 1))
       number="$(jq -r '.number' <<<"$line")"
+      [[ -n "$only_num" && "$number" != "$only_num" ]] && continue
+      issues=$((issues + 1))
       title="$(jq -r '.title' <<<"$line")"
       body="$(jq -r '.body // ""' <<<"$line")"
       local -a cats=() types=() unknown=() bad=()
@@ -582,6 +593,7 @@ cmd_retire() {
     while IFS=$'\t' read -r name color desc; do
       printf '%s\t%s\t%s\t%s\n' "$repo" "$name" "$color" "$desc" >> "$snapshot"
     done <<<"$out"
+    local issues_disabled_noted=0
     while IFS=$'\t' read -r name repl reason; do
       [[ -z "$name" ]] && continue
       if ! awk -F'\t' -v n="$name" '$1 == n { found=1 } END { exit !found }' <<<"$out"; then absent=$((absent + 1)); continue; fi
@@ -591,6 +603,7 @@ cmd_retire() {
         handle_api_class retire "$repo" "$rc"; cls=$?
         case $cls in
           4) RATE_LIMITED=1; L_UNEVAL+=("$repo"); break 2 ;;
+          2) count=0; if [[ $issues_disabled_noted -eq 0 ]]; then say "retire: $repo has issues disabled — carrier counts are 0"; issues_disabled_noted=1; fi ;;
           *) count=0 ;;
         esac
       else

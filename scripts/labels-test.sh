@@ -41,6 +41,7 @@ case "$cmd" in
       repos/opencharly/repo2/labels*)
         if [[ -f "$S/quota" ]]; then echo 'API rate limit exceeded' >&2; exit 1; fi
         if [[ -f "$S/perm" ]]; then echo 'Resource not accessible by integration' >&2; exit 1; fi
+        if [[ -f "$S/issues_disabled" ]]; then printf 'bug\td73a4a\tdefault\n'; fi
         : ;;
       repos/opencharly/repo1/issues*)
         if [[ -f "$S/clean_issues" ]]; then
@@ -75,7 +76,12 @@ case "$cmd" in
     record "issue $*"
     case "${1:-}" in
       edit) [[ -f "$S/edit_fail" ]] && exit 1; exit 0 ;;
-      list) printf '1\n'; exit 0 ;;
+      list)
+        if [[ -f "$S/issues_disabled" ]]; then
+          echo "the 'opencharly/repo2' repository has disabled issues" >&2
+          exit 1
+        fi
+        printf '1\n'; exit 0 ;;
       view)
         if [[ "$*" == *"TITLE:"* ]]; then printf 'TITLE: t\nURL: u\nBODY: b\n'
         else printf '{"title":"t","body":"Amend DESIGN.md to add the rule","labels":["category:runtime","type:fix"]}\n'; fi
@@ -144,6 +150,33 @@ grep -q 'issue edit 10 -R opencharly/repo1 --add-label type:fix' "$STATE/calls" 
 ! grep -q 'issue edit 11' "$STATE/calls" || fail "a multi-value axis must never be auto-picked"
 ! grep -q 'issue edit 12' "$STATE/calls" || fail "a complete axis must not be re-applied"
 echo "ok   audit --apply maps the form answer only"
+
+# 6e. audit --issue scopes to ONE issue and applies only ITS form answer.
+: > "$STATE/calls"
+capture audit --issue opencharly/repo1#10 --apply
+[[ $RC -eq 0 ]] || fail "audit --issue must succeed: $OUT"
+grep -q 'issue edit 10 -R opencharly/repo1 --add-label type:fix' "$STATE/calls" || fail "audit --issue must apply the issue's form answer"
+! grep -q 'issue edit 13' "$STATE/calls" || fail "audit --issue must not touch another issue"
+[[ "$(grep -c 'issue edit ' "$STATE/calls")" -eq 1 ]] || fail "audit --issue must apply exactly one label"
+: > "$STATE/calls"
+capture audit --issue opencharly/repo1#15 --apply
+[[ $RC -eq 0 ]] || fail "audit --issue on a form-less issue must still succeed: $OUT"
+! grep -q 'issue edit ' "$STATE/calls" || fail "audit --issue must never invent a form answer"
+grep -q 'FINDING opencharly/repo1#15 missing=2' <<<"$OUT" || fail "audit --issue must report the missing axes"
+capture audit --issue nope
+[[ $RC -ne 0 ]] || fail "a malformed --issue must die"
+echo "ok   audit --issue scopes to one issue and applies only its form answer"
+
+# 6f. a repo with GitHub issues disabled is a PROPERTY, not a request failure.
+: > "$STATE/issues_disabled"; : > "$STATE/calls"
+capture retire --repo repo2 --dry-run
+[[ $RC -eq 0 ]] || fail "retire must not fail on an issues-disabled repo: $OUT"
+grep -q 'has issues disabled' <<<"$OUT" || fail "the issues-disabled state must be NAMED: $OUT"
+[[ "$(grep -c 'has issues disabled' <<<"$OUT")" -eq 1 ]] || fail "it must be named ONCE per repo"
+! grep -q 'request failed' <<<"$OUT" || fail "an issues-disabled repo must never be 'request failed'"
+grep -q 'PLAN DELETE repo2 bug' <<<"$OUT" || fail "the deletion plan must still be produced"
+rm -f "$STATE/issues_disabled"
+echo "ok   an issues-disabled repo is a named property, not a request failure"
 
 # 6b. classify + apply round-trip (the TSV path).
 capture classify --repo repo1 --out "$STATE/class.tsv"

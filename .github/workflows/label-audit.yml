@@ -4,11 +4,19 @@ name: label-audit
 # default: it applies a form answer only when the org variable LABELS_AUDIT_APPLY
 # is true, and it reds the run only when LABELS_AUDIT_STRICT is true. There is no
 # fallback label — a missing or split axis is reported, never guessed.
+#
+# TWO SCOPES, ONE PARSER:
+#   * an `issues` event (opened/edited/reopened) audits THAT issue only, applying
+#     its form answer at creation time (the rulebook's "set at creation through
+#     the org issue form") — a single-repo read, never the whole org;
+#   * the schedule / a dispatch runs the full-org audit, the daily backstop.
 
 on:
   schedule:
     - cron: '17 6 * * *'
   workflow_dispatch:
+  issues:
+    types: [opened, edited, reopened]
 
 permissions:
   contents: read
@@ -34,8 +42,22 @@ jobs:
           APPLY: ${{ vars.LABELS_AUDIT_APPLY }}
           STRICT: ${{ vars.LABELS_AUDIT_STRICT }}
           CLOSE_PASS: ${{ vars.LABELS_AUDIT_CLOSE_PASS }}
+          EVENT_NAME: ${{ github.event_name }}
+          ISSUE_REPO: ${{ github.repository }}
+          ISSUE_NUM: ${{ github.event.issue.number }}
         run: |
           set -euo pipefail
+          if [ "${EVENT_NAME}" = "issues" ]; then
+            # One issue, the same parser, the same APPLY policy. This scope is never
+            # strict — a form-less issue is the daily audit's finding, not a reason to
+            # red an unrelated event. NOTE: the org ruleset activates its required
+            # workflow on pull_request events only, so this trigger fires in THIS
+            # repository; org-wide the daily audit below is the applier.
+            single=(audit --issue "${ISSUE_REPO}#${ISSUE_NUM}")
+            if [ "${APPLY:-false}" = "true" ]; then single+=(--apply); fi
+            bash scripts/labels.sh "${single[@]}"
+            exit 0
+          fi
           args=(audit --org --state open)
           if [ "${APPLY:-false}" = "true" ]; then args+=(--apply); fi
           if [ "${STRICT:-false}" = "true" ]; then args+=(--strict); fi
