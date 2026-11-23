@@ -189,6 +189,11 @@ grep -q 'issue edit 10 -R opencharly/repo1 --add-label category:runtime --add-la
 ! grep -q 'issue edit 11' "$STATE/calls" || fail "apply must skip ?"
 echo "ok   apply adds reviewed labels and skips under-specified rows"
 
+# 7b. the closed-set validation has no pipefail/SIGPIPE race.
+grep -q 'grep -qxF "\$value" <<<"\$(spec_axis_names "\$axis")"' "$STATE/repo/scripts/labels.sh" || fail "valid_axis_value must use a here-string"
+! grep -q "printf .*| grep -q" "$STATE/repo/scripts/labels.sh" || fail "a printf|grep -q pipeline remains (SIGPIPE/pipefail race)"
+echo "ok   the closed-set validation has no SIGPIPE/pipefail race"
+
 # 8. sample excludes used ids, records the round, and never reuses a set.
 capture sample --n 2 --out "$STATE/sample.txt" --record --set T --revision v18
 [[ $RC -eq 0 ]] || fail "sample must succeed: $OUT"
