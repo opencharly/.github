@@ -142,7 +142,7 @@ jobs:
               // CHANGELOG: create if missing (idempotent — independent of tag)
               try {
                 await github.rest.repos.getContent({
-                  ...repo, path: changelogPath, ref: 'main',
+                  ...repo, path: changelogPath, ref: pr.base.ref,
                 });
                 core.info(`${changelogPath} already exists — skipping`);
                 return;
@@ -174,7 +174,7 @@ jobs:
                   body: JSON.stringify({
                     message: `docs: add CHANGELOG ${calver} for PR #${pr.number}`,
                     content: b64,
-                    branch: 'main',
+                    branch: pr.base.ref,
                   }),
                 });
                 if (!res.ok) {

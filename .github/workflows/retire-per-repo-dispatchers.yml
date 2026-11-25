@@ -22,10 +22,21 @@
 # RUN ORDER (one time): dispatch this workflow FIRST, then run
 # `scripts/org-ruleset.sh apply` (it refuses while any dispatcher survives), then
 # `scripts/org-ruleset.sh verify`. Idempotent: already-absent files are skipped.
+#
+# SCOPE=forks is the fork half of the same cutover: org ruleset B requires the org required
+# workflow in every fork, so a surviving fork `pr-validator.yml` is a duplicate producer.
+# The fork's default branch may be `stable`/`master`; the script targets THAT branch.
 name: retire-per-repo-dispatchers
 
 on:
   workflow_dispatch:
+    inputs:
+      scope:
+        description: "targets (active non-fork repos) or forks"
+        required: true
+        type: choice
+        options: [targets, forks]
+        default: targets
 
 permissions:
   contents: write
@@ -47,4 +58,5 @@ jobs:
       - name: Retire the per-repo dispatchers (org-wide)
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
+          SCOPE: ${{ inputs.scope }}
         run: bash scripts/retire-per-repo-dispatchers.sh

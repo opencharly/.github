@@ -25,7 +25,14 @@ set -euo pipefail
 # PERMISSION error (the token cannot write workflow files) and aborts immediately with
 # the remediation, never a per-repo churn.
 #
-# usage: GH_TOKEN=<app with contents:write + workflows:write> $0
+# usage: GH_TOKEN=<app with contents:write + workflows:write> SCOPE=targets|forks $0
+#
+# SCOPE=forks is the SECOND call site. A FORK must not carry a `pr-validator.yml`
+# either: org ruleset B requires the org required workflow, so a surviving fork copy is a
+# DUPLICATE PRODUCER of `validate / validate` (the same #38 hazard). The fork's default
+# branch may be `stable`/`master`, so the deletion targets THAT branch, not `main`. The
+# default scope stays `discover_repos` — widening it would delete the installed fork
+# callers and re-create the deadlock.
 
 readonly MAX_FAILURES="${RETIRE_MAX_FAILURES:-20}"
 
@@ -35,12 +42,27 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib-org.sh"
 command -v gh >/dev/null
 [[ -n "${GH_TOKEN:-}" ]] || { echo "GH_TOKEN is required (the bypass-actor App/PAT)" >&2; exit 1; }
 
-repos_out="$(discover_repos)" || { echo "FATAL: gh repo list (targets) failed" >&2; exit 1; }
-[[ -n "$repos_out" ]] || { echo "no active repositories discovered for $ORG" >&2; exit 1; }
-mapfile -t repos <<<"$repos_out"
+SCOPE="${SCOPE:-targets}"
+case "$SCOPE" in
+  targets|forks) ;;
+  *) echo "SCOPE must be targets|forks" >&2; exit 2 ;;
+esac
+
+# Rows are `<name>\t<default>`: the default branch is where the file lives and the branch
+# the App must write. Targets are `main` by definition; a fork may keep stable/master.
+if [[ "$SCOPE" == forks ]]; then
+  rows="$(discover_forks)" || { echo "FATAL: gh repo list (forks) failed" >&2; exit 1; }
+  [[ -n "$rows" ]] || { echo "no active forks discovered — nothing to retire"; exit 0; }
+else
+  names="$(discover_repos)" || { echo "FATAL: gh repo list (targets) failed" >&2; exit 1; }
+  [[ -n "$names" ]] || { echo "no active repositories discovered for $ORG" >&2; exit 1; }
+  rows="$(printf '%s\n' "$names" | awk 'NF { print $0 "\tmain" }')"
+fi
 
 deleted=0 skipped=0 failed=0
-for repo in "${repos[@]}"; do
+while IFS=$'\t' read -r repo default; do
+  [[ -z "$repo" ]] && continue
+  default="${default:-main}"
   path="$(dispatcher_path_for "$repo")"
   code="$(api_status "repos/$ORG/$repo/contents/$path")"
   case "$code" in
@@ -55,8 +77,8 @@ for repo in "${repos[@]}"; do
   # the same repo as BOTH retired and failed.
   if resp="$(gh api --method DELETE "repos/$ORG/$repo/contents/$path" \
       -f message="chore: retire the per-repo validator dispatcher (org-wide required workflow)" \
-      -f sha="$sha" -f branch=main --jq '.commit.sha' 2>&1)"; then
-    echo "$repo: retired $path"; deleted=$((deleted+1))
+      -f sha="$sha" -f branch="$default" --jq '.commit.sha' 2>&1)"; then
+    echo "$repo: retired $path (on $default)"; deleted=$((deleted+1))
   else
     if [[ "$resp" == *"Resource not accessible by integration"* ]]; then
       echo "FATAL: the token cannot write workflow files (403 on $repo)." >&2
@@ -67,6 +89,6 @@ for repo in "${repos[@]}"; do
     echo "ERROR: $repo deleteFile failed: $resp" >&2; failed=$((failed+1))
     [[ "$failed" -gt "$MAX_FAILURES" ]] && { echo "too many failures — aborting" >&2; exit 1; }
   fi
-done
-echo "retired=$deleted absent=$skipped failed=$failed"
+done <<<"$rows"
+echo "scope=$SCOPE retired=$deleted absent=$skipped failed=$failed"
 [[ "$failed" == 0 ]]

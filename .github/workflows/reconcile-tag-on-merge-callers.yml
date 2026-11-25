@@ -27,11 +27,22 @@
 # canonical and their post-merge job has landed on the fleet, dispatch `mode=apply` with an
 # empty `repos` for the rest. The script stops on the first read-back mismatch, so a broken
 # sweep cannot continue silently.
+#
+# SCOPE=forks is the fork half: an ABSENT fork caller IS installed (the operator decision,
+# opencharly/.github#320), on the fork's DEFAULT branch (`stable`/`master` included), and a
+# copy that pins the reusable to a SHA keeps that policy with the CURRENT opencharly/.github
+# `main` SHA, read at run time. The targets scope keeps "absent is reported, never installed".
 name: reconcile-tag-on-merge-callers
 
 on:
   workflow_dispatch:
     inputs:
+      scope:
+        description: "targets (non-fork) or forks. The forks scope INSTALLS an absent caller."
+        required: true
+        type: choice
+        options: [targets, forks]
+        default: targets
       mode:
         description: "verify (read-only) or apply (write the canonical caller)"
         required: true
@@ -66,6 +77,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
           RECONCILE_REPOS: ${{ inputs.repos }}
+          SCOPE: ${{ inputs.scope }}
         run: |
           set -o pipefail
           if [[ "${{ inputs.mode }}" == "apply" ]]; then

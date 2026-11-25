@@ -15,15 +15,18 @@ copy inherits the files here — so a change lands **once**, not in every repo.
   sync/audit/classify/apply/retire/render/verify-close/sample/explain tooling and
   its offline mock-`gh` test `scripts/labels-test.sh`.
 - **`scripts/org-ruleset.sh`** — the SINGLE organization-wide owner of BOTH the
-  required `validate / validate` check AND main-branch protection. On GitHub Team
-  it creates ONE org ruleset carrying the `workflows` rule (pointing at this repo's
-  required workflow) *and* the ordinary branch rules (required status check, no
-  force-push, no deletion, no creation), applied to every active non-fork
-  `main`-default repo. It also enforces the two settings that cannot move to the org
-  (`allow_auto_merge` and `delete_branch_on_merge`, per-repo settings with no org
-  default). `apply` enables the org ruleset, deletes the now-redundant per-repo
-  rulesets, and enforces both settings; `verify` asserts the whole end state. Its
-  offline mock-`gh` test is `scripts/org-ruleset_test.sh`.
+  required `validate / validate` check AND branch protection. On GitHub Team it
+  creates **two org rulesets from ONE payload builder**, with identical rules: the
+  first targets every active non-fork `main`-default repo, the second the active
+  **forks** on their default branch (`~DEFAULT_BRANCH`, so `stable`/`master` are
+  covered). Both carry the `workflows` rule (pointing at this repo's required
+  workflow) *and* the ordinary branch rules (strict required status check, no
+  force-push, no deletion, no creation). It also enforces the settings that cannot
+  move to the org (`allow_auto_merge`, `delete_branch_on_merge`, per-repo settings
+  with no org default). `apply` enables both rulesets, deletes the redundant
+  per-repo rulesets, and enforces the settings; `verify` asserts the whole end
+  state, including the fork set. Its offline mock-`gh` test is
+  `scripts/org-ruleset_test.sh`.
 - **`scripts/retire-per-repo-dispatchers.sh`** +
   **`.github/workflows/retire-per-repo-dispatchers.yml`** — the one-shot cutover
   step that DELETES each repo's redundant `.github/workflows/pr-validator.yml`
@@ -233,17 +236,16 @@ carries the ruleset while every pre-existing fork does not, and `gh pr merge` re
 `Required status check "validate / validate" is expected`). The predicate is checked by the `same_repo_gate` row in
 `scripts/governance-claims.tsv`.
 
-**Consequence for a new fork repo.** Forks are **excluded from the ORG-WIDE
-ruleset by design** (`discover_excludes` filters on `isFork == true`), so that
-ruleset gives them no required check and the org validator does not gate their
-same-repo PRs automatically. A fork can still carry its own repo-scoped ruleset
-that requires the same org workflow (`crabbox` does) or land on its own CI
-(`openclaw-enterprise` does); exclusion is not a prohibition on merging. The hazard is a fork
-created *after* the last `scripts/org-ruleset.sh apply`: it is absent from the stale
-exclude list, so the ruleset's `~ALL`-minus-exclude scope still lists it and its
-same-repo PRs get the REQUIRED check. With the retired predicate that check was never
-produced (deadlock); with this predicate it runs and the PR merges on PASS. The next
-`apply` re-derives the exclude set and drops the fork back out of the ruleset target.
+**First-party forks are gated too.** A second org ruleset (same payload builder, same
+rules including the `workflows` rule) targets the active forks on `~DEFAULT_BRANCH`, so a
+fork's `validate / validate` is produced by the ORG's required workflow — **no per-fork
+validator caller is copied**. The fork's ONLY per-repo file is the tag-on-merge caller,
+installed and reconciled by this repo. Because the `workflows` rule blocks a direct push,
+a **user-token `gh repo sync` fails**; mirror sync runs through
+`.github/workflows/sync-forks.yml` with the charly-auto-merge App token (the ruleset
+bypass actor). A fork created after the last `apply` is absent from the fork ruleset's
+include list, and `verify` fails naming it until the next `apply`. The onboarding
+checklist is in `/charly-internals:repo-setup`.
 
 ## New repos: bootstrap the initial `main`
 
@@ -277,9 +279,10 @@ final step uses the operator's admin token.
 
 ## Setting up a new repository — what is automatic, what you add
 
-The org ruleset targets every **active, non-fork, `main`-default** repo
-(`discover_repos` in `scripts/lib-org.sh`), so most of the gate is inherited with
-**nothing copied into the repo**:
+The org targets every **active non-fork `main`-default** repo with ruleset A
+(`discover_repos` in `scripts/lib-org.sh`) and every active **fork** with ruleset B
+(`discover_forks`), so most of the gate is inherited with **nothing copied into the
+repo**:
 
 | Concern | Automatic (the org / this repo) | The repo must add |
 |---|---|---|
@@ -290,6 +293,7 @@ The org ruleset targets every **active, non-fork, `main`-default** repo
 | CalVer tag + `CHANGELOG/<CalVer>.md` | The org reusable `tag-on-merge.yml`. | **`.github/workflows/tag-on-merge.yml`** — the per-repo caller (fires on `workflow_run` of `charly/pr-validator` + `push` to `main`) |
 | Candy/box manifest validation (`candy / validate`) | The org reusable `candy-validate.yml` (clones charly at `vars.CHARLY_VERSION`; skips repos with no `charly.yml`). No per-repo file. | nothing (an optional thin caller if a repo wants the check to run outside the org path) |
 | The repo's own build/deploy CI (a real gate) | — | the repo's `.github/workflows/` (e.g. `deploy.yml` where it is NOT the hand-rolled candy stub) |
+| **Fork**: the same `validate / validate` and branch rules | Ruleset B for the active forks (`~DEFAULT_BRANCH`), the SAME required workflow. **No per-fork validator caller.** | **only** `.github/workflows/tag-on-merge.yml`, installed by this repo's `scope=forks` reconcile; sync from upstream with `sync-forks.yml` |
 
 **Checklist for a brand-new repo:**
 
@@ -304,30 +308,21 @@ The org ruleset targets every **active, non-fork, `main`-default** repo
 4. Land the first change via a PR; the org validator is the gate (never a direct push).
 5. Add it to the umbrella as a submodule and bump the pin via `charly task sync` + PR.
 
-**Excluded by design** — excluded from the ORG-WIDE AUTOMATIC coverage only: the
-org attaches no required check and mints no CalVer tag for the repo. Exclusion
-itself is not a prohibition on landing, but the four categories below are not
-interchangeable: ONLY the first is a landing target; the other three are not.
+**Excluded by design** — excluded from the ORG-WIDE AUTOMATIC coverage only.
+Exclusion itself is not a prohibition on landing, but these categories are NOT landing
+targets:
 
-- **forks under development** — `gst-wayland-display` (default `stable`),
-  `crabbox`, `openclaw-enterprise`. They run their own checks: `crabbox`
-  carries a repo-scoped ruleset requiring the SAME
-  `org-wide-pr-validator-required.yml`; `gst-wayland-display` carries rules on
-  `stable` including `validate / validate`; `openclaw-enterprise` has zero
-  branch rules, so no branch check is ENFORCED — its PRs run its own
-  `.github/workflows/ci.yml` and merge on that CI signal;
-- **vendored upstreams on a non-`main` default** — `pixelflux` → `av1`: a
-  vendored upstream, not a landing target;
-- **artifact-branch sinks** — `omarchy-eval-artifacts` → `runs`: a branch that
-  receives published output, not a landing target;
-- **archived repos** — `pi-review-action`: read-only, so GitHub rejects pushes
-  and new PRs.
+- **archived repos** — `pi-review-action`: read-only, so GitHub rejects pushes and new PRs;
+- **vendored upstreams on a non-`main` default** — `pixelflux` → `av1`: consumed as a pin,
+  not landed against;
+- **artifact-branch sinks** — `omarchy-eval-artifacts` → `runs`: a branch that receives
+  published output, not a landing target;
+- **archived forks** — `org-ruleset.sh verify` names any it finds; they receive no gate
+  because GitHub rejects pushes and new PRs.
 
-A repo in this set is not tagged by the org, so a CalVer tag you find there was
-minted out-of-band (`gst-wayland-display` has three). A repo that should have the
-ORG-WIDE coverage must become non-fork / active / `main`-default; a LIVE repo in
-this set that only needs to land changes can keep its own checks instead — an
-explicit choice, not a defect.
+A first-party **fork is not in this set**: it is gated by ruleset B and, if it should mint
+CalVer, carries the tag-on-merge caller this repo installs. A repo that should have the
+full ORG-WIDE coverage must be active and, for ruleset A, default to `main`.
 
 **Measured gap.** `layer-nerdctl` and `plugin-nerdctl` were created with **no `.github`
 directory at all** (so no `tag-on-merge.yml` caller): they validate via the org ruleset,
@@ -507,21 +502,31 @@ run put every `ubuntu-latest` job on hosted runners while the fleet stayed idle.
 forks and repos with those literal labels need the per-workflow edit to the variable idiom;
 nothing on the runner side can redirect them.
 
-## First-party forks: the standard validator caller
+## First-party forks: the same gate, no copied caller
 
-The org ruleset excludes forks, deliberately: while it targets a fork, its
-required-workflow rule makes `gh repo sync` fail (`opencharly/.github#179`). A first-party
-fork therefore carries ONE small caller instead of joining the ruleset. Use
-[`templates/fork-pr-validator.yml`](templates/fork-pr-validator.yml) verbatim (pin the
-`uses:` ref to a commit SHA if the fork's own pin policy requires it), so every fork's
-entry point is identical and the engine stays in this repository.
+A fork is gated by the SAME org mechanism as every other repo: ruleset B
+(`scripts/org-ruleset.sh`) targets the active forks on `~DEFAULT_BRANCH` and carries the
+`workflows` rule naming this repo's required workflow, so `validate / validate` is produced
+by the org's own workflow. **No `pr-validator.yml` is copied into a fork.** A surviving one
+is a duplicate producer; `scripts/retire-per-repo-dispatchers.sh` (`SCOPE=forks`) deletes it.
+
+The one per-fork file is the tag-on-merge caller: GitHub has no org-level post-merge
+mechanism, so `.github/workflows/tag-on-merge.yml` is installed and kept canonical by
+`scripts/reconcile-tag-on-merge-callers.sh` (`SCOPE=forks`) — which also INSTALLS it where
+absent, and preserves a repo's SHA-pin policy with the current `opencharly/.github` sha.
+
+Because the `workflows` rule blocks direct pushes, a user-token `gh repo sync` fails on a
+gated fork. Sync through `.github/workflows/sync-forks.yml`, which uses the charly-auto-merge
+App token — the ruleset's bypass actor. It never forces; a conflict is reported.
 
 ## The org-wide required workflow (ONE config, no per-repo copy)
 
 Branch protection AND the required validator used to be applied per repo (a branch
 ruleset + a copied `.github/workflows/pr-validator.yml` dispatcher). On GitHub Team
-they are now ONE organization ruleset (`scripts/org-ruleset.sh`), which carries both
-the `workflows` rule (naming `org-wide-pr-validator-required.yml` here) and the
-branch rules (strict required `validate / validate`, no force-push/deletion/create).
-One-time cutover order: `gh workflow run retire-per-repo-dispatchers.yml`, then
+they are now TWO organization rulesets from ONE payload builder
+(`scripts/org-ruleset.sh`): ruleset A for active non-fork `main`-default repos, ruleset B
+for the active forks on `~DEFAULT_BRANCH`. Both carry the `workflows` rule (naming
+`org-wide-pr-validator-required.yml` here) and the branch rules (strict required
+`validate / validate`, no force-push/deletion/create). Cutover order: retire the per-repo
+validator stubs for `scope=targets` and `scope=forks`, then
 `scripts/org-ruleset.sh apply`, then `scripts/org-ruleset.sh verify`.

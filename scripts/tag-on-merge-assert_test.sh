@@ -61,6 +61,32 @@ decl="$(grep -c '^      SWEEP_WINDOW_HOURS:' "$WF" || true)"
 [ "$decl" -eq 1 ] \
   || fail "SWEEP_WINDOW_HOURS must be declared exactly once as the job's one window literal (found $decl)"
 
+# --- the fork-ref structural guard (cases 9/10) -------------------------------
+# A `stable`/`master` fork must get its CHANGELOG on ITS base branch. A hard-coded
+# `main` mints the tag and writes no CHANGELOG (measured on the non-main forks).
+grep -q 'ref: pr\.base\.ref' "$WF" \
+  || fail "the CHANGELOG existence read must use the merged PR's base ref, not a hard-coded branch"
+grep -q 'branch: pr\.base\.ref' "$WF" \
+  || fail "the CHANGELOG write must use the merged PR's base ref, not a hard-coded branch"
+if grep -qE "ref: 'main'|branch: 'main'" "$WF"; then
+  fail "tag-on-merge still hard-codes 'main' for the CHANGELOG path — a stable/master fork would mint a tag and write no CHANGELOG"
+fi
+
+# The dispatcher's `push` backstop must cover every fork default (main/master/stable);
+# the `workflow_run` path covers validator merges, but a bot/human merge needs this one.
+DISP="$root/.github/workflows/tag-on-merge-dispatcher.yml"
+push_branches="$(awk '
+  /^on:/ { on=1 }
+  on && /^  push:/ { push=1 }
+  push && /^    branches:/ { br=1; next }
+  br && /^      - / { sub(/^      - /, ""); print; next }
+  br && !/^      / { exit }
+' "$DISP")"
+for b in main master stable; do
+  grep -qx -- "$b" <<<"$push_branches" \
+    || fail "the dispatcher's push backstop must include '$b' (got: $(printf '%s ' $push_branches))"
+done
+
 # --- a mock `gh` that APPLIES --jq, like the real one -------------------------
 mkdir -p "$STATE/bin"
 cat >"$STATE/bin/gh" <<'MOCK'
@@ -172,4 +198,4 @@ JSON
 RC=0; run_case c6 "$STATE/p6.json" "$STATE/t1.json" "$STATE/tagobj.json"
 expect_green c6
 
-echo "PASS: tag-on-merge untagged-merge detector (8 properties: 4 green arms, 2 red arms naming the merge, 2 structural)"
+echo "PASS: tag-on-merge untagged-merge detector (10 properties: 4 green arms, 2 red arms naming the merge, 4 structural)"
