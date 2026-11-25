@@ -33,9 +33,23 @@ Canonical files:
   (dry-run by default) and report missing/multi-value/forbidden/unknown labels
   daily (report-only until the backfill). The canonical label tests live in the
   umbrella's `/charly-internals:git-workflow` (`references/issue-labels.md`).
-- `scripts/org-ruleset.sh` — the SINGLE owner of the org ruleset (required check
-  + branch rules) and the per-repo auto-merge settings; `scripts/*_test.sh` are
+- `scripts/org-ruleset.sh` — the SINGLE owner of the TWO org rulesets built by ONE
+  payload builder (A: active non-fork `main`-default repos; B: the active FORKS on
+  `~DEFAULT_BRANCH`, reusing the SAME required workflow so NO per-fork validator
+  caller is copied) and of the per-repo auto-merge settings; `scripts/*_test.sh` are
   its offline mock-`gh` tests.
+- `scripts/retire-per-repo-dispatchers.sh` (`SCOPE=targets|forks`) — deletes the
+  redundant per-repo validator stubs. The fork scope deletes a fork's copy on the
+  fork's DEFAULT branch; the default scope stays `discover_repos`, so widening it
+  would delete the installed fork callers.
+- `scripts/reconcile-tag-on-merge-callers.sh` (`SCOPE=targets|forks`) — brings the
+  tag-on-merge caller to canonical. The fork scope INSTALLS an absent caller (the
+  operator decision, opencharly/.github#320), on the fork's default branch, and a
+  copy that pins the reusable to a SHA keeps that policy with the CURRENT sha.
+- `scripts/sync-forks.sh` + `.github/workflows/sync-forks.yml` — fast-forwards a
+  fork from its upstream with the App token (the ruleset bypass actor), because
+  org ruleset B's `workflows` rule blocks a user-token `gh repo sync` (#179). It
+  never forces; a conflict is reported.
 - `scripts/retired-records.json` — the ORG's table of the mentions of a
   withdrawn name that are NOT carriers (history, a denial, an explanation), each
   with its reason. The retired-sweep arm reads it; a record that covers no hit
@@ -92,7 +106,13 @@ Canonical files:
   sync (dry-run and apply), the quota and permission classes, audit findings, the
   form-answer apply, TSV apply, sample disjointness/record, retire dry-run, render,
   verify-close and the DESIGN-amendment classification.
-- `scripts/org-ruleset.sh verify` asserts the whole org end state.
+- `scripts/org-ruleset.sh verify` asserts the whole org end state, including the
+  fork set (ruleset B's scope, no repo-scoped branch ruleset, the tag caller, and
+  the settings).
+- The fork gate's coverage is `scripts/reconcile-fork-callers_test.sh` (install on
+  the default branch as a birth, untagged; SHA-pin bump; update tagged; the targets
+  scope never installs) and `scripts/sync-forks_test.sh` (fast-forward read-back,
+  merge accepted, conflict reported, allow-list).
 
 ## Modify this repo
 

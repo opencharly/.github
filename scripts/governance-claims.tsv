@@ -167,3 +167,15 @@ issue_label_taxonomy	generic rules	dotgithub/labels/category-rules.json	require	
 issue_label_taxonomy	sync tool	dotgithub/scripts/labels.sh	require	labels.sh sync
 issue_label_taxonomy	user overview	dotgithub/README.md	require	Issue-label taxonomy
 issue_label_taxonomy	issue form	dotgithub/.github/ISSUE_TEMPLATE/issue.yml	require	Category
+two_org_rulesets	owner script	dotgithub/scripts/org-ruleset.sh	require	fork required workflow & main protection
+fork_ruleset_ref	fork ruleset	dotgithub/scripts/org-ruleset.sh	require	~DEFAULT_BRANCH
+fork_ruleset_workflow	fork ruleset reuses the org workflow	dotgithub/scripts/org-ruleset.sh	require	FORK_REFS
+fork_gate_sync	app-token mirror sync	dotgithub/scripts/sync-forks.sh	require	merge-upstream
+fork_gate_sync_workflow	sync workflow	dotgithub/.github/workflows/sync-forks.yml	require	sync-forks
+tag_on_merge_base_ref	reusable workflow read	dotgithub/.github/workflows/tag-on-merge.yml	require	ref: pr\.base\.ref
+tag_on_merge_base_ref	reusable workflow write	dotgithub/.github/workflows/tag-on-merge.yml	require	branch: pr\.base\.ref
+tag_on_merge_base_ref	reusable workflow hardcode	dotgithub/.github/workflows/tag-on-merge.yml	forbid	branch: 'main'
+tag_on_merge_dispatcher_refs	dispatcher push backstop	dotgithub/.github/workflows/tag-on-merge-dispatcher.yml	require	- master
+fork_caller_absent	targets scope policy	dotgithub/scripts/reconcile-tag-on-merge-callers.sh	require	REPORTED, never installed IN THE DEFAULT
+fork_caller_install	forks scope policy	dotgithub/scripts/reconcile-tag-on-merge-callers.sh	require	SCOPE=forks is the ONE scope
+retire_default_scope	retire script default	dotgithub/scripts/retire-per-repo-dispatchers.sh	require	discover_repos

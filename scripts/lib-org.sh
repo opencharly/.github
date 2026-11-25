@@ -85,6 +85,22 @@ discover_excludes() {
   discover_all | awk -F'\t' '$2 == "true" || $3 == "true" || $4 != "main" { print $1 }' | sort
 }
 
+# discover_forks — ACTIVE forks as `<name>\t<default_branch>`, sorted. Forks are the org's
+# first-party vendored upstreams. The fork ruleset (org-ruleset.sh) targets exactly this set,
+# so it is DERIVED, never hand-listed; the default branch travels with the name because a
+# fork may keep upstream's `stable`/`master` as its default. Archived forks are NOT landing
+# targets (GitHub rejects pushes and new PRs), so they are reported by name, never silently
+# dropped.
+discover_forks() {
+  discover_all | awk -F'\t' '$2 == "false" && $3 == "true" { print $1 "\t" $4 }' | sort
+}
+
+# discover_archived_forks — archived forks, by name, so a verify run names them instead of
+# letting them read as "a fork that was skipped".
+discover_archived_forks() {
+  discover_all | awk -F'\t' '$2 == "true" && $3 == "true" { print $1 }' | sort
+}
+
 # discover_membership — the active, non-fork repos as `<name>\t<default_branch>`,
 # the read org-ruleset.sh's membership arm needs. It issues its OWN paged,
 # count-checked fetch: a command substitution cannot memoise, so this read CAN
@@ -280,6 +296,36 @@ calver_at() {
     sdk|spec|plugin-gh) date -u -d "$iso" +'v0.%Y%j.%-H%M' ;;
     *)                  date -u -d "$iso" +'v%Y.%j.%H%M' ;;
   esac
+}
+
+# json_string_list <value>… — a JSON array of strings. EMPTY input yields `[]`, never
+# `[""]`: `mapfile <<<""` yields ONE empty element, and that bug once produced a ruleset
+# targeting a repository named "". ONE builder for every ruleset condition (R2).
+json_string_list() {
+  local out="[" first=1 n
+  for n in "$@"; do
+    [[ -n "$n" ]] || continue
+    [[ $first == 1 ]] || out+=","
+    out+="\"$n\""
+    first=0
+  done
+  printf '%s]' "$out"
+}
+
+# filter_fork_rows <rows> <allow-list> — PURE. Rows are `<name>\t<default>` (the shape
+# discover_forks emits); the allow-list is the same comma/space form select_repos accepts.
+# An empty allow-list passes every row. Shared by the tag-caller reconcile and the fork
+# sync so neither carries its own row filter.
+filter_fork_rows() {
+  local rows="$1" want="$2" n d w out=""
+  [[ -z "${want//[ ,	]/}" ]] && { printf '%s' "$rows"; return 0; }
+  while IFS=$'\t' read -r n d; do
+    [[ -z "$n" ]] && continue
+    for w in ${want//,/ }; do
+      [[ "$n" == "$w" ]] && { out+="$n"$'\t'"$d"$'\n'; break; }
+    done
+  done <<<"$rows"
+  printf '%s' "$out"
 }
 
 # select_repos — PURE. Reads repo names on stdin and prints those the allow-list names.

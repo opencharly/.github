@@ -1,0 +1,40 @@
+# SYNC EVERY FIRST-PARTY FORK FROM ITS UPSTREAM (App token).
+#
+# org ruleset B carries the `workflows` rule in every fork, so its required check is the
+# ORG's workflow (no per-fork copy) — and that rule blocks a USER-token `gh repo sync`
+# (opencharly/.github#179). The `charly-auto-merge` App is the ruleset bypass actor, so the
+# sync runs here, with the App token. The script never forces: a conflict is reported.
+name: sync-forks
+
+on:
+  workflow_dispatch:
+    inputs:
+      repos:
+        description: "Optional allow-list: space- or comma-separated fork names. Empty = every active fork."
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ${{ vars.CI_RUNNER_LABEL || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    steps:
+      - name: Create bot token (charly-auto-merge App)
+        id: app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0, node24
+        with:
+          app-id: ${{ secrets.CHARLY_AUTO_MERGE_APP_ID }}
+          private-key: ${{ secrets.CHARLY_AUTO_MERGE_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7, node24
+
+      - name: Sync the forks from their upstreams
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          SYNC_REPOS: ${{ inputs.repos }}
+        run: bash scripts/sync-forks.sh

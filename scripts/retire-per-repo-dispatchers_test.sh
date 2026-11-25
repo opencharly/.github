@@ -16,8 +16,8 @@ gh() {
   # or lib-org.sh's truncation guard would (correctly) refuse the set.
   if [[ "$1" == api ]]; then
     case "$*" in
-      *"/repos?per_page="*) printf 'alpha\tfalse\tfalse\tmain\nbeta\tfalse\tfalse\tmain\n'; return 0 ;;
-      *"orgs/"*) printf '2\n'; return 0 ;;
+      *"/repos?per_page="*) printf 'alpha\tfalse\tfalse\tmain\nbeta\tfalse\tfalse\tmain\nfork-a\tfalse\ttrue\tstable\n'; return 0 ;;
+      *"orgs/"*) printf '3\n'; return 0 ;;
     esac
   fi
   [[ "$1" == api ]] || return 90
@@ -33,7 +33,7 @@ gh() {
   done
   local path="$1"; shift
 
-  [[ "$path" =~ ^repos/test/(alpha|beta)/contents/ ]] || return 91
+  [[ "$path" =~ ^repos/test/(alpha|beta|fork-a)/contents/ ]] || return 91
   local repo="${BASH_REMATCH[1]}"
   local present=0
   [[ "$(cat "$STATE/disp_$repo" 2>/dev/null)" == present ]] && present=1
@@ -48,8 +48,11 @@ gh() {
     if [[ "${FORCE_DELETE_FAIL:-}" == 1 ]]; then
       printf 'gh: Server Error (HTTP 500)\n'; return 1
     fi
+    # The branch is load-bearing for a fork (stable/master), so record it.
+    local br="" a
+    for a in "$@"; do [[ "$a" == branch=* ]] && br="${a#branch=}"; done
     rm -f "$STATE/disp_$repo"
-    printf 'deleted %s\n' "$repo" >>"$STATE/transcript"
+    printf 'deleted %s %s\n' "$repo" "$br" >>"$STATE/transcript"
     printf 'commit\n'; return 0
   fi
 
@@ -70,7 +73,7 @@ export STATE
 
 # happy path: alpha deleted, beta skipped.
 GH_TOKEN=x OPENCHARLY_ORG=test "$root/scripts/retire-per-repo-dispatchers.sh" >/dev/null
-grep -qx 'deleted alpha' "$STATE/transcript" || { echo "FAIL: alpha dispatcher not deleted" >&2; exit 1; }
+grep -qx 'deleted alpha main' "$STATE/transcript" || { echo "FAIL: alpha dispatcher not deleted" >&2; exit 1; }
 grep -q 'deleted beta' "$STATE/transcript" && { echo "FAIL: beta had no dispatcher — must be skipped" >&2; exit 1; }
 
 # idempotent: a second run deletes nothing (alpha now absent).
@@ -97,4 +100,13 @@ out="$(FORCE_PERM_FAIL=1 GH_TOKEN=x OPENCHARLY_ORG=test "$root/scripts/retire-pe
   echo "FAIL: must abort on a 403 permission error" >&2; exit 1; }
 grep -q "workflows: write" <<<"$out" || { echo "FAIL: 403 abort must name the missing permission" >&2; exit 1; }
 
-echo "retire-per-repo-dispatchers_test: all assertions passed"
+# SCOPE=forks deletes a FORK's copy on the fork's DEFAULT branch (stable), and the
+# default (targets) scope never touches a fork.
+printf 'present\n' >"$STATE/disp_fork-a"; : >"$STATE/transcript"
+GH_TOKEN=x OPENCHARLY_ORG=test "$root/scripts/retire-per-repo-dispatchers.sh" >/dev/null
+grep -q 'deleted fork-a' "$STATE/transcript" && { echo "FAIL: the targets scope must not delete a fork copy" >&2; exit 1; }
+SCOPE=forks GH_TOKEN=x OPENCHARLY_ORG=test "$root/scripts/retire-per-repo-dispatchers.sh" >/dev/null
+grep -qx 'deleted fork-a stable' "$STATE/transcript" \
+  || { echo "FAIL: the fork scope must delete the copy on the fork's default branch (stable)" >&2; exit 1; }
+
+echo "retire-per-repo-dispatchers_test: all assertions passed (targets + forks)"

@@ -31,10 +31,13 @@
 #     #175 measured; an unarmed behind head shows a disabled merge button and is not the silent stall
 #     this script exists for.
 #   * A head carrying NO run of the required context at all is NOT selected. Deciding whether that is
-#     a stall or by design needs the ruleset SCOPE derivation (a fork or an excluded repo receives no
-#     org gate at all: opencharly/.github#179, scripts/lib-org.sh `discover_excludes`), which this
-#     script deliberately does not read. Under-reporting is the honest failure mode here: a detector
-#     that cries wolf on ~16 forks is switched off, and then it detects nothing.
+#     a stall or by design needs the ruleset SCOPE derivation (an archived repo, or a repo outside
+#     both org rulesets, receives no org gate at all: opencharly/.github#179, scripts/lib-org.sh),
+#     which this script deliberately does not read. FIRST-PARTY FORKS ARE NOW IN SCOPE (org ruleset
+#     B, scripts/org-ruleset.sh), so a gated fork's head carries the required context and is judged
+#     like any other repo; the ungated population is archived repos and the declared non-main
+#     defaults. Under-reporting is the honest failure mode here: a detector that cries wolf on an
+#     ungated repo is switched off, and then it detects nothing.
 #
 # Usage:   check-stalled-automerge.sh            scan the org, exit 1 when anything is stalled
 #          check-stalled-automerge.sh --self-test
