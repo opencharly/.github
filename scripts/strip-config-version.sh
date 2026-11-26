@@ -81,7 +81,7 @@ set -euo pipefail
 # committing anything. Pass repo names as arguments to restrict the wave.
 #
 # usage: GH_TOKEN=<app with contents:write> $0 [<repo> ...]
-#        DRY_RUN=1 GH_TOKEN=... $0 layer-charly-hermes pod-wayvnc ...
+#        DRY_RUN=1 GH_TOKEN=... $0 layer-charly-hermes pod-dbus ...
 
 readonly MAX_FAILURES="${STRIP_MAX_FAILURES:-20}"
 readonly COMMIT_MESSAGE="chore(schema): drop the retired config version: stamp (org-wide cutover)"

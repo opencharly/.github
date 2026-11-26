@@ -20,7 +20,7 @@
 # INVOCATION. It is an `on: workflow_call` reusable (no trigger of its own, so it
 # never self-runs). It is called from a caller job named `candy`; with this
 # workflow's job named `validate`, a reusable renders its check as
-# `<caller-job> / <inner-job>` = `candy / validate` (proven live: pod-sway's
+# `<caller-job> / <inner-job>` = `candy / validate` (proven live: a repo's
 # tag-on-merge caller job `tag` + the reusable's inner job `tag-and-changelog`
 # render as `tag / tag-and-changelog`). The retired per-repo stub rendered a bare
 # `build` (its job id), so the candy check's name does change — harmlessly: the org

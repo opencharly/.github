@@ -312,7 +312,7 @@ repo**:
 Exclusion itself is not a prohibition on landing, but these categories are NOT landing
 targets:
 
-- **archived repos** — `pi-review-action`: read-only, so GitHub rejects pushes and new PRs;
+- **archived repos** — `pod-immich-ml`: read-only, so GitHub rejects pushes and new PRs;
 - **vendored upstreams on a non-`main` default** — `pixelflux` → `av1`: consumed as a pin,
   not landed against;
 - **artifact-branch sinks** — `omarchy-eval-artifacts` → `runs`: a branch that receives
